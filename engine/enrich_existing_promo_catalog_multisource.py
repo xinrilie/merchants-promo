@@ -17,6 +17,7 @@ from promo_names import (
     product_name_size_signature, product_name_variant_signature,
     product_name_identity_warnings,
 )
+from promo_product_validation import product_candidate_rejection_reason
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ENGINE_DIR.parent
@@ -33,6 +34,7 @@ OUT_FULL = INTERNAL_DIR / "promo_catalog_multisource_full_audit.csv"
 OUT_REPORT = INTERNAL_DIR / "promo_catalog_multisource_quality_report.json"
 OUT_POSSIBLE_DUPES = INTERNAL_DIR / "promo_possible_duplicate_candidates.csv"
 OUT_XLSX = OUTPUT_DIR / "Katalog_Promo_Final.xlsx"
+OUT_REJECTED_PRODUCTS = INTERNAL_DIR / "promo_product_rows_rejected.csv"
 
 # Reuse the exact parsing/discount logic that is in the revised scraper.
 spec = importlib.util.spec_from_file_location(
@@ -71,6 +73,7 @@ FIELDS = [
     "source_page_url", "source_item_url", "region_or_channel", "scraped_at",
     "duplicate_count", "duplicate_group_id", "cross_dataset_duplicate", "overlapping_offer_count",
     "overlap_period_flag", "price_quality_flag", "data_quality_flags", "retained_from_previous_run", "raw_line",
+    "product_validation_status", "product_rejection_reason",
 ]
 
 
@@ -486,6 +489,20 @@ def load_source(path, source_label):
             ])) or None,
             "raw_line": raw_line or None,
         }
+        validation_context = dict(row)
+        validation_context["source_mode"] = " ".join([
+            source_label,
+            str(row.get("source_name") or ""),
+            str(row.get("source_type") or ""),
+        ])
+        reject_reason = product_candidate_rejection_reason(validation_context, source_mode=validation_context["source_mode"])
+        row["product_validation_status"] = "rejected" if reject_reason else "eligible"
+        row["product_rejection_reason"] = reject_reason
+        if reject_reason:
+            row["data_quality_flags"] = " | ".join(pipe_unique([
+                row.get("data_quality_flags") or "",
+                "excluded_from_catalog:" + reject_reason,
+            ])) or None
         output.append(row)
     return output
 
@@ -1658,7 +1675,11 @@ def main():
     old_rows = load_source(OLD_CSV, OLD_CSV.name)
     new_rows = load_source(NEW_CSV, NEW_CSV.name)
     multisource_rows = load_source(MULTISOURCE_CSV, MULTISOURCE_CSV.name) if MULTISOURCE_CSV.exists() else []
-    input_rows = old_rows + new_rows + multisource_rows
+    all_loaded_rows = old_rows + new_rows + multisource_rows
+    rejected_product_rows = [r for r in all_loaded_rows if r.get("product_validation_status") == "rejected"]
+    input_rows = [r for r in all_loaded_rows if r.get("product_validation_status") != "rejected"]
+    # Fuzzy matching belongs here, after all source outputs are loaded and bad
+    # non-product/article-headline rows are quarantined, but before final export.
     merged_raw = merge_rows(input_rows)
     merged_raw = mark_overlapping_offers(merged_raw)
     consolidated, consolidated_groups, consolidated_rows = consolidate_overlapping_offers(merged_raw)
@@ -1689,6 +1710,7 @@ def main():
     write_clean_rows(OUT_CONFIRMED, confirmed)
     write_clean_rows(OUT_REVIEW, review, review=True)
     write_audit_rows(OUT_FULL, merged_raw)
+    write_audit_rows(OUT_REJECTED_PRODUCTS, rejected_product_rows)
     write_possible_duplicate_csv(OUT_POSSIBLE_DUPES, possible_duplicate_rows)
     write_excel_catalog(OUT_XLSX, current, confirmed, review, name_variant_rows, possible_duplicate_rows)
 
@@ -1698,7 +1720,10 @@ def main():
         "built_at": scraper.timestamp(),
         "reference_date": TODAY.isoformat(),
         "input_files": {OLD_CSV.name: len(old_rows), NEW_CSV.name: len(new_rows), **({MULTISOURCE_CSV.name: len(multisource_rows)} if MULTISOURCE_CSV.exists() else {})},
-        "input_row_count": len(input_rows),
+        "input_row_count": len(all_loaded_rows),
+        "eligible_product_input_rows": len(input_rows),
+        "rejected_non_product_rows": len(rejected_product_rows),
+        "rejected_non_product_reasons": dict(Counter(r.get("product_rejection_reason") or "unknown" for r in rejected_product_rows)),
         "exact_deduplicated_row_count": len(merged_raw),
         "exact_duplicate_rows_collapsed": len(input_rows) - len(merged_raw),
         "overlapping_offer_groups_consolidated": consolidated_groups,
@@ -1726,7 +1751,7 @@ def main():
         "discount_basis_counts_current": dict(discount_basis),
         "merchant_counts_current": dict(merchant_counts),
         "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
-        "internal_audit_files": [OUT_CONFIRMED.relative_to(ROOT_DIR).as_posix(), OUT_REVIEW.relative_to(ROOT_DIR).as_posix(), OUT_FULL.relative_to(ROOT_DIR).as_posix(), OUT_REPORT.relative_to(ROOT_DIR).as_posix()],
+        "internal_audit_files": [OUT_CONFIRMED.relative_to(ROOT_DIR).as_posix(), OUT_REVIEW.relative_to(ROOT_DIR).as_posix(), OUT_FULL.relative_to(ROOT_DIR).as_posix(), OUT_REJECTED_PRODUCTS.relative_to(ROOT_DIR).as_posix(), OUT_REPORT.relative_to(ROOT_DIR).as_posix()],
         "clean_catalog_columns": [label for label, _ in CLEAN_COLUMNS],
         "full_audit_file": OUT_FULL.name,
         "discount_policy": {

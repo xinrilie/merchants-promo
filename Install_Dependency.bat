@@ -5,14 +5,17 @@ chcp 65001 >nul
 set "PYTHON=python"
 where py >nul 2>nul
 if not errorlevel 1 set "PYTHON=py -3"
-echo Memasang dependensi pipeline promo...
+echo =====================================================
+echo INSTALASI DEPENDENSI KATALOG PROMO v7
+echo =====================================================
 %PYTHON% -m pip install -r "%~dp0requirements.txt"
-if errorlevel 1 (
-  echo.
-  echo Instalasi gagal. Pastikan Python dan pip sudah terpasang.
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto :error
 echo.
-echo Dependensi berhasil diperiksa/dipasang.
+echo Dependensi terpasang.
 pause
+exit /b 0
+:error
+echo.
+echo Instalasi gagal. Pastikan Python 3.10+ dan pip telah terpasang.
+pause
+exit /b 1

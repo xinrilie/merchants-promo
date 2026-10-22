@@ -14,41 +14,45 @@ if errorlevel 1 (
 )
 
 echo =====================================================
-echo KATALOG PROMO - PIPELINE RINGKAS V6 - FUZZY + MERCHANT CORROBORATION
-echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com
+echo KATALOG PROMO MULTI-SUMBER - v7
+echo Tahap: parser > validasi produk > fuzzy lintas sumber > final catalog
+echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com + data katalog lama
 echo =====================================================
 echo.
-echo [1/4] Uji normalisasi nama produk...
+echo [1/5] Uji normalisasi nama produk...
 %PYTHON% "%~dp0engine\promo_names.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [2/4] Uji fuzzy matching dan konsolidasi produk lintas sumber...
-%PYTHON% "%~dp0engine\test_duplicate_fixes.py"
+echo [2/5] Uji parser dan guardrails collector...
+%PYTHON% "%~dp0engine\promo_multisource_collector.py" --self-test
 if errorlevel 1 goto :error
 
 echo.
-echo [3/4] Uji parser lalu scraping situs publik...
-%PYTHON% "%~dp0engine\promo_multisource_collector.py" --self-test
+echo [3/5] Uji regresi pipeline, judul artikel, dan fuzzy matching...
+%PYTHON% "%~dp0engine\test_pipeline_v7.py"
 if errorlevel 1 goto :error
+
+echo.
+echo [4/5] Mengambil promo dari situs publik...
 %PYTHON% "%~dp0engine\promo_multisource_collector.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [4/4] Membersihkan data, menggabungkan penawaran identik, dan membuat katalog...
+echo [5/5] Membersihkan data, fuzzy-match lintas sumber, validasi, ekspor...
 %PYTHON% "%~dp0engine\enrich_existing_promo_catalog_multisource.py"
 if errorlevel 1 goto :error
 
 echo.
-echo SELESAI. File utama ada di folder hasil\
-echo Buka: hasil\Katalog_Promo_Final.xlsx
+echo SELESAI. Buka hasil\Katalog_Promo_Final.xlsx
+echo CSV ringkas: hasil\Katalog_Promo_Final.csv
+echo Log/audit: _internal\
 if exist "%~dp0hasil\Katalog_Promo_Final.xlsx" start "" "%~dp0hasil\Katalog_Promo_Final.xlsx"
-echo File mentah dan log teknis ada di _internal\.
 pause
 exit /b 0
 
 :error
 echo.
-echo Pipeline berhenti karena error. Periksa pesan di atas atau log di _internal\ jika ada.
+echo Pipeline berhenti karena error. Baca pesan di atas dan periksa _internal\ untuk log.
 pause
 exit /b 1

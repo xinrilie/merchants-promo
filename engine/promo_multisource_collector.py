@@ -27,6 +27,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from promo_names import clean_product_name, name_variants
+from promo_product_validation import product_candidate_rejection_reason
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ENGINE_DIR.parent
@@ -48,6 +49,8 @@ OUT_REVIEW = INTERNAL_DIR / "promo_multisource_products_review.csv"
 OUT_ARTICLES = INTERNAL_DIR / "promo_multisource_articles.csv"
 OUT_IMAGES = INTERNAL_DIR / "promo_multisource_catalog_images.csv"
 OUT_LOG = INTERNAL_DIR / "promo_multisource_runlog.json"
+OUT_REJECTED_CANDIDATES = INTERNAL_DIR / "promo_multisource_rejected_candidates.csv"
+REJECTED_PRODUCT_CANDIDATES: list[dict] = []
 
 SOURCE_SEEDS = {
     "Hemat.id": [
@@ -727,6 +730,15 @@ def extract_hemat_cards(soup: BeautifulSoup, page_url: str) -> list[dict]:
             meta=metadata, source_url=page_url, source_page_url=page_url,
             source_item_url=item_url, raw_line=anchor_text, source_mode="hemat",
         )
+        rejection_reason = product_candidate_rejection_reason(row, source_mode="hemat_card")
+        if rejection_reason:
+            REJECTED_PRODUCT_CANDIDATES.append({
+                "source_name": "Hemat.id", "campaign_title": title, "source_url": page_url,
+                "source_item_url": item_url, "raw_line": anchor_text,
+                "product_text": row.get("product_text"), "offer_text": offer_text,
+                "rejection_reason": rejection_reason, "scraped_at": now_iso(),
+            })
+            continue
         if not row.get("promo_price") and not row.get("discount_percent") and not row.get("purchase_condition"):
             continue
         key = (normalize(row["product_text"]), normalize(row.get("offer_text")), row.get("promo_price"), row.get("merchant_name"), row.get("valid_until"))
@@ -790,6 +802,14 @@ def extract_article_rows(container, source_name: str, title: str, article_url: s
             source_url=article_url, source_page_url=article_url,
             source_item_url=None, raw_line=line, source_mode="article", published_at=published_at,
         )
+        rejection_reason = product_candidate_rejection_reason(row, source_mode="article")
+        if rejection_reason:
+            REJECTED_PRODUCT_CANDIDATES.append({
+                "source_name": source_name, "campaign_title": title, "source_url": article_url,
+                "source_item_url": None, "raw_line": line, "product_text": row.get("product_text"),
+                "offer_text": offer, "rejection_reason": rejection_reason, "scraped_at": now_iso(),
+            })
+            continue
         if not (row.get("promo_price") is not None or row.get("discount_percent") is not None or row.get("purchase_condition")):
             continue
         key = (normalize(product_name), normalize(offer), row.get("promo_price"), row.get("normal_price"))
@@ -1108,6 +1128,7 @@ def sources_in_row(row: dict) -> set[str]:
 
 
 def run_self_tests() -> None:
+    REJECTED_PRODUCT_CANDIDATES.clear()
     assert parse_idr("129.900") == 129900
     assert parse_idr("Rp 1.299.000") == 1299000
     assert parse_percent("25,5") == 25.5
@@ -1151,6 +1172,24 @@ def run_self_tests() -> None:
         source_mode="hemat",
     )
     assert ambiguous["merchant_name"] is None, "Combined Hemat listing must not guess the first retailer"
+
+    # Regression: campaign editorial headings containing a percentage are not SKUs.
+    heading_html = '''<article><div class="entry-content">
+    <p>Apa Benefit yang Didapatkan Promo Paris Baguette BNI Wonderful Weekend: Diskon 50%</p>
+    <p>Apa Saja Penawaran Dalam Promo Paris Baguette BNI Wonderful Weekend: Diskon 50%</p>
+    <p>Bagaimana Cara Mendapatkan Promo Dan Mekanisme Promo Paris Baguette BNI Wonderful Weekend: Diskon 50%</p>
+    <ul><li>FRES&amp;NAT Body Wash 400 ml → Harga Promo Rp12.900, Harga Normal Rp19.900</li></ul>
+    </div></article>'''
+    heading_soup = BeautifulSoup(heading_html, "html.parser")
+    heading_container = find_article_container(heading_soup)
+    heading_title = "Promo Paris Baguette BNI Wonderful Weekend 23-24 Oktober 2026"
+    heading_meta = parse_promo_metadata(heading_title, clean_text(heading_container.get_text(" ", strip=True)))
+    before_rejected = len(REJECTED_PRODUCT_CANDIDATES)
+    heading_rows = extract_article_rows(heading_container, "Katalogpromosi.com", heading_title, "https://katalogpromosi.com/promo-paris-baguette-test/", heading_meta)
+    assert len(heading_rows) == 1, f"Expected only the product line, got {len(heading_rows)} rows"
+    assert "fres&nat" in heading_rows[0]["product_text"].casefold()
+    newly_rejected = REJECTED_PRODUCT_CANDIDATES[before_rejected:]
+    assert sum(1 for x in newly_rejected if x["rejection_reason"] == "editorial_heading_misparsed_as_product") >= 3
 
     retained = {
         "source_name": "Hemat.id",
@@ -1237,6 +1276,10 @@ def main() -> None:
         write_csv(OUT_REVIEW, review, REVIEW_FIELDS + ["source_urls", "source_names", "duplicate_count", "cross_source_duplicate", "duplicate_group_id"])
         write_csv(OUT_ARTICLES, all_articles, ARTICLE_FIELDS)
         write_csv(OUT_IMAGES, all_images, IMAGE_FIELDS)
+        write_csv(OUT_REJECTED_CANDIDATES, REJECTED_PRODUCT_CANDIDATES, [
+            "source_name", "campaign_title", "source_url", "source_item_url",
+            "raw_line", "product_text", "offer_text", "rejection_reason", "scraped_at",
+        ])
 
         report = {
             "built_at": now_iso(),
@@ -1256,7 +1299,9 @@ def main() -> None:
             "rows_with_explicit_discount": sum(r.get("discount_basis") == "source_explicit_product_claim" for r in products),
             "rows_with_price_calculated_discount": sum(r.get("discount_basis") == "calculated_from_prices" for r in products),
             "image_references_found": len(all_images),
-            "output_files": [OUT_ALL.name, OUT_ACTIVE.name, OUT_REVIEW.name, OUT_ARTICLES.name, OUT_IMAGES.name, OUT_LOG.name],
+            "rejected_non_product_candidates": len(REJECTED_PRODUCT_CANDIDATES),
+            "rejection_reasons": dict(Counter(x.get("rejection_reason", "unknown") for x in REJECTED_PRODUCT_CANDIDATES)),
+            "output_files": [OUT_ALL.name, OUT_ACTIVE.name, OUT_REVIEW.name, OUT_ARTICLES.name, OUT_IMAGES.name, OUT_REJECTED_CANDIDATES.name, OUT_LOG.name],
             "limitations": [
                 "Data aggregator diberi verification_status=aggregator_only; bukan verifikasi resmi retailer.",
                 "Brosur yang hanya berupa gambar dicatat di catalog_images.csv; OCR tidak dijalankan dan produk tidak ditebak dari gambar.",
@@ -1274,6 +1319,7 @@ def main() -> None:
         say(f"Promo aktif/estimasi      : {len(active)}")
         say(f"Baris perlu review        : {len(review)}")
         say(f"Referensi gambar katalog  : {len(all_images)}")
+        say(f"Kandidat non-produk ditolak: {len(REJECTED_PRODUCT_CANDIDATES)}")
         say(f"Data teknis tersimpan     : {INTERNAL_DIR.name}/")
         say(f"Katalog akhir             : {OUTPUT_DIR.name}/Katalog_Promo_Final.xlsx dan .csv")
     finally:
