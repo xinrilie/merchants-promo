@@ -47,22 +47,24 @@ def _collapse_repeated_suffix(tokens: list[str]) -> list[str]:
 
 
 def clean_product_name(value: object) -> str:
-    """Normalize noisy product names while preserving package size/quantity.
+    """Normalize noisy product names while preserving pack size/quantity.
 
-    This only standardizes obvious text variants. It does not combine rows with
-    different price, offer, merchant, or promo period; that is handled later.
+    Removes price/promotion annotations accidentally captured as part of a product
+    name (e.g. "Aice ... - Harga Normal 270 g"), but first captures size/pack data
+    so the actual product size is not lost. Different sizes remain different SKUs.
     """
     text = _clean_space(value)
     if not text:
         return ""
 
-    # Remove common HTML/OCR separators and normalize multiplication symbols.
-    text = text.replace("×", "x").replace(" ", " ")
+    text = text.replace("×", "x").replace("\u00a0", " ")
     text = re.sub(r"\bmybaby\b", "my baby", text, flags=re.IGNORECASE)
     text = re.sub(r"\bbengbeng\b", "beng-beng", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip(" \t\r\n|•-–—:")
+    original_text = text
 
-    # First find known pack notation, so 10x27g and 'per 10 pcs 27 gr' share a size.
+    # Capture size information from the full string before removing promotional
+    # suffixes. Some source parsers mistakenly put "Harga Normal" before the size.
     pack_specs: list[str] = []
     pack_patterns = [
         re.compile(
@@ -77,39 +79,54 @@ def clean_product_name(value: object) -> str:
         ),
     ]
     for pattern in pack_patterns:
-        match = pattern.search(text)
+        match = pattern.search(original_text)
         if match:
             count, amount, unit = match.groups()
             pack_specs.append(f"{count} x {_amount(amount)} {_unit(unit)}")
             break
 
-    # Remove explicit pack notation and all repeated measurements from the name body.
-    for pattern in pack_patterns:
-        text = pattern.sub(" ", text)
-
-    measures: list[str] = []
     measure_pattern = re.compile(
         r"\b(\d+(?:[.,]\d+)?)\s*(ml|gr?\.?|grams?|kg|litre|liter|ltr|l)\b",
         re.IGNORECASE,
     )
-    for match in measure_pattern.finditer(text):
+    measures: list[str] = []
+    for match in measure_pattern.finditer(original_text):
         amount, unit = match.groups()
         measure = f"{_amount(amount)} {_unit(unit)}"
         if measure not in measures:
             measures.append(measure)
-    text = measure_pattern.sub(" ", text)
 
-    # Remove common packaging abbreviations and malformed OCR filler words.
+    # Trim metadata accidentally captured in product_text. This is intentionally
+    # limited to recognizable price/promo labels so product wording is preserved.
+    annotation = re.compile(
+        r"\s*(?:[-–—|,:]\s*)?(?:"
+        r"harga\s+(?:normal|promo|spesial|setelah\s+diskon)\b|"
+        r"diskon(?:\s+(?:hingga|sampai))?(?:\s*[:\-]?\s*\d+(?:[.,]\d+)?\s*%)?\b|"
+        r"hemat\s+(?:rp\.?\s*)?\d|"
+        r"potongan\s+(?:harga|\d)|"
+        r"rp\.?\s*\d[\d.,]*\b|"
+        r"promo\s*[:\-]\s*(?:rp\.?\s*\d|diskon|harga|beli|gratis)"
+        r").*$",
+        re.IGNORECASE,
+    )
+    text = annotation.sub("", text).strip(" -–—|,:;")
+
+    # Remove measurement/pack notation from the body because it will be appended
+    # once in canonical form below.
+    for pattern in pack_patterns:
+        text = pattern.sub(" ", text)
+    text = measure_pattern.sub(" ", text)
     text = re.sub(
         r"\b(?:pck|pack|pak|btl|botol|klg|kaleng|pcs?|pieces|per)\b\.?",
         " ", text, flags=re.IGNORECASE,
     )
-    text = re.sub(r"\s+", " ", text).strip(" -–—:|")
+    text = re.sub(r"\s+", " ", text).strip(" -–—:|,;")
 
-    # Standardize punctuation spacing; retain meaningful hyphens such as Jeruk-Lemon.
-    text = re.sub(r"\s*([,/])\s*", r"\1 ", text)
+    # Normalize separators consistently without deleting meaningful variants.
+    text = re.sub(r"\s*/\s*", " / ", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
     tokens = _collapse_repeated_suffix(text.split())
-    text = " ".join(tokens)
+    text = " ".join(tokens).strip()
 
     # Consistent display casing. Fix high-frequency brand spellings after title case.
     text = text.title()
@@ -127,11 +144,9 @@ def clean_product_name(value: object) -> str:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
     size_parts = pack_specs if pack_specs else measures
-    # Keep only one occurrence per canonical size.
     size_parts = list(dict.fromkeys(size_parts))
     if size_parts:
         text = f"{text} {'; '.join(size_parts)}".strip()
-
     return _clean_space(text)
 
 
@@ -152,6 +167,9 @@ def _self_test() -> None:
         "My Baby 100 ml Body Cologne Sweet Floral 100 ml Sweet Floral": "My Baby Body Cologne Sweet Floral 100 ml",
         "MY BABY Body Cologne Sweet Floral 100ml btl": "My Baby Body Cologne Sweet Floral 100 ml",
         "LASEGAR Twist Jeruk-Lemon 320ml klg": "Lasegar Twist Jeruk-Lemon 320 ml",
+        "Aice Mochi Vanilla/ Chocolate - Harga Normal 270 g": "Aice Mochi Vanilla / Chocolate 270 g",
+        "Aice Mochi Vanilla/ Chocolate 270 g": "Aice Mochi Vanilla / Chocolate 270 g",
+        "My Baby Body Cologne Sweet Floral 100 ml Harga Promo Rp 12.900": "My Baby Body Cologne Sweet Floral 100 ml",
     }
     for source, expected in samples.items():
         actual = clean_product_name(source)

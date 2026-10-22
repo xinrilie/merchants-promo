@@ -14,23 +14,28 @@ if errorlevel 1 (
 )
 
 echo =====================================================
-echo KATALOG PROMO - PIPELINE RINGKAS
+echo KATALOG PROMO - PIPELINE RINGKAS V4
 echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com
 echo =====================================================
 echo.
-echo [1/3] Uji parser dan normalisasi nama produk...
+echo [1/4] Uji normalisasi nama produk...
 %PYTHON% "%~dp0engine\promo_names.py"
-if errorlevel 1 goto :error
-%PYTHON% "%~dp0engine\promo_multisource_collector.py" --self-test
 if errorlevel 1 goto :error
 
 echo.
-echo [2/3] Mengumpulkan promo dari situs publik...
+echo [2/4] Uji konsolidasi produk lintas sumber...
+%PYTHON% "%~dp0engine\test_duplicate_fixes.py"
+if errorlevel 1 goto :error
+
+echo.
+echo [3/4] Uji parser lalu scraping situs publik...
+%PYTHON% "%~dp0engine\promo_multisource_collector.py" --self-test
+if errorlevel 1 goto :error
 %PYTHON% "%~dp0engine\promo_multisource_collector.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [3/3] Membersihkan nama, deduplikasi, menghitung diskon, dan membuat katalog...
+echo [4/4] Membersihkan data, menggabungkan penawaran identik, dan membuat katalog...
 %PYTHON% "%~dp0engine\enrich_existing_promo_catalog_multisource.py"
 if errorlevel 1 goto :error
 
@@ -38,7 +43,7 @@ echo.
 echo SELESAI. File utama ada di folder hasil\
 echo Buka: hasil\Katalog_Promo_Final.xlsx
 if exist "%~dp0hasil\Katalog_Promo_Final.xlsx" start "" "%~dp0hasil\Katalog_Promo_Final.xlsx"
-echo File mentah dan log teknis ada di _internal\ dan biasanya tidak perlu dibuka.
+echo File mentah dan log teknis ada di _internal\.
 pause
 exit /b 0
 

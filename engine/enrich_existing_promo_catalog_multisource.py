@@ -721,6 +721,321 @@ def consolidate_overlapping_offers(rows):
     ))
     return output, merged_group_count, merged_source_row_count
 
+
+# Cross-source product/offer deduplication. This is deliberately stricter than
+# matching on name alone: merchant, overlapping dates, compatible offer type,
+# and non-conflicting prices must also agree.
+BUNDLE_RATIO_RE = re.compile(
+    r"\b(?:beli|buy)\s*(\d+)\s*(?:pcs?|buah|item|produk)?\s*(?:gratis|free|get)\s*(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _row_source_values(row, field_single, field_multi):
+    return pipe_unique([row.get(field_single) or "", row.get(field_multi) or ""])
+
+
+def _row_dates(row):
+    try:
+        start = date.fromisoformat(str(row.get("valid_from") or ""))
+        end = date.fromisoformat(str(row.get("valid_until") or ""))
+        if end < start:
+            return None
+        return start, end
+    except (ValueError, TypeError):
+        return None
+
+
+def _bundle_ratio(row):
+    text = " ".join(str(row.get(k) or "") for k in ("offer_text", "purchase_condition", "deal_type"))
+    m = BUNDLE_RATIO_RE.search(text)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _offer_family(row):
+    text = scraper.normalize_text(" ".join(str(row.get(k) or "") for k in (
+        "offer_text", "purchase_condition", "deal_type"
+    )))
+    ratio = _bundle_ratio(row)
+    if ratio:
+        return ("bundle", ratio)
+    if re.search(r"\bcashback\b", text):
+        return ("cashback", None)
+    if re.search(r"\b(?:voucher|kupon)\b", text):
+        return ("voucher", None)
+    if re.search(r"\btebus\s+murah\b", text):
+        return ("redemption", None)
+    if re.search(r"\btambah\s+rp\b|\badditional payment\b", text):
+        return ("add_on", None)
+    if re.search(r"\b(?:diskon|discount|potongan)\b", text) or row.get("discount_percent") not in (None, ""):
+        return ("discount", None)
+    if re.search(r"\bbeli\s+\d+\b", text):
+        return ("bundle_purchase", None)
+    return ("general", None)
+
+
+def _valid_discount_number(row):
+    try:
+        value = float(row.get("discount_percent"))
+        return value if 0 <= value <= 100 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _compatible_prices(a, b):
+    # Two explicit values for the same field must agree. Missing values can be
+    # filled from the other source after this compatibility check.
+    for field in ("promo_price", "normal_price"):
+        x, y = as_int(a.get(field)), as_int(b.get(field))
+        if x is not None and y is not None and x != y:
+            return False
+
+    dx, dy = _valid_discount_number(a), _valid_discount_number(b)
+    bx = str(a.get("discount_percent_basis") or "")
+    by = str(b.get("discount_percent_basis") or "")
+    low_x = a.get("discount_percent_confidence") == "low" or "estimate" in bx
+    low_y = b.get("discount_percent_confidence") == "low" or "estimate" in by
+    if dx is not None and dy is not None and not (low_x or low_y):
+        # Percentages can be rounded by a retailer. A larger gap usually means
+        # different variants, units, or promotional conditions.
+        if abs(dx - dy) > 3.0:
+            return False
+
+    # A claimed discount must not contradict a fully price-calculated discount.
+    calc_a = as_decimal(a.get("discount_percent_calculated"))
+    calc_b = as_decimal(b.get("discount_percent_calculated"))
+    claim_a = as_decimal(a.get("discount_percent")) if "explicit" in bx else None
+    claim_b = as_decimal(b.get("discount_percent")) if "explicit" in by else None
+    if calc_a is not None and claim_b is not None and abs(float(calc_a - claim_b)) > 4.0:
+        return False
+    if calc_b is not None and claim_a is not None and abs(float(calc_b - claim_a)) > 4.0:
+        return False
+    return True
+
+
+def _compatible_offers(a, b):
+    fa, fb = _offer_family(a), _offer_family(b)
+    if fa[0] == fb[0] == "bundle" and fa[1] != fb[1]:
+        return False
+
+    if fa[0] == fb[0] == "general":
+        # General/unspecified offers need stronger textual evidence; otherwise
+        # the same SKU could be on two different campaigns at once.
+        offer_a = norm_key(a.get("offer_text"))
+        offer_b = norm_key(b.get("offer_text"))
+        title_a = norm_key(a.get("campaign_title"))
+        title_b = norm_key(b.get("campaign_title"))
+        if not (offer_a and offer_a == offer_b) and not (title_a and title_a == title_b):
+            return False
+
+    if fa[0] != fb[0] and "general" not in {fa[0], fb[0]}:
+        # A bundle may be represented by an equivalent percentage discount by
+        # a different aggregator, but only if the stated percentage matches the
+        # bundle's theoretical same-item-value estimate.
+        bundle = fa if fa[0] == "bundle" else fb if fb[0] == "bundle" else None
+        other = b if bundle is fa else a if bundle is fb else None
+        if bundle and other and _offer_family(other)[0] == "discount":
+            buy, free = bundle[1]
+            expected = 100.0 * free / (buy + free)
+            disc = _valid_discount_number(other)
+            basis = str(other.get("discount_percent_basis") or "")
+            if disc is None or ("estimate" not in basis and abs(disc - expected) > 3.0):
+                return False
+        else:
+            return False
+    elif fa[0] != fb[0] and "general" in {fa[0], fb[0]}:
+        # A generic source card may be matched to a specific offer only if the
+        # text is essentially empty/generic or the known price is shared.
+        general_row = a if fa[0] == "general" else b
+        specific_row = b if general_row is a else a
+        generic_text = norm_key(general_row.get("offer_text"))
+        generic_labels = {"", "promo", "promosi", "harga promo", "penawaran promo"}
+        shares_price = any(
+            as_int(general_row.get(field)) is not None
+            and as_int(general_row.get(field)) == as_int(specific_row.get(field))
+            for field in ("promo_price", "normal_price")
+        )
+        if generic_text not in generic_labels and not shares_price:
+            return False
+
+    # Do not auto-merge prices quoted per weight/volume with pack prices.
+    if UNIT_CONTEXT_PATTERN.search(str(a.get("offer_text") or "")) or UNIT_CONTEXT_PATTERN.search(str(b.get("offer_text") or "")):
+        return False
+    return _compatible_prices(a, b)
+
+
+def _compatible_periods(a, b):
+    da, db = _row_dates(a), _row_dates(b)
+    if not da or not db:
+        return False
+    # Exact date windows must overlap; estimated month windows can overlap an
+    # exact article period and will inherit the exact period from the stronger row.
+    return da[0] <= db[1] and db[0] <= da[1]
+
+
+def _equivalent_offer_rows(a, b):
+    if norm_key(a.get("merchant_name")) != norm_key(b.get("merchant_name")):
+        return False
+    if norm_key(a.get("product_text")) != norm_key(b.get("product_text")):
+        return False
+    if not norm_key(a.get("product_text")):
+        return False
+    if has_material_period_conflict(a) or has_material_period_conflict(b):
+        return False
+    if not _compatible_periods(a, b):
+        return False
+    return _compatible_offers(a, b)
+
+
+def _offer_quality_score(row):
+    precision = row.get("period_precision")
+    return (
+        12 * int(precision in {"range", "single_day"})
+        + 8 * int(as_int(row.get("normal_price")) is not None and as_int(row.get("promo_price")) is not None)
+        + 4 * int(_valid_discount_number(row) is not None)
+        + 3 * int(bool(row.get("source_item_url")))
+        + 2 * int(bool(row.get("source_url")))
+        + 1 * int(bool(row.get("campaign_title")))
+        - 3 * int(row.get("discount_percent_confidence") == "low")
+        - 3 * int(bool(row.get("price_quality_flag")))
+    )
+
+
+def merge_equivalent_cross_source_offers(rows):
+    """Collapse same-product offers across source pages when dates/offers/prices agree.
+
+    Rows with conflicting prices, non-overlapping dates, different bundle ratios,
+    unit-price ambiguity, or unresolved date conflicts remain separate for review.
+    """
+    by_product = defaultdict(list)
+    for row in rows:
+        key = (norm_key(row.get("merchant_name")), norm_key(row.get("product_text")))
+        if key[0] and key[1]:
+            by_product[key].append(dict(row))
+
+    output = []
+    merged_groups = 0
+    absorbed_rows = 0
+    for _, product_rows in by_product.items():
+        # Prefer the most evidence-rich rows as cluster representatives.
+        product_rows.sort(key=_offer_quality_score, reverse=True)
+        clusters = []
+        for row in product_rows:
+            placed = False
+            for cluster in clusters:
+                if all(_equivalent_offer_rows(row, member) for member in cluster):
+                    cluster.append(row)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([row])
+
+        for cluster in clusters:
+            if len(cluster) == 1:
+                output.append(cluster[0])
+                continue
+
+            merged_groups += 1
+            absorbed_rows += len(cluster) - 1
+            ordered = sorted(cluster, key=_offer_quality_score, reverse=True)
+            best = dict(ordered[0])
+
+            # Fill missing values from compatible members without overwriting
+            # stronger source values with estimates.
+            for field in FIELDS:
+                if best.get(field) in (None, ""):
+                    for candidate in ordered[1:]:
+                        if candidate.get(field) not in (None, ""):
+                            best[field] = candidate[field]
+                            break
+
+            all_variants = []
+            all_urls = []
+            all_titles = []
+            all_names = []
+            all_datasets = []
+            all_source_types = []
+            all_verification = []
+            all_region_channels = []
+            for member in cluster:
+                all_variants.extend(name_variants(member.get("product_name_variants")))
+                all_variants.extend(name_variants(member.get("original_product_text")))
+                all_urls.extend(pipe_unique([member.get("source_url") or "", member.get("source_urls") or "", member.get("source_page_url") or "", member.get("source_item_url") or ""]))
+                all_titles.extend(pipe_unique([member.get("campaign_title") or "", member.get("source_campaign_titles") or ""]))
+                all_names.extend(pipe_unique([member.get("source_name") or "", member.get("source_names") or ""]))
+                all_datasets.extend(pipe_unique([member.get("source_dataset") or ""]))
+                all_source_types.extend(pipe_unique([member.get("source_type") or ""]))
+                all_verification.extend(pipe_unique([member.get("verification_status") or ""]))
+                all_region_channels.extend(pipe_unique([member.get("region_or_channel") or ""]))
+
+            all_variants = list(OrderedDict.fromkeys(v for v in all_variants if v))
+            if all_variants:
+                best["product_name_variants"] = " | ".join(all_variants)
+                best["original_product_text"] = all_variants[0]
+            best["source_urls"] = " | ".join(OrderedDict.fromkeys(v for v in all_urls if v))
+            best["source_campaign_titles"] = " | ".join(OrderedDict.fromkeys(v for v in all_titles if v))
+            best["source_names"] = " | ".join(OrderedDict.fromkeys(v for v in all_names if v)) or None
+            best["source_dataset"] = " | ".join(OrderedDict.fromkeys(v for v in all_datasets if v)) or None
+            best["source_type"] = " | ".join(OrderedDict.fromkeys(v for v in all_source_types if v)) or None
+            best["verification_status"] = " | ".join(OrderedDict.fromkeys(v for v in all_verification if v)) or None
+            best["region_or_channel"] = " | ".join(OrderedDict.fromkeys(v for v in all_region_channels if v)) or None
+            best["duplicate_count"] = sum(as_int(m.get("duplicate_count")) or 1 for m in cluster)
+            best["overlapping_offer_count"] = len(cluster)
+            dataset_parts = pipe_unique([best.get("source_dataset") or ""])
+            source_name_parts = pipe_unique([best.get("source_names") or ""])
+            best["cross_dataset_duplicate"] = len(dataset_parts) > 1 or len(source_name_parts) > 1
+            best["duplicate_group_id"] = hashlib.sha1(
+                (norm_key(best.get("merchant_name")) + "|" + norm_key(best.get("product_text")) + "|" + str(best.get("valid_from")) + "|" + str(best.get("valid_until")) + "|" + str(best.get("promo_price"))).encode("utf-8")
+            ).hexdigest()[:12]
+
+            # Keep the best (usually explicit) period window. Do not widen beyond
+            # a reliable exact source merely because another site's date is estimated.
+            exact_members = [m for m in ordered if m.get("period_precision") in {"range", "single_day"} and _row_dates(m)]
+            if exact_members:
+                date_best = exact_members[0]
+                best["valid_from"] = date_best.get("valid_from")
+                best["valid_until"] = date_best.get("valid_until")
+                best["period_precision"] = date_best.get("period_precision")
+                best["matched_period_text"] = date_best.get("matched_period_text") or best.get("matched_period_text")
+                best["period_flags"] = date_best.get("period_flags")
+                best["promo_status"] = current_status(best.get("valid_from"), best.get("valid_until"), best.get("period_precision"), best.get("period_flags"), best.get("promo_status"))
+
+            # Recalculate using merged price evidence. Campaign headline claims are
+            # never copied to the product-level discount.
+            flags = pipe_unique([m.get("price_quality_flag") or "" for m in cluster])
+            discount = safe_discount_fields(
+                best.get("offer_text") or "",
+                as_int(best.get("promo_price")),
+                as_int(best.get("normal_price")),
+                best.get("price_basis"),
+                best.get("purchase_condition"),
+                best.get("deal_type"),
+                flags,
+            )
+            best.update(discount)
+            best["price_quality_flag"] = " | ".join(pipe_unique(flags)) or None
+            best["data_quality_flags"] = " | ".join(pipe_unique([
+                best.get("data_quality_flags") or "",
+                "equivalent_offer_merged_across_sources",
+                "discount_is_estimated" if best.get("discount_percent_basis") == "bundle_estimate_same_item_value" else "",
+            ])) or None
+            output.append(best)
+
+    # Retain rows with no merchant/name rather than silently losing them.
+    assigned_ids = {id(r) for group in by_product.values() for r in group}
+    # Every row with a missing product key was not assigned to by_product.
+    for row in rows:
+        if not norm_key(row.get("merchant_name")) or not norm_key(row.get("product_text")):
+            output.append(dict(row))
+
+    output.sort(key=lambda r: (
+        (r.get("merchant_name") or "~").casefold(),
+        (r.get("product_text") or "").casefold(),
+        r.get("valid_from") or "",
+        r.get("promo_price") or 0,
+    ))
+    return output, merged_groups, absorbed_rows
+
 PERIOD_CONFLICT_MARKERS = (
     "title_lead_period_differs",
     "title_period_mismatch_with_catalog_dates",
@@ -1005,6 +1320,7 @@ def main():
     merged_raw = merge_rows(input_rows)
     merged_raw = mark_overlapping_offers(merged_raw)
     consolidated, consolidated_groups, consolidated_rows = consolidate_overlapping_offers(merged_raw)
+    consolidated, equivalent_offer_groups, equivalent_offer_rows_absorbed = merge_equivalent_cross_source_offers(consolidated)
 
     # Main catalog excludes unresolved material date conflicts; those remain in Review.
     current = [
@@ -1043,6 +1359,8 @@ def main():
         "exact_duplicate_rows_collapsed": len(input_rows) - len(merged_raw),
         "overlapping_offer_groups_consolidated": consolidated_groups,
         "overlapping_offer_rows_absorbed": consolidated_rows,
+        "equivalent_cross_source_offer_groups_merged": equivalent_offer_groups,
+        "equivalent_cross_source_offer_rows_absorbed": equivalent_offer_rows_absorbed,
         "consolidated_row_count": len(consolidated),
         "current_active_including_estimates": len(current),
         "active_period_conflicts_routed_to_review": sum(
@@ -1081,6 +1399,8 @@ def main():
     print("exact deduplicated rows:", len(merged_raw))
     print("consolidated rows:", len(consolidated))
     print("overlapping offer rows absorbed:", consolidated_rows)
+    print("equivalent cross-source offer groups merged:", equivalent_offer_groups)
+    print("equivalent cross-source offer rows absorbed:", equivalent_offer_rows_absorbed)
     print("current active (including estimated):", len(current))
     print("confirmed active:", len(confirmed))
     print("review rows:", len(review))

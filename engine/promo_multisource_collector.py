@@ -234,7 +234,29 @@ def parse_percent(value: object) -> float | None:
     return number if 0 <= number <= 100 else None
 
 
+def merchant_mentions(*texts: object) -> list[str]:
+    """Return all retailer names explicitly mentioned by a text/context."""
+    haystack = " | ".join(clean_text(t).casefold() for t in texts if t)
+    found = []
+    for canonical, aliases in ALIAS_GROUPS:
+        matched = False
+        for alias in aliases:
+            if re.search(rf"(?<!\w){re.escape(alias.casefold())}(?!\w)", haystack):
+                matched = True
+                break
+        if matched and canonical not in found:
+            found.append(canonical)
+    return found
+
+
+def unambiguous_merchant(*texts: object) -> str | None:
+    """Do not guess a retailer from a listing URL mentioning multiple chains."""
+    found = merchant_mentions(*texts)
+    return found[0] if len(found) == 1 else None
+
+
 def infer_merchant(*texts: object) -> str | None:
+    """Legacy first-match helper for article titles; use unambiguous_merchant for cards."""
     haystack = " | ".join(clean_text(t).casefold() for t in texts if t)
     checks = []
     for canonical, aliases in ALIAS_GROUPS:
@@ -593,8 +615,19 @@ def nearest_context(anchor) -> tuple[str, str | None]:
         text = clean_text(parent.get_text(" ", strip=True))
         if not text:
             continue
-        links = [clean_text(a.get_text(" ", strip=True)) for a in parent.find_all("a")[:20]]
-        merchant = infer_merchant(*links)
+        link_merchants = []
+        for link in parent.find_all("a")[:20]:
+            if link is anchor:
+                continue
+            label = clean_text(link.get_text(" ", strip=True))
+            if not label or len(label) > 55:
+                continue
+            mentioned = merchant_mentions(label)
+            # Consider only labels that identify exactly one retailer. If a card
+            # wrapper contains multiple retailer links, leave it ambiguous.
+            if len(mentioned) == 1 and mentioned[0] not in link_merchants:
+                link_merchants.append(mentioned[0])
+        merchant = link_merchants[0] if len(link_merchants) == 1 else None
         if merchant and not best_merchant:
             best_merchant = merchant
         if len(text) <= max(700, len(best_text) + 180):
@@ -677,9 +710,14 @@ def extract_hemat_cards(soup: BeautifulSoup, page_url: str) -> list[dict]:
         if re.search(r"\bexpired\b|\bkedaluwarsa\b", context, re.IGNORECASE):
             metadata["promo_status"] = "expired"
         item_url = safe_url(urljoin(page_url, anchor.get("href", "")))
+        card_merchant = context_merchant or unambiguous_merchant(anchor_text, context)
+        if not card_merchant:
+            # A single-chain page is a usable fallback; never infer a single chain
+            # from a combined listing URL such as /katalog-alfamart,hypermart/.
+            card_merchant = unambiguous_merchant(urlparse(page_url).path)
         row = make_product_row(
             source_name="Hemat.id", product_text=product_name, offer_text=offer_text,
-            title=title, merchant=context_merchant or infer_merchant(anchor_text, context, page_url),
+            title=title, merchant=card_merchant,
             meta=metadata, source_url=page_url, source_page_url=page_url,
             source_item_url=item_url, raw_line=anchor_text, source_mode="hemat",
         )
