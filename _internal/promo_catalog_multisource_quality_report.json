@@ -1,0 +1,92 @@
+{
+  "built_at": "2026-10-23T03:41:10.820783+07:00",
+  "reference_date": "2026-10-23",
+  "input_files": {
+    "momskonten_promo_active.csv": 559,
+    "promo_catalog_all_merchants.csv": 792,
+    "promo_multisource_products_all.csv": 830
+  },
+  "input_row_count": 2181,
+  "exact_deduplicated_row_count": 1740,
+  "exact_duplicate_rows_collapsed": 441,
+  "overlapping_offer_groups_consolidated": 26,
+  "overlapping_offer_rows_absorbed": 26,
+  "equivalent_cross_source_offer_groups_merged": 36,
+  "equivalent_cross_source_offer_rows_absorbed": 36,
+  "consolidated_row_count": 1678,
+  "current_active_including_estimates": 1016,
+  "active_period_conflicts_routed_to_review": 277,
+  "confirmed_active_rows": 703,
+  "review_rows": 1117,
+  "rows_with_product_discount": 611,
+  "rows_with_price_calculated_discount": 471,
+  "rows_with_bundle_discount_estimate": 88,
+  "rows_with_campaign_level_discount_claim": 33,
+  "rows_with_period_conflict": 299,
+  "rows_with_overlapping_offer_periods_before_consolidation": 560,
+  "cross_dataset_duplicate_groups_or_rows": 429,
+  "product_name_variant_groups": 58,
+  "possible_duplicate_candidate_pairs": 48,
+  "possible_duplicate_high_similarity_pairs": 30,
+  "discount_basis_counts_current": {
+    "not_available": 404,
+    "calculated_from_unit_prices": 254,
+    "explicit_offer": 281,
+    "bundle_estimate_same_item_value": 74,
+    "unit_context_review": 1,
+    "explicit_max": 2
+  },
+  "merchant_counts_current": {
+    "Alfamart": 284,
+    "Alfamidi": 180,
+    "Bakmi GM": 7,
+    "Es Teler 77": 2,
+    "Gokana": 3,
+    "Guardian": 20,
+    "Hari Hari Swalayan": 21,
+    "HokBen": 13,
+    "Hypermart": 2,
+    "Ichiban Sushi": 4,
+    "Indomaret": 323,
+    "J.CO": 3,
+    "Lotte Mart": 34,
+    "Popeyes": 14,
+    "Tip Top": 30,
+    "Yogya": 33,
+    "UNKNOWN": 43
+  },
+  "user_facing_output_files": [
+    "hasil/Katalog_Promo_Final.csv",
+    "hasil/Katalog_Promo_Final.xlsx"
+  ],
+  "internal_audit_files": [
+    "_internal/promo_catalog_multisource_confirmed.csv",
+    "_internal/promo_catalog_multisource_review.csv",
+    "_internal/promo_catalog_multisource_full_audit.csv",
+    "_internal/promo_catalog_multisource_quality_report.json"
+  ],
+  "clean_catalog_columns": [
+    "Nama Produk",
+    "Harga Asli (Rp)",
+    "Harga Promo (Rp)",
+    "Diskon (%)",
+    "Merchant",
+    "Hemat (Rp)",
+    "Status Promo",
+    "Mulai Berlaku",
+    "Berakhir",
+    "Jenis Promo",
+    "Detail Penawaran",
+    "Kampanye",
+    "Catatan",
+    "Sumber URL"
+  ],
+  "full_audit_file": "promo_catalog_multisource_full_audit.csv",
+  "discount_policy": {
+    "explicit_product_offer_percent": "used as the displayed discount; explicit 'hingga' is marked as a maximum claim",
+    "price_based_percent": "calculated only when normal and promo prices are positive, unit-comparable, and price_basis is offer_price; Indonesian thousands separators are parsed safely",
+    "period_confirmation": "confirmed catalog only includes exact range/single_day periods without unresolved material title/source conflicts; incomplete provenance is estimated or review",
+    "buy_x_free_y": "separate low-confidence estimate assuming the free item has the same value; not a confirmed discount",
+    "campaign_title_percent": "stored separately and never copied to every product row"
+  }
+}

@@ -67,7 +67,7 @@ FIELDS = [
     "campaign_discount_basis", "price_parse_method", "price_basis",
     "purchase_condition", "deal_type", "offer_text", "section",
     "source_url", "source_urls", "source_campaign_titles", "source_dataset",
-    "source_name", "source_names", "source_type", "verification_status",
+    "source_name", "source_names", "source_type", "verification_status", "merchant_resolution_method",
     "source_page_url", "source_item_url", "region_or_channel", "scraped_at",
     "duplicate_count", "duplicate_group_id", "cross_dataset_duplicate", "overlapping_offer_count",
     "overlap_period_flag", "price_quality_flag", "data_quality_flags", "retained_from_previous_run", "raw_line",
@@ -465,6 +465,7 @@ def load_source(path, source_label):
             "source_names": (raw.get("source_names") or "").strip() or None,
             "source_type": (raw.get("source_type") or "").strip() or None,
             "verification_status": (raw.get("verification_status") or "").strip() or None,
+            "merchant_resolution_method": (raw.get("merchant_resolution_method") or "").strip() or None,
             "source_page_url": (raw.get("source_page_url") or "").strip() or None,
             "source_item_url": (raw.get("source_item_url") or "").strip() or None,
             "region_or_channel": (raw.get("region_or_channel") or "").strip() or None,
@@ -908,12 +909,190 @@ def _offer_quality_score(row):
     )
 
 
+# Cross-source merchant corroboration for product cards from combined Hemat listings.
+# A multi-retailer category URL alone is ambiguous. We only resolve it when a non-Hemat
+# source explicitly names one retailer and the same product/offer/period/price evidence agrees.
+_MERCHANT_MATCH_ALIASES = {
+    "alfamart": ("alfamart", "alfagift"),
+    "alfamidi": ("alfamidi",),
+    "indomaret": ("indomaret", "klik indomaret"),
+    "hypermart": ("hypermart",),
+    "super indo": ("super indo", "superindo"),
+    "lotte mart": ("lotte mart", "lottemart"),
+    "transmart": ("transmart",),
+    "guardian": ("guardian",),
+    "watsons": ("watsons",),
+    "aeon": ("aeon",),
+    "tip top": ("tip top",),
+    "hero": ("hero supermarket",),
+    "farmers market": ("farmers market",),
+    "ranch market": ("ranch market",),
+    "foodhall": ("foodhall", "the foodhall"),
+    "indogrosir": ("indogrosir",),
+    "lulu hypermarket": ("lulu hypermarket",),
+    "hokben": ("hokben",),
+    "popeyes": ("popeyes",),
+    "kfc": ("kfc",),
+    "mcdonald's": ("mcdonald's", "mcdonalds"),
+    "pizza hut": ("pizza hut",),
+    "burger king": ("burger king",),
+    "j.co": ("j.co", "jco"),
+    "starbucks": ("starbucks",),
+    "chatime": ("chatime",),
+    "yogya": ("yogya", "yomart"),
+}
+
+
+def _all_row_urls(row):
+    return pipe_unique([
+        row.get("source_url") or "", row.get("source_urls") or "",
+        row.get("source_page_url") or "", row.get("source_item_url") or "",
+    ])
+
+
+def _is_hemat_source(row):
+    text = " ".join([str(row.get("source_name") or ""), * _all_row_urls(row)]).casefold()
+    return "hemat.id" in text or "hemat.id" in str(row.get("source_name") or "").casefold()
+
+
+def _mentions_merchant(text, merchant):
+    if not text or not merchant:
+        return False
+    canonical = norm_key(merchant)
+    aliases = _MERCHANT_MATCH_ALIASES.get(canonical, (str(merchant),))
+    haystack = str(text).casefold()
+    for alias in aliases:
+        alias = str(alias).casefold().strip()
+        if alias and re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", haystack):
+            return True
+    return False
+
+
+def _row_mentions_merchant(row, merchant, fields):
+    return any(_mentions_merchant(row.get(field) or "", merchant) for field in fields)
+
+
+def _offer_evidence_compatible_without_merchant(a, b):
+    """Strong product/period/offer match used only to resolve an ambiguous aggregator merchant."""
+    if not product_names_can_auto_merge(a.get("product_text"), b.get("product_text")):
+        return False
+    if has_material_period_conflict(a) or has_material_period_conflict(b):
+        return False
+    if not _compatible_periods(a, b):
+        return False
+    if not _compatible_offers(a, b):
+        return False
+
+    # Require at least one concrete corroborating signal, not just similar text.
+    same_promo = (as_int(a.get("promo_price")) is not None
+                  and as_int(a.get("promo_price")) == as_int(b.get("promo_price")))
+    same_normal = (as_int(a.get("normal_price")) is not None
+                   and as_int(a.get("normal_price")) == as_int(b.get("normal_price")))
+    bundle_a, bundle_b = _bundle_ratio(a), _bundle_ratio(b)
+    same_bundle = bundle_a is not None and bundle_a == bundle_b
+    da, db = _valid_discount_number(a), _valid_discount_number(b)
+    same_explicit_discount = (
+        da is not None and db is not None and abs(da - db) <= 1.0
+        and "explicit" in str(a.get("discount_percent_basis") or "").casefold()
+        and "explicit" in str(b.get("discount_percent_basis") or "").casefold()
+    )
+
+    # Aggregators sometimes render Beli 1 Gratis 1 as a 50% discount card.
+    # The ordinary offer compatibility check above already verifies that the
+    # discount agrees with the bundle ratio; count that as corroborating evidence.
+    family_a, family_b = _offer_family(a), _offer_family(b)
+    bundle_discount_equivalent = False
+    if {family_a[0], family_b[0]} == {"bundle", "discount"}:
+        bundle = family_a if family_a[0] == "bundle" else family_b
+        discount_row = b if family_a[0] == "bundle" else a
+        ratio = bundle[1]
+        discount_value = _valid_discount_number(discount_row)
+        if ratio and discount_value is not None:
+            expected = 100.0 * ratio[1] / (ratio[0] + ratio[1])
+            basis = str(discount_row.get("discount_percent_basis") or "").casefold()
+            bundle_discount_equivalent = (
+                "estimate" in basis or abs(discount_value - expected) <= 3.0
+            )
+
+    return (
+        same_promo or (same_normal and same_promo) or same_bundle
+        or same_explicit_discount or bundle_discount_equivalent
+    )
+
+
+def _cross_source_merchant_candidate(unknown_row, known_row):
+    """Return known merchant only for a strong Hemat combined-listing cross-check."""
+    if norm_key(unknown_row.get("merchant_name")):
+        return None
+    merchant = (known_row.get("merchant_name") or "").strip()
+    if not merchant or not _is_hemat_source(unknown_row) or _is_hemat_source(known_row):
+        return None
+
+    # The combined Hemat URL must mention this retailer, and the comparison source
+    # must independently identify that retailer in its campaign title or URL.
+    unknown_url_text = " ".join(_all_row_urls(unknown_row))
+    known_claim_fields = ("campaign_title", "source_campaign_titles", "source_url", "source_page_url")
+    if not _mentions_merchant(unknown_url_text, merchant):
+        return None
+    if not _row_mentions_merchant(known_row, merchant, known_claim_fields):
+        return None
+
+    # The evidence must come from genuinely different pages/sources.
+    unknown_page = norm_key(unknown_row.get("source_page_url") or unknown_row.get("source_url"))
+    known_page = norm_key(known_row.get("source_page_url") or known_row.get("source_url"))
+    if unknown_page and known_page and unknown_page == known_page:
+        return None
+    if not _offer_evidence_compatible_without_merchant(unknown_row, known_row):
+        return None
+    return merchant
+
+
+def resolve_ambiguous_hemat_merchants(rows):
+    """Resolve an unknown Hemat card merchant only when exactly one retailer is corroborated.
+
+    If compatible matches point to more than one retailer, leave the merchant unknown and
+    retain the record for manual review rather than guessing.
+    """
+    blocks = defaultdict(list)
+    for idx, row in enumerate(rows):
+        block = product_name_block_key(row.get("product_text"))
+        if block:
+            blocks[block].append((idx, row))
+
+    proposed = {}
+    for idx, row in enumerate(rows):
+        if norm_key(row.get("merchant_name")) or not _is_hemat_source(row):
+            continue
+        block = product_name_block_key(row.get("product_text"))
+        retailer_candidates = {}
+        for other_idx, other in blocks.get(block, []):
+            if idx == other_idx or not norm_key(other.get("merchant_name")):
+                continue
+            merchant = _cross_source_merchant_candidate(row, other)
+            if merchant:
+                retailer_candidates.setdefault(norm_key(merchant), merchant)
+        if len(retailer_candidates) == 1:
+            proposed[idx] = next(iter(retailer_candidates.values()))
+
+    # Apply only after all matches have been evaluated, so inference does not cascade.
+    for idx, merchant in proposed.items():
+        row = rows[idx]
+        row["merchant_name"] = merchant
+        row["merchant_resolution_method"] = "cross_source_corroboration_unverified"
+        row["data_quality_flags"] = " | ".join(pipe_unique([
+            row.get("data_quality_flags") or "",
+            "merchant_inferred_by_matching_same_offer_across_sources",
+        ])) or None
+    return rows
+
+
 def merge_equivalent_cross_source_offers(rows):
     """Collapse same-product offers across source pages when dates/offers/prices agree.
 
     Rows with conflicting prices, non-overlapping dates, different bundle ratios,
     unit-price ambiguity, or unresolved date conflicts remain separate for review.
     """
+    rows = resolve_ambiguous_hemat_merchants([dict(row) for row in rows])
     by_product = defaultdict(list)
     for row in rows:
         merchant_key = norm_key(row.get("merchant_name"))
@@ -1105,6 +1284,8 @@ def display_notes(row):
         notes.append("Konflik tanggal; dipindahkan ke file review")
     elif "period_taken_from_lead" in str(row.get("period_flags") or ""):
         notes.append("Tanggal diambil dari paragraf pembuka")
+    if row.get("merchant_resolution_method") == "cross_source_corroboration_unverified":
+        notes.append("Merchant dicocokkan dari penawaran lintas sumber; belum diverifikasi retailer resmi")
     if row.get("price_quality_flag"):
         notes.append("Harga/nominal perlu diperiksa")
     if truthy(row.get("retained_from_previous_run")):
@@ -1141,6 +1322,7 @@ def make_clean_row(row, review=False):
         if row.get("discount_percent_confidence") == "low": reasons.append("Persentase diskon estimasi")
         if row.get("overlap_period_flag"): reasons.append("Penawaran serupa muncul pada beberapa artikel")
         if not row.get("merchant_name"): reasons.append("Merchant belum diketahui")
+        if row.get("merchant_resolution_method") == "cross_source_corroboration_unverified": reasons.append("Merchant dicocokkan lintas sumber; belum terverifikasi resmi")
         if not row.get("source_url"): reasons.append("Sumber URL tidak tersedia")
         out["Alasan Review"] = " | ".join(pipe_unique(reasons)) or "Pemeriksaan kualitas umum"
     return out

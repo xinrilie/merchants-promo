@@ -130,23 +130,61 @@ def main():
     assert not product_names_can_auto_merge("Sunlight Jeruk 755 ml", "Sunlight Jeruk 450 ml")
     assert not product_names_can_auto_merge("Aice Mochi Vanilla 270 g", "Aice Mochi Chocolate 270 g")
 
-    # If an ambiguous multi-retailer listing cannot safely be merged with a
-    # known merchant row, it must appear in the candidate-review sheet.
+    # A combined Hemat listing can resolve to one specific retailer only when
+    # the independent source names that retailer and offer/price/period evidence agrees.
     unknown_merchant = row(merchant_name=None, source_name="Hemat.id", source_dataset="hemat.csv",
-        source_url="https://hemat.example/katalog-alfamart,hypermart", source_item_url="https://hemat.example/item/aice",
+        source_url="https://www.hemat.id/katalog-alfamart,hypermart/", source_page_url="https://www.hemat.id/katalog-alfamart,hypermart/",
+        source_item_url="https://www.hemat.id/item/aice",
         product_text="Aice Mochi Vanilla Chocolate 270 g", original_product_text="Aice Mochi Vanilla Chocolate 270 g",
         product_name_variants="Aice Mochi Vanilla Chocolate 270 g", promo_price=9900, normal_price=29990,
         discount_percent=67, discount_percent_basis="calculated_from_unit_prices",
-        offer_text="Harga Normal Rp 29.990 Harga Promo Rp 9.900", deal_type="Diskon Persentase", price_basis="offer_price")
+        offer_text="Harga Normal Rp 29.990 Harga Promo Rp 9.900", deal_type="Diskon Persentase", price_basis="offer_price",
+        period_precision="month", valid_from="2026-10-01", valid_until="2026-10-31", period_flags=None)
     known_merchant = row(merchant_name="Hypermart", source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv",
-        source_url="https://momsmoney.example/aice", source_item_url="https://momsmoney.example/item/aice", product_text="Aice Mochi Vanilla / Chocolate 270 g",
+        source_url="https://momsmoney.example/aice", source_page_url="https://momsmoney.example/aice",
+        source_item_url="https://momsmoney.example/item/aice", product_text="Aice Mochi Vanilla / Chocolate 270 g",
         original_product_text="Aice Mochi Vanilla / Chocolate 270 g", product_name_variants="Aice Mochi Vanilla / Chocolate 270 g",
         promo_price=9900, normal_price=29990, discount_percent=67,
         discount_percent_basis="calculated_from_unit_prices", discount_percent_confidence="high",
-        offer_text="Harga Normal Rp 29.990 Harga Promo Rp 9.900", deal_type="Diskon Persentase", price_basis="offer_price")
-    fuzzy_candidates = build_possible_duplicate_rows([unknown_merchant, known_merchant])
-    assert fuzzy_candidates and fuzzy_candidates[0]["Kemiripan Nama (%)"] >= 99
-    assert "Merchant belum pasti" in fuzzy_candidates[0]["Alasan"]
+        offer_text="Harga Normal Rp 29.990 Harga Promo Rp 9.900", deal_type="Diskon Persentase", price_basis="offer_price",
+        campaign_title="Promo Hypermart Daily Fresh 16-22 Oktober 2026", valid_from="2026-10-16", valid_until="2026-10-22", period_precision="range", period_flags=None)
+    fuzzy_merged, inferred_groups, inferred_absorbed = merge_equivalent_cross_source_offers([unknown_merchant, known_merchant])
+    assert len(fuzzy_merged) == 1 and inferred_groups == 1 and inferred_absorbed == 1, "Combined Hemat retailer was not corroborated/merged"
+    assert fuzzy_merged[0]["merchant_name"] == "Hypermart"
+    assert fuzzy_merged[0]["merchant_resolution_method"] == "cross_source_corroboration_unverified"
+
+    # My Baby B1G1: unknown retailer from a combined Hemat listing can match a named
+    # Indomaret article when product, bundle ratio, period, and URL retailer evidence agree.
+    mybaby_hemat = row(merchant_name=None, source_name="Hemat.id", source_dataset="hemat.csv",
+        source_url="https://www.hemat.id/katalog-alfamart,indomaret/", source_page_url="https://www.hemat.id/katalog-alfamart,indomaret/",
+        source_item_url="https://www.hemat.id/item/mybaby", product_text="My Baby Body Cologne Sweet Floral 100 ml",
+        original_product_text="MY BABY Body Cologne Sweet Floral 100ml btl", product_name_variants="MY BABY Body Cologne Sweet Floral 100ml btl",
+        promo_price=None, normal_price=None, discount_percent=50, discount_percent_basis="explicit_offer",
+        offer_text="Diskon 50%", purchase_condition=None, deal_type="Diskon Persentase", price_basis="non_numeric_bundle_offer",
+        valid_from="2026-10-01", valid_until="2026-10-31", period_precision="month", period_flags=None)
+    mybaby_known = row(merchant_name="Indomaret", source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv",
+        source_url="https://momsmoney.example/promo-indomaret", source_page_url="https://momsmoney.example/promo-indomaret",
+        source_item_url="https://momsmoney.example/item/mybaby", product_text="MY BABY Body Cologne Sweet Floral 100ml btl",
+        original_product_text="MY BABY Body Cologne Sweet Floral 100ml btl", product_name_variants="MY BABY Body Cologne Sweet Floral 100ml btl",
+        promo_price=None, normal_price=None, discount_percent=50, discount_percent_basis="bundle_estimate_same_item_value",
+        discount_percent_confidence="low", estimated_bundle_discount_percent=50,
+        offer_text="Promo Beli 1 Gratis 1", purchase_condition="Beli 1 Gratis 1", deal_type="Beli 1 Gratis 1",
+        price_basis="non_numeric_bundle_offer", valid_from="2026-10-15", valid_until="2026-10-28", period_precision="range", period_flags=None,
+        campaign_title="Promo Berhadiah Indomaret 15-28 Oktober 2026, Beli 1 Gratis 1 My Baby-Tropicana Slim")
+    mybaby_merged, _, _ = merge_equivalent_cross_source_offers([mybaby_hemat, mybaby_known])
+    assert len(mybaby_merged) == 1 and mybaby_merged[0]["merchant_name"] == "Indomaret", "My Baby cross-source duplicate was not consolidated"
+
+    # If the exact same offer could correspond to two retailers named in the
+    # combined Hemat URL, do not guess which retailer owns the card.
+    known_alfamart = dict(known_merchant, merchant_name="Alfamart",
+        source_url="https://momsmoney.example/aice-alfamart",
+        source_page_url="https://momsmoney.example/aice-alfamart",
+        campaign_title="Promo Alfamart 16-22 Oktober 2026")
+    ambiguous_result, _, _ = merge_equivalent_cross_source_offers([
+        dict(unknown_merchant), dict(known_merchant), known_alfamart
+    ])
+    assert len(ambiguous_result) == 3, "Ambiguous retailer match was incorrectly merged"
+    assert any(not r.get("merchant_name") for r in ambiguous_result), "Ambiguous Hemat row should remain unassigned"
 
     # Conflicting explicit prices must never be silently merged.
     c1 = dict(a2, promo_price=10900, discount_percent=63.7, discount_percent_calculated=63.7,

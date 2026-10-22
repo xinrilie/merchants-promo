@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 echo =====================================================
-echo KATALOG PROMO - PIPELINE RINGKAS V5 - FUZZY MATCH
+echo KATALOG PROMO - PIPELINE RINGKAS V6 - FUZZY + MERCHANT CORROBORATION
 echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com
 echo =====================================================
 echo.
