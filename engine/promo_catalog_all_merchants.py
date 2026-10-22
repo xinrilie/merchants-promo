@@ -24,11 +24,11 @@ ROOT_DIR = BASE_DIR.parent
 INTERNAL_DIR = ROOT_DIR / "_internal"
 
 # Scrape outputs belong in _internal, not mixed with source code in engine/.
-OUT_JSON = INTERNAL_DIR / "promo_catalog_all_merchants_v2.json"
-OUT_CSV = INTERNAL_DIR / "promo_catalog_all_merchants_v2.csv"
-RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_v2_runlog.json"
-ATTEMPT_JSON = INTERNAL_DIR / "promo_catalog_all_merchants_v2_latest_attempt.json"
-HISTORY_DIR = INTERNAL_DIR / "promo_catalog_all_merchants_v2_history"
+OUT_JSON = INTERNAL_DIR / "promo_catalog_all_merchants.json"
+OUT_CSV = INTERNAL_DIR / "promo_catalog_all_merchants.csv"
+RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_runlog.json"
+ATTEMPT_JSON = INTERNAL_DIR / "promo_catalog_all_merchants_latest_attempt.json"
+HISTORY_DIR = INTERNAL_DIR / "promo_catalog_all_merchants_history"
 MANUAL_URLS = BASE_DIR / "promo_sources.txt"
 
 TODAY = datetime.now(ZoneInfo("Asia/Jakarta")).date()
@@ -1406,7 +1406,7 @@ def main() -> None:
         summary = {
             "checked_at": timestamp(),
             "reference_date": TODAY.isoformat(),
-            "module": "All merchants - active promo collector v2",
+            "module": "All merchants - active promo collector",
             "source_type": "secondary_public_articles",
             "listing_url": HEMAT_CATEGORY_URL,
             "listing_pages_checked": len(listing_log),
@@ -1459,7 +1459,7 @@ def main() -> None:
             save_json(history_file, catalog_payload)
             save_json(OUT_JSON, catalog_payload)
             write_csv(OUT_CSV, active_products)
-            review_csv = BASE_DIR / "promo_catalog_all_merchants_v2_review.csv"
+            review_csv = INTERNAL_DIR / "promo_catalog_all_merchants_review.csv"
             write_review_csv(review_csv, review_products)
             output_status = "updated"
         else:
@@ -1491,7 +1491,7 @@ def main() -> None:
 
         elapsed = time.monotonic() - started
         say("\n" + "=" * 60)
-        say("SELESAI - ALL MERCHANTS ACTIVE PROMO COLLECTOR V2")
+        say("SELESAI - ALL MERCHANTS ACTIVE PROMO COLLECTOR")
         say("=" * 60)
         say(f"Tanggal acuan            : {TODAY.isoformat()}")
         say(f"Artikel kandidat         : {len(candidates)}")
@@ -1512,7 +1512,7 @@ def main() -> None:
         say(f"Waktu                    : {elapsed:.1f} detik")
         say(f"JSON katalog             : {OUT_JSON}")
         say(f"CSV katalog              : {OUT_CSV}")
-        say(f"CSV periode estimasi     : {BASE_DIR / 'promo_catalog_all_merchants_v2_review.csv'}")
+        say(f"CSV periode estimasi     : {INTERNAL_DIR / 'promo_catalog_all_merchants_review.csv'}")
         say(f"Percobaan terbaru        : {ATTEMPT_JSON}")
         say(f"Run log                  : {RUN_LOG}")
         if validation["reasons"]:

@@ -27,8 +27,8 @@ OUTPUT_DIR = ROOT_DIR / "hasil"
 OLD_CSV = INPUT_DIR / "momskonten_promo_active.csv"
 NEW_CSV = INPUT_DIR / "promo_catalog_all_merchants.csv"
 MULTISOURCE_CSV = INTERNAL_DIR / "promo_multisource_products_all.csv"  # dibuat oleh collector
-MOMSMONEY_CSV = INTERNAL_DIR / "promo_catalog_all_merchants_v2.csv"  # hasil scrape Momsmoney/Kontan
-MOMSMONEY_RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_v2_runlog.json"
+MOMSMONEY_CSV = INTERNAL_DIR / "promo_catalog_all_merchants.csv"  # hasil scrape Momsmoney/Kontan
+MOMSMONEY_RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_runlog.json"
 OUT_ACTIVE = OUTPUT_DIR / "Katalog_Promo_Final.csv"
 OUT_CONFIRMED = INTERNAL_DIR / "promo_catalog_multisource_confirmed.csv"
 OUT_REVIEW = INTERNAL_DIR / "promo_catalog_multisource_review.csv"
@@ -40,10 +40,10 @@ OUT_REJECTED_PRODUCTS = INTERNAL_DIR / "promo_product_rows_rejected.csv"
 
 # Reuse the exact parsing/discount logic that is in the revised scraper.
 spec = importlib.util.spec_from_file_location(
-    "promo_scraper_v2", ENGINE_DIR / "promo_catalog_all_merchants_v2.py"
+    "promo_scraper", ENGINE_DIR / "promo_catalog_all_merchants.py"
 )
 if spec is None or spec.loader is None:
-    raise RuntimeError("Tidak dapat memuat promo_catalog_all_merchants_v2.py")
+    raise RuntimeError("Tidak dapat memuat promo_catalog_all_merchants.py")
 scraper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scraper)
 
@@ -54,9 +54,9 @@ REQUIRED_SCRAPER_FUNCTIONS = (
 _missing_functions = [name for name in REQUIRED_SCRAPER_FUNCTIONS if not hasattr(scraper, name)]
 if _missing_functions:
     raise RuntimeError(
-        "Versi promo_catalog_all_merchants_v2.py tidak kompatibel. "
+        "Engine promo_catalog_all_merchants.py tidak kompatibel dengan enhancer. "
         "Fungsi yang belum tersedia: " + ", ".join(_missing_functions) + ". "
-        "Gunakan file scraper v2 yang disertakan bersama enhancer ini."
+        "Pastikan file engine berada pada satu repositori dan diperbarui bersama."
     )
 
 TODAY = scraper.TODAY
@@ -490,12 +490,12 @@ def load_source(path, source_label):
             "source_campaign_titles": (raw.get("source_campaign_titles") or "").strip() or None,
             "source_dataset": source_label,
             "source_name": ((raw.get("source_name") or "").strip()
-                            or ("Momsmoney/Kontan" if "promo_catalog_all_merchants_v2" in source_label.casefold() else None)),
+                            or ("Momsmoney/Kontan" if "promo_catalog_all_merchants" in source_label.casefold() else None)),
             "source_names": (raw.get("source_names") or "").strip() or None,
             "source_type": ((raw.get("source_type") or "").strip()
-                            or ("secondary_public_articles" if "promo_catalog_all_merchants_v2" in source_label.casefold() else None)),
+                            or ("secondary_public_articles" if "promo_catalog_all_merchants" in source_label.casefold() else None)),
             "verification_status": (raw.get("verification_status") or "").strip()
-                                   or ("aggregator_only" if "promo_catalog_all_merchants_v2" in source_label.casefold() else None),
+                                   or ("aggregator_only" if "promo_catalog_all_merchants" in source_label.casefold() else None),
             "merchant_resolution_method": (raw.get("merchant_resolution_method") or "").strip() or None,
             "source_page_url": (raw.get("source_page_url") or "").strip() or None,
             "source_item_url": (raw.get("source_item_url") or "").strip() or None,

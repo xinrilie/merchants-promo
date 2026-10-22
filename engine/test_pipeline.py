@@ -23,7 +23,7 @@ def test_article_headlines_are_not_products():
         "Memanfaatkan Akhir Pekan Ini Untuk Menikmati Pilihan Menu Paris Baguette Dengan Lebih Hemat Bersama Promo",
         "Promo Paris Baguette Bni Wonderful Weekend",
         "☞ Cek Info Promo Paris Baguette Bni Wonderful Weekend",
-        # New v10 regressions: titles can be missing in legacy/stale CSV rows.
+        # Regression: titles can be missing in legacy/stale CSV rows.
         "Akhirnya",
     ]
     for name in cases:
@@ -44,6 +44,7 @@ def test_article_headlines_are_not_products():
             assert reason in {
                 "editorial_heading_misparsed_as_product",
                 "campaign_discount_claim_misparsed_as_product",
+                "campaign_or_article_heading_misparsed_as_product",
                 "long_narrative_with_discount_claim_not_product_sku",
                 "discount_claim_without_product_identity",
             }, (name, title, reason)
@@ -136,6 +137,42 @@ def test_enhancer_rejects_stale_false_rows_without_campaign_title():
         assert all(r.get("product_validation_status") == "rejected" for r in rows), [
             (r.get("product_text"), r.get("product_validation_status"), r.get("product_rejection_reason")) for r in rows
         ]
+
+
+
+def test_article_paragraphs_and_campaign_titles_are_rejected_even_with_prices():
+    cases = [
+        {
+            "product_text": "Belanja Kebutuhan Sehari-Hari Jadi Lebih Hemat Dengan Promo Lawson Sms Serius Murah Seminggu! Program Spesial Ini Kembali Menghadirkan Berbagai Produk Pilihan Dengan Harga Menarik, Mulai Dari",
+            "merchant_name": None, "promo_price": 3000,
+            "offer_text": "Rp3.000 saja. Cocok buat kamu yang ingin stok minuman, camilan, hingga kebutuhan rumah tangga",
+            "campaign_title": "Promo LAWSON SMS Serius Murah Seminggu 16-23 Oktober 2026",
+        },
+        {
+            "product_text": "Promo Gopay Hanya Berlaku Untuk Pengguna Baru, Dengan Pembelian Minimal",
+            "merchant_name": "Alfamart", "promo_price": 15000, "offer_text": "Rp15.000.",
+            "campaign_title": "Promo JSM Alfamart 23-25 Oktober 2026",
+        },
+        {
+            "product_text": "Cek Gambar Promo Lawson Sms Serius Murah Seminggu Mulai",
+            "merchant_name": None, "promo_price": 3000, "offer_text": "Rp3.000! di bawah ini untuk lihat detail dan informasi selengkapnya",
+            "campaign_title": "Promo LAWSON SMS Serius Murah Seminggu 16-23 Oktober 2026",
+        },
+        {
+            "product_text": "Indomaret – PWP (Purchase With Purchase) Min. Belanja",
+            "merchant_name": "Indomaret", "promo_price": 50000,
+            "offer_text": "Rp. 50.000 Periode: 15-28 Oktober 2026",
+            "campaign_title": "Promo JSM Indomaret 22-25 Oktober 2026",
+        },
+        {
+            "product_text": "2 2 Zespri Kiwi Sungold 2", "merchant_name": "Yogya",
+            "promo_price": None, "offer_text": "Diskon 65%, Pembelian Ke-2",
+            "campaign_title": "Promo Unggulan Alfamart VS Yogya minggu ini",
+        },
+    ]
+    for row in cases:
+        reason = product_candidate_rejection_reason(row, source_mode="article")
+        assert reason, f"Editorial/noisy candidate passed validation: {row['product_text']}"
 
 
 def test_name_fuzzy_guardrails():
@@ -307,8 +344,8 @@ def test_momsmoney_feed_freshness_gate():
     from datetime import date
     with tempfile.TemporaryDirectory() as temp_dir:
         folder = Path(temp_dir)
-        feed = folder / "promo_catalog_all_merchants_v2.csv"
-        log = folder / "promo_catalog_all_merchants_v2_runlog.json"
+        feed = folder / "promo_catalog_all_merchants.csv"
+        log = folder / "promo_catalog_all_merchants_runlog.json"
         feed.write_text("product_text\nExample SKU\n", encoding="utf-8")
         old_feed_path, old_log_path = enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_RUN_LOG
         try:
@@ -350,7 +387,7 @@ def test_momsmoney_rows_get_source_metadata():
                 "valid_from": "2026-10-23", "valid_until": "2026-10-25", "promo_status": "active",
                 "source_url": "https://momsmoney.kontan.co.id/news/promo-test",
             })
-        rows = enhancer.load_source(path, "promo_catalog_all_merchants_v2.csv")
+        rows = enhancer.load_source(path, "promo_catalog_all_merchants.csv")
         assert len(rows) == 1
         assert rows[0]["source_name"] == "Momsmoney/Kontan"
         assert rows[0]["verification_status"] == "aggregator_only"
@@ -360,6 +397,7 @@ def main():
     test_article_headlines_are_not_products()
     test_real_products_stay_eligible()
     test_discount_only_short_fragments_need_product_identity()
+    test_article_paragraphs_and_campaign_titles_are_rejected_even_with_prices()
     test_enhancer_rejects_stale_false_rows_without_campaign_title()
     test_name_fuzzy_guardrails()
     test_collector_article_extraction_regression()
@@ -367,11 +405,12 @@ def main():
     test_cross_source_fuzzy_merge_and_guardrails()
     test_momsmoney_feed_freshness_gate()
     test_momsmoney_rows_get_source_metadata()
-    print("V10 REGRESSION TESTS PASSED")
+    print("REGRESSION TESTS PASSED")
     print("- editorial/headline fragments from the screenshot are rejected")
     print("- valid SKU price and bundle examples are kept")
     print("- fuzzy name matching preserves size/flavour distinctions")
     print("- collector filters screenshot editorial false positives before writing scrape output")
+    print("- article paragraphs and campaign headings are rejected even when a price was extracted")
     print("- enhancer independently filters stale/old false product rows even when campaign_title is missing")
     print("- fuzzy merge combines corroborated cross-source offers but preserves variant/price conflicts")
     print("- Momsmoney/Kontan is ingested only when today's latest scrape was successfully updated")

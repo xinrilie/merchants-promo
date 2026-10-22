@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 echo =====================================================
-echo KATALOG PROMO MULTI-SUMBER - v10
+echo KATALOG PROMO MULTI-SUMBER
 echo Tahap: Momsmoney + 3 agregator > validasi produk > fuzzy lintas sumber > final catalog
 echo Sumber live: Momsmoney/Kontan, Hemat.id, Katalogpromosi.com, Scanharga.com
 echo =====================================================
@@ -30,12 +30,12 @@ if errorlevel 1 goto :error
 
 echo.
 echo [3/6] Uji regresi pipeline, judul artikel, dan fuzzy matching...
-%PYTHON% "%~dp0engine\test_pipeline_v10.py"
+%PYTHON% "%~dp0engine\test_pipeline.py"
 if errorlevel 1 goto :error
 
 echo.
 echo [4/6] Mengambil artikel promo Momsmoney/Kontan...
-%PYTHON% "%~dp0engine\promo_catalog_all_merchants_v2.py"
+%PYTHON% "%~dp0engine\promo_catalog_all_merchants.py"
 if errorlevel 1 goto :error
 
 echo.

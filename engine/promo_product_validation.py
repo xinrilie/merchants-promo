@@ -32,15 +32,20 @@ EDITORIAL_PREFIX_RE = re.compile(
     r"bagaimana(?:\s+cara)?\b|mengapa\b|kenapa\b|apakah\b|"
     r"memanfaatkan\b|manfaatkan\b|menikmati\b|mendapatkan\b|memperoleh\b|"
     r"menggunakan\b|memaksimalkan\b|maksimalkan\b|"
+    r"belanja(?:\s+(?:kebutuhan|lebih|hemat|sehari-hari))?\b|"
+    r"cek\s+(?:gambar|info|informasi|promo|syarat|ketentuan)\b|"
+    r"klik\b|lihat\s+(?:gambar|promo|selengkapnya)\b|"
+    r"jangan\s+lewatkan\b|hadir(?:kan|nya)?\b|kembali\s+hadir\b|"
     r"cara\s+(?:mendapatkan|mengikuti|membeli|menukarkan|menggunakan)\b|"
-    r"cek\s+(?:info|informasi|promo|syarat|ketentuan)\b|"
     r"info\s+(?:promo|lengkap)\b|informasi\s+(?:promo|lengkap)\b|"
     r"dengan\s+lebih\s+hemat\b|untuk\s+(?:mendapatkan|menikmati|mengikuti)\b|"
     r"tips\b|manfaat\b|benefit\b|keuntungan\b|akhirnya\b|ternyata\b|"
     r"penawaran\b|mekanisme\b|syarat\b|ketentuan\b|"
     r"daftar\b|simak\b|ketahui\b|berikut\b|inilah\b|ini\s+dia\b|"
     r"begini\b|panduan\b|bocoran\b|intip\b|mengenal\b|"
-    r"alasan\b|serba-serbi\b|faq\b"
+    r"alasan\b|serba-serbi\b|faq\b|"
+    r"(?:indomaret\s*[–—-]\s*)?pwp(?:\s*\(|\s+min\b|\s+minimum\b)|"
+    r"purchase\s+with\s+purchase\b"
     r")",
     re.I,
 )
@@ -60,7 +65,8 @@ EDITORIAL_PHRASE_RE = re.compile(
 # heading rather than a product SKU. They are not used to reject normal priced SKUs.
 CAMPAIGN_HEADING_PREFIX_RE = re.compile(
     r"^(?:promo(?:si)?|diskon|katalog|program(?:\s+promo)?|weekend|weekday|"
-    r"campaign|kampanye|cek\s+info|info\s+promo|lihat\s+promo)\b",
+    r"campaign|kampanye|cek\s+(?:gambar|info|informasi|promo)|info\s+promo|"
+    r"lihat\s+promo|jangan\s+lewatkan)\b",
     re.I,
 )
 
@@ -139,6 +145,16 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
     if EDITORIAL_PREFIX_RE.search(clean_name) or EDITORIAL_PHRASE_RE.search(clean_name):
         return "editorial_heading_misparsed_as_product"
 
+    # Campaign titles and call-to-action headings are never individual SKUs, even
+    # when a parser also extracted a price from the surrounding article paragraph.
+    if CAMPAIGN_HEADING_PREFIX_RE.search(clean_name):
+        return "campaign_or_article_heading_misparsed_as_product"
+
+    # A repeated pair of leading numbers is a known symptom of a malformed card
+    # extraction (e.g. "2 2 Zespri Kiwi Sungold 2"), not reliable SKU identity.
+    if re.match(r"^\d+\s+\d+\s+[A-Za-z]", clean_name):
+        return "leading_numeric_noise_in_product_name"
+
     has_price = _has_numeric_price(row, offer)
     has_bundle = _has_bundle(offer, row)
     has_discount = bool(DISCOUNT_RE.search(offer))
@@ -149,7 +165,7 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
 
     # A line containing only a campaign-level percentage is not sufficient proof
     # of an individual SKU. This rule deliberately does not depend on campaign_title:
-    # older CSV rows often have no title populated, which was the v8 false-positive.
+    # older CSV rows often have no title populated.
     if has_discount and not has_price and not has_bundle:
         overlap, sequence = _campaign_overlap(clean_name, title)
         name_words = len(tokens)

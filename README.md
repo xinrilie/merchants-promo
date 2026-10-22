@@ -1,4 +1,4 @@
-# 🛒 Merchant Promo Catalog Engine (v10)
+# 🛒 Merchant Promo Catalog Engine
 
 **Python Version:** 3.10+ | **Platform:** Windows 10/11
 
@@ -18,7 +18,7 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 Pipeline memisahkan pengumpulan data dan pemrosesan lintas sumber agar produk dari beberapa situs bisa dibandingkan setelah semua data terkumpul.
 
-1. **Collector — pencari data:** `promo_catalog_all_merchants_v2.py` mengambil artikel Momsmoney/Kontan dari kategori Hemat; setelah itu `promo_multisource_collector.py` mengambil katalog dari Hemat.id, Katalogpromosi.com, dan Scanharga.com; mengekstrak kartu/teks penawaran; menyimpan URL sumber; dan melakukan validasi awal untuk menolak kandidat yang terlihat seperti judul artikel, syarat umum, atau klaim diskon kampanye.
+1. **Collector — pencari data:** `promo_catalog_all_merchants.py` mengambil artikel Momsmoney/Kontan dari kategori Hemat; setelah itu `promo_multisource_collector.py` mengambil katalog dari Hemat.id, Katalogpromosi.com, dan Scanharga.com; mengekstrak kartu/teks penawaran; menyimpan URL sumber; dan melakukan validasi awal untuk menolak kandidat yang terlihat seperti judul artikel, syarat umum, atau klaim diskon kampanye.
 2. **Enhancer — normalisasi & validasi akhir:** membaca hasil collector dan CSV katalog lama, menormalkan nama/harga/tanggal, mengulang validasi non-produk, melakukan deduplikasi persis serta konsolidasi periode yang aman, kemudian menjalankan *fuzzy matching* lintas sumber sebelum ekspor.
 3. **Product validation:** modul bersama yang dipakai oleh collector dan enhancer. Ini adalah lapisan pertahanan ganda agar judul artikel tidak masuk kembali ke katalog dari sumber lama atau hasil scraping sebelumnya.
 4. **Product name engine:** menyamakan spasi, ejaan, satuan, dan format kemasan. *Fuzzy matching* memberi kandidat kemiripan, tetapi tidak boleh menggabungkan produk jika ukuran/varian atau detail penawaran bertentangan.
@@ -31,15 +31,15 @@ Collector memproses satu halaman/sumber pada satu waktu sehingga belum memiliki 
 ---
 
 
-## 🛠️ Perbaikan v10 — Validasi klaim diskon tanpa konteks judul
+## 🛠️ Guardrail validasi produk
 
 - Baris lama yang kehilangan `campaign_title` kini tetap divalidasi; judul seperti `Promo Paris Baguette BNI Wonderful Weekend` tidak bisa lolos hanya karena kolom judul kosong.
 - Fragmen generik satu kata seperti `Akhirnya` ditolak jika satu-satunya bukti penawaran adalah klaim persentase diskon dan tidak ada bukti SKU.
 - Baris promo bundling tanpa harga satuan tetap dapat lolos jika syarat seperti `Beli 1 Gratis 1` eksplisit.
 - Produk bernama jelas seperti `My Baby Body Cologne Sweet Floral 100 ml` tetap lolos validasi discount-only.
-- Regression tests v10 menguji kasus `campaign_title` kosong agar bug tidak kembali.
+- Tes regresi menguji kasus `campaign_title` kosong agar bug tidak kembali.
 
-## ✨ Fitur Utama (v10)
+## ✨ Fitur Utama
 
 - **Penyaringan editorial dua lapis:** menolak baris seperti “Berapa Minimum Transaksi…”, “Memanfaatkan Akhir Pekan…”, “Cek Info Promo…”, atau “Promo Paris Baguette BNI Wonderful Weekend” ketika kalimat tersebut sebenarnya judul/klaim kampanye, bukan SKU.
 - **Klaim diskon kampanye dipisahkan:** angka seperti “Diskon 50%” pada judul artikel tidak otomatis dijadikan diskon produk.
@@ -48,7 +48,7 @@ Collector memproses satu halaman/sumber pada satu waktu sehingga belum memiliki 
 - **Validasi periode:** periode estimasi dan konflik tanggal ditandai; baris yang tidak aman masuk review.
 - **Audit transparan:** kandidat yang ditolak, kemungkinan duplikat, sumber artikel, dan metrik kualitas disimpan terpisah.
 - **Perlindungan data lama:** hasil sebelumnya tidak seharusnya diganti dengan katalog kosong hanya karena satu sumber gagal diakses. Periksa run log untuk status sumber dan fallback.
-- **Scanharga berbasis gambar:** URL katalog gambar dicatat untuk pemrosesan lanjutan. Versi ini tidak mengarang data produk/harga jika informasi gambar belum diekstrak; OCR otomatis penuh belum termasuk.
+- **Scanharga berbasis gambar:** URL katalog gambar dicatat untuk pemrosesan lanjutan. Engine tidak mengarang data produk/harga jika informasi gambar belum diekstrak; OCR otomatis penuh belum termasuk.
 
 ---
 
@@ -57,6 +57,8 @@ Collector memproses satu halaman/sumber pada satu waktu sehingga belum memiliki 
 ```text
 promo-katalog-engine/
 ├── README.md
+├── .gitignore
+├── .github/workflows/ci.yml
 ├── requirements.txt
 ├── Install_Dependency.bat
 ├── Jalankan_Promo.bat
@@ -68,8 +70,8 @@ promo-katalog-engine/
 │   ├── enrich_existing_promo_catalog_multisource.py
 │   ├── promo_product_validation.py
 │   ├── promo_names.py
-│   ├── promo_catalog_all_merchants_v2.py
-│   └── test_pipeline_v10.py
+│   ├── promo_catalog_all_merchants.py
+│   └── test_pipeline.py
 ├── hasil/       # dibuat otomatis
 └── _internal/   # data antara, log, dan audit; dibuat otomatis
 ```
@@ -88,7 +90,8 @@ Setelah menjalankan `Jalankan_Promo.bat`, output utama ditulis ke folder `hasil/
 File teknis tersimpan di `_internal/`:
 
 - **`promo_multisource_products_all.csv`** — kandidat produk dari Hemat.id, Katalogpromosi.com, dan Scanharga.com.
-- **`promo_catalog_all_merchants_v2.csv`** — hasil scrape terbaru Momsmoney/Kontan; dipakai hanya jika run log menyatakan scrape berhasil diperbarui pada tanggal berjalan.
+- **`promo_catalog_all_merchants.csv`** — hasil scrape terbaru Momsmoney/Kontan; dipakai hanya jika run log menyatakan scrape berhasil diperbarui pada tanggal berjalan.
+- **`promo_catalog_all_merchants_review.csv`** — kandidat periode estimasi atau penawaran yang perlu ditinjau dari collector Momsmoney/Kontan.
 - **`promo_multisource_articles.csv`** — log artikel/halaman yang diperiksa.
 - **`promo_multisource_catalog_images.csv`** — URL gambar katalog yang ditemukan.
 - **`promo_multisource_rejected_candidates.csv`** — kandidat yang ditolak oleh collector.
@@ -119,15 +122,15 @@ Lalu jalankan pipeline:
 ```powershell
 python engine/promo_names.py
 python engine/promo_multisource_collector.py --self-test
-python engine/test_pipeline_v10.py
-python engine/promo_catalog_all_merchants_v2.py
+python engine/test_pipeline.py
+python engine/promo_catalog_all_merchants.py
 python engine/promo_multisource_collector.py
 python engine/enrich_existing_promo_catalog_multisource.py
 ```
 
 ---
 
-## 🧪 Pengujian regresi v10
+## 🧪 Pengujian regresi
 
 - Baris editorial/kampanye ditolak walaupun `campaign_title` kosong pada CSV lama.
 - Fragmen satu kata seperti `Akhirnya` tidak diterima sebagai SKU hanya karena disertai klaim diskon.

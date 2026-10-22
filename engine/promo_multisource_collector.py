@@ -936,7 +936,7 @@ def fetch_page(session: requests.Session, url: str) -> tuple[BeautifulSoup | Non
 
 # Store article records per run without introducing a global data dependency.
 def run_source(session: requests.Session, source_name: str) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
-    # Local version of discovery with explicit article record collection. Kept separate
+    # Local discovery with explicit article record collection. Kept separate
     # to make failures and partial results visible in the run log.
     seeds = SOURCE_SEEDS[source_name]
     queue = list(OrderedDict.fromkeys(seeds))

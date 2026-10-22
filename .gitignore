@@ -1,9 +1,20 @@
+# Python bytecode and local environments
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-_internal/
-hasil/
-*.log
-.DS_Store
-Thumbs.db
+env/
+.env
+
+# Runtime scrape logs, intermediate datasets, and audit reports
+_internal/*
+!_internal/.gitkeep
+
+# Generated user-facing catalog exports (recreate with Jalankan_Promo.bat)
+/hasil/*
+!/hasil/.gitkeep
+
+# Test caches
+.pytest_cache/
+.coverage
+htmlcov/
