@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-10-23T04:44:40+07:00",
+  "built_at": "2026-10-23T05:43:24+07:00",
   "reference_date": "2026-10-23",
   "sources": [
     "Hemat.id",
@@ -9,12 +9,12 @@
   "request_count": 91,
   "successful_requests": 89,
   "blocked_or_limited_requests": 0,
-  "fresh_product_rows_before_fallback": 1214,
+  "fresh_product_rows_before_fallback": 1211,
   "preserved_previous_rows_by_source": {},
-  "all_product_rows_before_dedup": 1214,
-  "product_rows_after_exact_dedup": 809,
-  "active_rows_including_end_date_estimates": 510,
-  "review_rows": 322,
+  "all_product_rows_before_dedup": 1211,
+  "product_rows_after_exact_dedup": 806,
+  "active_rows_including_end_date_estimates": 508,
+  "review_rows": 319,
   "merchant_counts": {
     "Alfamart": 86,
     "Indomaret": 137,
@@ -23,23 +23,23 @@
     "Yogya": 33,
     "Hari Hari Swalayan": 21,
     "Tip Top": 30,
-    "UNKNOWN": 28,
     "Lotte Mart": 34,
+    "UNKNOWN": 26,
     "Guardian": 2
   },
   "rows_by_source": {
     "Hemat.id": 727,
-    "Katalogpromosi.com": 415,
+    "Katalogpromosi.com": 412,
     "Scanharga.com": 72
   },
-  "rows_with_explicit_discount": 257,
+  "rows_with_explicit_discount": 254,
   "rows_with_price_calculated_discount": 0,
   "image_references_found": 407,
-  "rejected_non_product_candidates": 33,
+  "rejected_non_product_candidates": 36,
   "rejection_reasons": {
-    "editorial_heading_misparsed_as_product": 27,
-    "no_product_level_offer_evidence": 2,
-    "campaign_discount_claim_misparsed_as_product": 4
+    "campaign_discount_claim_misparsed_as_product": 6,
+    "editorial_heading_misparsed_as_product": 28,
+    "no_product_level_offer_evidence": 2
   },
   "output_files": [
     "promo_multisource_products_all.csv",
@@ -249,7 +249,7 @@
       "error": null,
       "final_url": "https://katalogpromosi.com/restoran-dan-cafe/",
       "title": "Restoran dan Cafe",
-      "product_rows": 1,
+      "product_rows": 0,
       "image_count": 1
     },
     {
@@ -393,7 +393,7 @@
       "error": null,
       "final_url": "https://katalogpromosi.com/promo-9-9-double-date-sale-2026/",
       "title": "PROMO 9.9 DOUBLE DATE SALE 2026 Diskon, Cashback & Penawaran Spesial",
-      "product_rows": 13,
+      "product_rows": 12,
       "image_count": 2
     },
     {
@@ -549,7 +549,7 @@
       "error": null,
       "final_url": "https://katalogpromosi.com/promo-paris-baguette-bni-wondrful-weekend-diskon-50/",
       "title": "Promo Paris Baguette BNI Wondrful Weekend Diskon 50%",
-      "product_rows": 3,
+      "product_rows": 2,
       "image_count": 2
     },
     {

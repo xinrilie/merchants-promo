@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 from collections import Counter, OrderedDict, defaultdict
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 import importlib.util
@@ -27,6 +27,8 @@ OUTPUT_DIR = ROOT_DIR / "hasil"
 OLD_CSV = INPUT_DIR / "momskonten_promo_active.csv"
 NEW_CSV = INPUT_DIR / "promo_catalog_all_merchants.csv"
 MULTISOURCE_CSV = INTERNAL_DIR / "promo_multisource_products_all.csv"  # dibuat oleh collector
+MOMSMONEY_CSV = INTERNAL_DIR / "promo_catalog_all_merchants_v2.csv"  # hasil scrape Momsmoney/Kontan
+MOMSMONEY_RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_v2_runlog.json"
 OUT_ACTIVE = OUTPUT_DIR / "Katalog_Promo_Final.csv"
 OUT_CONFIRMED = INTERNAL_DIR / "promo_catalog_multisource_confirmed.csv"
 OUT_REVIEW = INTERNAL_DIR / "promo_catalog_multisource_review.csv"
@@ -382,6 +384,29 @@ def safe_discount_fields(offer_text, promo_price, normal_price, price_basis,
     return result
 
 
+def momsmoney_output_is_fresh() -> tuple[bool, str]:
+    """Only ingest a Momsmoney CSV updated successfully in today's run.
+
+    The legacy collector intentionally preserves the previous CSV if validation
+    fails. Its run log is therefore the freshness gate; a stale CSV must not be
+    treated as newly scraped data.
+    """
+    if not MOMSMONEY_CSV.exists():
+        return False, "CSV hasil Momsmoney belum ada"
+    if not MOMSMONEY_RUN_LOG.exists():
+        return False, "run log Momsmoney belum ada; CSV dilewati agar data lama tidak disangka baru"
+    try:
+        log = json.loads(MOMSMONEY_RUN_LOG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"run log Momsmoney tidak terbaca: {type(exc).__name__}"
+    checked_at = str(log.get("checked_at") or "")
+    if log.get("output_status") != "updated":
+        return False, f"output_status Momsmoney={log.get('output_status') or 'unknown'}"
+    if checked_at[:10] != TODAY.isoformat():
+        return False, f"tanggal run Momsmoney bukan hari ini ({checked_at[:10] or 'tidak tersedia'})"
+    return True, "hasil scrape Momsmoney berhasil diperbarui hari ini"
+
+
 def load_source(path, source_label):
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
@@ -464,10 +489,13 @@ def load_source(path, source_label):
             "source_urls": (raw.get("source_urls") or "").strip() or None,
             "source_campaign_titles": (raw.get("source_campaign_titles") or "").strip() or None,
             "source_dataset": source_label,
-            "source_name": (raw.get("source_name") or "").strip() or None,
+            "source_name": ((raw.get("source_name") or "").strip()
+                            or ("Momsmoney/Kontan" if "promo_catalog_all_merchants_v2" in source_label.casefold() else None)),
             "source_names": (raw.get("source_names") or "").strip() or None,
-            "source_type": (raw.get("source_type") or "").strip() or None,
-            "verification_status": (raw.get("verification_status") or "").strip() or None,
+            "source_type": ((raw.get("source_type") or "").strip()
+                            or ("secondary_public_articles" if "promo_catalog_all_merchants_v2" in source_label.casefold() else None)),
+            "verification_status": (raw.get("verification_status") or "").strip()
+                                   or ("aggregator_only" if "promo_catalog_all_merchants_v2" in source_label.casefold() else None),
             "merchant_resolution_method": (raw.get("merchant_resolution_method") or "").strip() or None,
             "source_page_url": (raw.get("source_page_url") or "").strip() or None,
             "source_item_url": (raw.get("source_item_url") or "").strip() or None,
@@ -1709,7 +1737,10 @@ def main():
     old_rows = load_source(OLD_CSV, OLD_CSV.name)
     new_rows = load_source(NEW_CSV, NEW_CSV.name)
     multisource_rows = load_source(MULTISOURCE_CSV, MULTISOURCE_CSV.name) if MULTISOURCE_CSV.exists() else []
-    all_loaded_rows = old_rows + new_rows + multisource_rows
+    momsmoney_fresh, momsmoney_status_note = momsmoney_output_is_fresh()
+    momsmoney_rows = load_source(MOMSMONEY_CSV, MOMSMONEY_CSV.name) if momsmoney_fresh else []
+    print("Momsmoney/Kontan fresh scrape:", len(momsmoney_rows), "rows;", momsmoney_status_note)
+    all_loaded_rows = old_rows + new_rows + multisource_rows + momsmoney_rows
     rejected_product_rows = [r for r in all_loaded_rows if r.get("product_validation_status") == "rejected"]
     input_rows = [r for r in all_loaded_rows if r.get("product_validation_status") != "rejected"]
     # Fuzzy matching belongs here, after all source outputs are loaded and bad
@@ -1753,7 +1784,14 @@ def main():
     report = {
         "built_at": scraper.timestamp(),
         "reference_date": TODAY.isoformat(),
-        "input_files": {OLD_CSV.name: len(old_rows), NEW_CSV.name: len(new_rows), **({MULTISOURCE_CSV.name: len(multisource_rows)} if MULTISOURCE_CSV.exists() else {})},
+        "input_files": {
+            OLD_CSV.name: len(old_rows),
+            NEW_CSV.name: len(new_rows),
+            **({MULTISOURCE_CSV.name: len(multisource_rows)} if MULTISOURCE_CSV.exists() else {}),
+            **({MOMSMONEY_CSV.name: len(momsmoney_rows)} if momsmoney_fresh else {}),
+        },
+        "momsmoney_fresh_scrape_loaded": momsmoney_fresh,
+        "momsmoney_fresh_scrape_note": momsmoney_status_note,
         "input_row_count": len(all_loaded_rows),
         "eligible_product_input_rows": len(input_rows),
         "rejected_non_product_rows": len(rejected_product_rows),
@@ -1800,7 +1838,9 @@ def main():
 
     print("DONE")
     print("input rows:", len(input_rows))
-    print("multisource input rows:", len(multisource_rows))
+    print("multi-aggregator input rows:", len(multisource_rows))
+    print("fresh Momsmoney input rows:", len(momsmoney_rows))
+    print("Momsmoney load status:", momsmoney_status_note)
     print("exact deduplicated rows:", len(merged_raw))
     print("consolidated rows:", len(consolidated))
     print("overlapping offer rows absorbed:", consolidated_rows)

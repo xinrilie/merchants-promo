@@ -14,32 +14,37 @@ if errorlevel 1 (
 )
 
 echo =====================================================
-echo KATALOG PROMO MULTI-SUMBER - v9
-echo Tahap: parser > validasi produk > fuzzy lintas sumber > final catalog
-echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com + data katalog lama
+echo KATALOG PROMO MULTI-SUMBER - v10
+echo Tahap: Momsmoney + 3 agregator > validasi produk > fuzzy lintas sumber > final catalog
+echo Sumber live: Momsmoney/Kontan, Hemat.id, Katalogpromosi.com, Scanharga.com
 echo =====================================================
 echo.
-echo [1/5] Uji normalisasi nama produk...
+echo [1/6] Uji normalisasi nama produk...
 %PYTHON% "%~dp0engine\promo_names.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [2/5] Uji parser dan guardrails collector...
+echo [2/6] Uji parser dan guardrails collector...
 %PYTHON% "%~dp0engine\promo_multisource_collector.py" --self-test
 if errorlevel 1 goto :error
 
 echo.
-echo [3/5] Uji regresi pipeline, judul artikel, dan fuzzy matching...
-%PYTHON% "%~dp0engine\test_pipeline_v9.py"
+echo [3/6] Uji regresi pipeline, judul artikel, dan fuzzy matching...
+%PYTHON% "%~dp0engine\test_pipeline_v10.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [4/5] Mengambil promo dari situs publik...
+echo [4/6] Mengambil artikel promo Momsmoney/Kontan...
+%PYTHON% "%~dp0engine\promo_catalog_all_merchants_v2.py"
+if errorlevel 1 goto :error
+
+echo.
+echo [5/6] Mengambil promo Hemat.id, Katalogpromosi.com, dan Scanharga.com...
 %PYTHON% "%~dp0engine\promo_multisource_collector.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [5/5] Membersihkan data, fuzzy-match lintas sumber, validasi, ekspor...
+echo [6/6] Menggabungkan 4 sumber live + katalog baseline, validasi, fuzzy-match, ekspor...
 %PYTHON% "%~dp0engine\enrich_existing_promo_catalog_multisource.py"
 if errorlevel 1 goto :error
 

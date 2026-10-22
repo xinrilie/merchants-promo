@@ -20,12 +20,15 @@ from bs4 import BeautifulSoup
 # =========================================================
 
 BASE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = BASE_DIR.parent
+INTERNAL_DIR = ROOT_DIR / "_internal"
 
-OUT_JSON = BASE_DIR / "promo_catalog_all_merchants_v2.json"
-OUT_CSV = BASE_DIR / "promo_catalog_all_merchants_v2.csv"
-RUN_LOG = BASE_DIR / "promo_catalog_all_merchants_v2_runlog.json"
-ATTEMPT_JSON = BASE_DIR / "promo_catalog_all_merchants_v2_latest_attempt.json"
-HISTORY_DIR = BASE_DIR / "promo_catalog_all_merchants_v2_history"
+# Scrape outputs belong in _internal, not mixed with source code in engine/.
+OUT_JSON = INTERNAL_DIR / "promo_catalog_all_merchants_v2.json"
+OUT_CSV = INTERNAL_DIR / "promo_catalog_all_merchants_v2.csv"
+RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_v2_runlog.json"
+ATTEMPT_JSON = INTERNAL_DIR / "promo_catalog_all_merchants_v2_latest_attempt.json"
+HISTORY_DIR = INTERNAL_DIR / "promo_catalog_all_merchants_v2_history"
 MANUAL_URLS = BASE_DIR / "promo_sources.txt"
 
 TODAY = datetime.now(ZoneInfo("Asia/Jakarta")).date()
@@ -1335,6 +1338,7 @@ def validate_run(active_articles: list[dict], active_products: list[dict]) -> di
 
 
 def main() -> None:
+    INTERNAL_DIR.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     session = requests.Session()
     session.headers.update({

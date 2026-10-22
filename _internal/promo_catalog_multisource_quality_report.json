@@ -1,32 +1,34 @@
 {
-  "built_at": "2026-10-23T04:44:49.143776+07:00",
+  "built_at": "2026-10-23T05:43:31.768671+07:00",
   "reference_date": "2026-10-23",
   "input_files": {
     "momskonten_promo_active.csv": 559,
     "promo_catalog_all_merchants.csv": 792,
-    "promo_multisource_products_all.csv": 809
+    "promo_multisource_products_all.csv": 806
   },
-  "input_row_count": 2160,
-  "eligible_product_input_rows": 2158,
+  "momsmoney_fresh_scrape_loaded": false,
+  "momsmoney_fresh_scrape_note": "CSV hasil Momsmoney belum ada",
+  "input_row_count": 2157,
+  "eligible_product_input_rows": 2155,
   "rejected_non_product_rows": 2,
   "rejected_non_product_reasons": {
     "no_product_level_offer_evidence": 2
   },
-  "exact_deduplicated_row_count": 1717,
+  "exact_deduplicated_row_count": 1714,
   "exact_duplicate_rows_collapsed": 441,
   "overlapping_offer_groups_consolidated": 26,
   "overlapping_offer_rows_absorbed": 26,
   "equivalent_cross_source_offer_groups_merged": 36,
   "equivalent_cross_source_offer_rows_absorbed": 36,
-  "consolidated_row_count": 1655,
-  "current_active_including_estimates": 1000,
+  "consolidated_row_count": 1652,
+  "current_active_including_estimates": 998,
   "active_period_conflicts_routed_to_review": 276,
-  "confirmed_active_rows": 687,
-  "review_rows": 1111,
-  "rows_with_product_discount": 602,
+  "confirmed_active_rows": 685,
+  "review_rows": 1110,
+  "rows_with_product_discount": 600,
   "rows_with_price_calculated_discount": 471,
   "rows_with_bundle_discount_estimate": 88,
-  "rows_with_campaign_level_discount_claim": 21,
+  "rows_with_campaign_level_discount_claim": 20,
   "rows_with_period_conflict": 298,
   "rows_with_overlapping_offer_periods_before_consolidation": 560,
   "cross_dataset_duplicate_groups_or_rows": 429,
@@ -36,7 +38,7 @@
   "discount_basis_counts_current": {
     "not_available": 397,
     "calculated_from_unit_prices": 254,
-    "explicit_offer": 273,
+    "explicit_offer": 271,
     "bundle_estimate_same_item_value": 74,
     "unit_context_review": 1,
     "explicit_max": 1
@@ -58,7 +60,7 @@
     "Popeyes": 14,
     "Tip Top": 30,
     "Yogya": 33,
-    "UNKNOWN": 28
+    "UNKNOWN": 26
   },
   "user_facing_output_files": [
     "hasil/Katalog_Promo_Final.csv",
