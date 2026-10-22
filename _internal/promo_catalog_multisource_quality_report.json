@@ -1,40 +1,45 @@
 {
-  "built_at": "2026-10-23T03:41:10.820783+07:00",
+  "built_at": "2026-10-23T04:27:42.384636+07:00",
   "reference_date": "2026-10-23",
   "input_files": {
     "momskonten_promo_active.csv": 559,
     "promo_catalog_all_merchants.csv": 792,
-    "promo_multisource_products_all.csv": 830
+    "promo_multisource_products_all.csv": 816
   },
-  "input_row_count": 2181,
-  "exact_deduplicated_row_count": 1740,
+  "input_row_count": 2167,
+  "eligible_product_input_rows": 2165,
+  "rejected_non_product_rows": 2,
+  "rejected_non_product_reasons": {
+    "no_product_level_offer_evidence": 2
+  },
+  "exact_deduplicated_row_count": 1724,
   "exact_duplicate_rows_collapsed": 441,
   "overlapping_offer_groups_consolidated": 26,
   "overlapping_offer_rows_absorbed": 26,
   "equivalent_cross_source_offer_groups_merged": 36,
   "equivalent_cross_source_offer_rows_absorbed": 36,
-  "consolidated_row_count": 1678,
-  "current_active_including_estimates": 1016,
-  "active_period_conflicts_routed_to_review": 277,
-  "confirmed_active_rows": 703,
-  "review_rows": 1117,
-  "rows_with_product_discount": 611,
+  "consolidated_row_count": 1662,
+  "current_active_including_estimates": 1007,
+  "active_period_conflicts_routed_to_review": 276,
+  "confirmed_active_rows": 694,
+  "review_rows": 1111,
+  "rows_with_product_discount": 605,
   "rows_with_price_calculated_discount": 471,
   "rows_with_bundle_discount_estimate": 88,
-  "rows_with_campaign_level_discount_claim": 33,
-  "rows_with_period_conflict": 299,
+  "rows_with_campaign_level_discount_claim": 27,
+  "rows_with_period_conflict": 298,
   "rows_with_overlapping_offer_periods_before_consolidation": 560,
   "cross_dataset_duplicate_groups_or_rows": 429,
   "product_name_variant_groups": 58,
   "possible_duplicate_candidate_pairs": 48,
   "possible_duplicate_high_similarity_pairs": 30,
   "discount_basis_counts_current": {
-    "not_available": 404,
+    "not_available": 401,
     "calculated_from_unit_prices": 254,
-    "explicit_offer": 281,
+    "explicit_offer": 276,
     "bundle_estimate_same_item_value": 74,
     "unit_context_review": 1,
-    "explicit_max": 2
+    "explicit_max": 1
   },
   "merchant_counts_current": {
     "Alfamart": 284,
@@ -47,13 +52,13 @@
     "HokBen": 13,
     "Hypermart": 2,
     "Ichiban Sushi": 4,
-    "Indomaret": 323,
+    "Indomaret": 322,
     "J.CO": 3,
     "Lotte Mart": 34,
     "Popeyes": 14,
     "Tip Top": 30,
     "Yogya": 33,
-    "UNKNOWN": 43
+    "UNKNOWN": 35
   },
   "user_facing_output_files": [
     "hasil/Katalog_Promo_Final.csv",
@@ -63,6 +68,7 @@
     "_internal/promo_catalog_multisource_confirmed.csv",
     "_internal/promo_catalog_multisource_review.csv",
     "_internal/promo_catalog_multisource_full_audit.csv",
+    "_internal/promo_product_rows_rejected.csv",
     "_internal/promo_catalog_multisource_quality_report.json"
   ],
   "clean_catalog_columns": [

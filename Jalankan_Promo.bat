@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 echo =====================================================
-echo KATALOG PROMO MULTI-SUMBER - v7
+echo KATALOG PROMO MULTI-SUMBER - v8
 echo Tahap: parser > validasi produk > fuzzy lintas sumber > final catalog
 echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com + data katalog lama
 echo =====================================================
@@ -30,7 +30,7 @@ if errorlevel 1 goto :error
 
 echo.
 echo [3/5] Uji regresi pipeline, judul artikel, dan fuzzy matching...
-%PYTHON% "%~dp0engine\test_pipeline_v7.py"
+%PYTHON% "%~dp0engine\test_pipeline_v8.py"
 if errorlevel 1 goto :error
 
 echo.

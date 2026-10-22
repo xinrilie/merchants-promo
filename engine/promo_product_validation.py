@@ -26,9 +26,16 @@ OFFER_RE = re.compile(
 # Structural/article-language patterns, rather than a retailer/product blacklist.
 EDITORIAL_PREFIX_RE = re.compile(
     r"^(?:"
+    # Article/question headings commonly misread as a product name.
     r"apa(?:\s+saja|\s+benefit|\s+manfaat|\s+yang|\s+keuntungan)?\b|"
-    r"bagaimana(?:\s+cara)?\b|mengapa\b|kenapa\b|"
+    r"berapa(?:\s+(?:minimum|minimal|maksimum|maximal|besar|banyak|harga|biaya|transaksi))?\b|"
+    r"bagaimana(?:\s+cara)?\b|mengapa\b|kenapa\b|apakah\b|"
+    r"memanfaatkan\b|manfaatkan\b|menikmati\b|mendapatkan\b|memperoleh\b|"
+    r"menggunakan\b|memaksimalkan\b|maksimalkan\b|"
     r"cara\s+(?:mendapatkan|mengikuti|membeli|menukarkan|menggunakan)\b|"
+    r"cek\s+(?:info|informasi|promo|syarat|ketentuan)\b|"
+    r"info\s+(?:promo|lengkap)\b|informasi\s+(?:promo|lengkap)\b|"
+    r"dengan\s+lebih\s+hemat\b|untuk\s+(?:mendapatkan|menikmati|mengikuti)\b|"
     r"tips\b|manfaat\b|benefit\b|keuntungan\b|"
     r"penawaran\b|mekanisme\b|syarat\b|ketentuan\b|"
     r"daftar\b|simak\b|ketahui\b|berikut\b|inilah\b|ini\s+dia\b|"
@@ -42,7 +49,18 @@ EDITORIAL_PHRASE_RE = re.compile(
     r"penawaran\s+dalam\s+promo|mekanisme\s+promo|"
     r"bagaimana\s+cara\s+mendapatkan|cara\s+mendapatkan\s+promo|"
     r"syarat\s+dan\s+ketentuan|promo\s+dan\s+mekanisme|"
-    r"yang\s+perlu\s+diketahui)\b",
+    r"yang\s+perlu\s+diketahui|minimum\s+transaksi|minimal\s+transaksi|"
+    r"akhir\s+pekan\s+ini\s+untuk\s+menikmati|"
+    r"pilihan\s+menu\s+.*\s+dengan\s+lebih\s+hemat|"
+    r"bersama\s+promo)\b",
+    re.I,
+)
+
+# These words are strong evidence that a discount-only line is a campaign/article
+# heading rather than a product SKU. They are not used to reject normal priced SKUs.
+CAMPAIGN_HEADING_PREFIX_RE = re.compile(
+    r"^(?:promo(?:si)?|diskon|katalog|program(?:\s+promo)?|weekend|weekday|"
+    r"campaign|kampanye|cek\s+info|info\s+promo|lihat\s+promo)\b",
     re.I,
 )
 
@@ -62,6 +80,12 @@ def _text(value) -> str:
 
 def _tokens(value) -> list[str]:
     return [t.casefold() for t in TOKEN_RE.findall(_text(value))]
+
+
+def _strip_leading_decorators(value: str) -> str:
+    """Remove list bullets/emojis before testing the first editorial word."""
+    value = _text(value)
+    return re.sub(r"^[^\w]+", "", value, flags=re.UNICODE).strip()
 
 
 def _has_numeric_price(row: dict, offer: str) -> bool:
@@ -104,13 +128,14 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
     if not name:
         return "missing_product_name"
 
-    clean_name = name.strip(" •|:-–—")
+    clean_name = _strip_leading_decorators(name.strip(" •|:-–—"))
     tokens = _tokens(clean_name)
     if len(clean_name) < 3 or not any(ch.isalpha() for ch in clean_name):
         return "product_name_empty_or_invalid"
 
-    # Reject narrative question/headline text even if it contains a campaign's
-    # explicit discount claim (e.g. 'Apa Benefit ... Diskon 50%').
+    # Reject article/question/imperative fragments even when a discount percentage
+    # was split from the same paragraph. The leading-symbol cleanup matters for
+    # source lines prefixed by emoji such as "☞ Cek Info Promo ...".
     if EDITORIAL_PREFIX_RE.search(clean_name) or EDITORIAL_PHRASE_RE.search(clean_name):
         return "editorial_heading_misparsed_as_product"
 
@@ -130,15 +155,18 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
         name_words = len(tokens)
         name_cf = clean_name.casefold()
         headline_terms = bool(re.search(
-            r"\b(?:promo|promosi|weekend|weekday|campaign|kampanye|benefit|penawaran|mekanisme|cara|apa|bagaimana)\b",
+            r"\b(?:promo|promosi|weekend|weekday|campaign|kampanye|benefit|penawaran|mekanisme|cara|apa|bagaimana|cek\s+info)\b",
             name_cf,
         ))
-        if (overlap >= 0.70 and (name_words >= 4 or sequence >= 0.72)) or (
-            headline_terms and overlap >= 0.45 and name_words >= 4
-        ):
+        # A campaign-heading-shaped line that merely repeats the article title is
+        # not an SKU. Avoid rejecting a real short product name solely because the
+        # campaign title also contains its brand/name.
+        if CAMPAIGN_HEADING_PREFIX_RE.search(clean_name) and (overlap >= 0.35 or sequence >= 0.45):
+            return "campaign_discount_claim_misparsed_as_product"
+        if headline_terms and overlap >= 0.45 and name_words >= 4:
             return "campaign_discount_claim_misparsed_as_product"
         if name_words >= 11 or len(clean_name) > 100:
-            if overlap >= 0.45 or sequence >= 0.72:
+            if overlap >= 0.35 or sequence >= 0.72 or EDITORIAL_PHRASE_RE.search(clean_name):
                 return "long_narrative_with_discount_claim_not_product_sku"
 
     # Product names extracted from article paragraphs should look like SKU labels,

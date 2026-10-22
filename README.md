@@ -1,46 +1,137 @@
-# 🛒 Merchant Promo Catalog Engine (v7)
+# 🛒 Merchant Promo Catalog Engine (v8)
 
-**Python Version:** 3.8+ | **Platform:** Windows
+**Python Version:** 3.10+ | **Platform:** Windows 10/11
 
 ---
 
-Aplikasi otomatisasi tingkat lanjut untuk *scraping*, pembersihan data, dan penggabungan katalog promo retail multi-sumber. Menggunakan **Dynamic Fuzzy Matching** lintas sumber serta penyaringan berbasis aturan dua lapis untuk memisahkan konten editorial dari penawaran produk riil.
+Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan katalog promo retail multi-sumber. Engine mendukung scraping halaman publik, normalisasi nama produk, *cross-source fuzzy matching*, pemeriksaan harga/periode, dan ekspor katalog ke Excel/CSV.
+
+> **Penting:** data Hemat.id, Katalogpromosi.com, dan Scanharga.com merupakan data agregator/konten. Data tidak otomatis dikonfirmasi oleh retailer resmi. Gunakan kolom sumber dan status verifikasi sebelum menjadikan harga sebagai referensi final.
 
 ---
 
 ## ⚙️ Arsitektur Sistem & Alur Kerja
 
-Sistem ini memisahkan tanggung jawab secara tegas menjadi dua modul utama untuk efisiensi pemrosesan data:
+Pipeline memisahkan pengumpulan data dan pemrosesan lintas sumber agar produk dari beberapa situs bisa dibandingkan setelah semua data terkumpul.
 
-1.  **Collector (Pencari Data):** Melakukan *scraping* situs agregator, *parsing* kartu/artikel, normalisasi dasar, serta menolak mentah-mentah kandidat baris yang terdeteksi sebagai judul artikel/non-produk.
-2.  **Enhancer (Pemroses & Validasi):** Membaca hasil *scrape* dan CSV lama, mengarantina baris tidak valid, melakukan **Cross-Source Fuzzy Matching** setelah seluruh data terkumpul, lalu menyusun katalog final.
+1. **Collector — pencari data:** mengakses halaman publik Hemat.id, Katalogpromosi.com, dan Scanharga.com; mengekstrak kartu/teks penawaran; menyimpan URL sumber; dan melakukan validasi awal untuk menolak kandidat yang terlihat seperti judul artikel, syarat umum, atau klaim diskon kampanye.
+2. **Enhancer — normalisasi & validasi akhir:** membaca hasil collector dan CSV katalog lama, menormalkan nama/harga/tanggal, mengulang validasi non-produk, melakukan deduplikasi persis serta konsolidasi periode yang aman, kemudian menjalankan *fuzzy matching* lintas sumber sebelum ekspor.
+3. **Product validation:** modul bersama yang dipakai oleh collector dan enhancer. Ini adalah lapisan pertahanan ganda agar judul artikel tidak masuk kembali ke katalog dari sumber lama atau hasil scraping sebelumnya.
+4. **Product name engine:** menyamakan spasi, ejaan, satuan, dan format kemasan. *Fuzzy matching* memberi kandidat kemiripan, tetapi tidak boleh menggabungkan produk jika ukuran/varian atau detail penawaran bertentangan.
+5. **Regression tests:** menguji parsing, baris editorial, produk valid, contoh produk mirip, dan perlindungan terhadap harga/varian yang berbeda.
 
----
+### Kenapa fuzzy matching dilakukan di enhancer?
 
-## ✨ Fitur Utama (Update v7)
-
-*   **Penyaringan Dua Lapis (Dual-Layer Filtering):** Mendeteksi dan membuang judul artikel editorial/kampanye tingkat tinggi (seperti teks mekanisme atau benefit bank) agar tidak keliru masuk sebagai baris produk.
-*   **Fuzzy Matching Lintas Sumber:** Membandingkan nama produk, *merchant*, ukuran, varian, periode, harga, dan syarat secara aman setelah semua data dari berbagai situs terkumpul.
-*   **Sistem Audit Data Transparan:** Menghasilkan laporan kualitas data otomatis untuk mempermudah peninjauan performa *engine*.
-*   **Proteksi Konflik Data:** Tetap memisahkan varian rasa atau harga yang bertentangan secara sengaja untuk mencegah penggabungan keliru yang merusak informasi promo.
+Collector memproses satu halaman/sumber pada satu waktu sehingga belum memiliki seluruh kandidat dari situs lain. Enhancer baru membandingkan seluruh hasil collector dan CSV lama dalam satu dataset. Karena itu, *cross-source fuzzy matching* utama dikerjakan di enhancer; collector tetap melakukan normalisasi dan penolakan kandidat buruk lebih awal. Validasi dijalankan dua kali untuk mencegah kandidat artikel lolos hanya karena berasal dari CSV lama.
 
 ---
 
-## 📂 Hasil Output & Laporan Internal
+## ✨ Fitur Utama (v8)
 
-Setelah menjalankan `Jalankan_Promo.bat`, sistem akan langsung memutakhirkan file berikut:
-
-*   **`hasil/Katalog_Promo_Final.xlsx`** – Katalog utama bersih (Sheet Aktif) dan data tinjauan.
-*   **`hasil/Katalog_Promo_Final.csv`** – Katalog utama dalam format CSV ringkas.
-*   **`_internal/promo_product_rows_rejected.csv`** – Daftar kandidat produk/artikel yang ditolak oleh sistem.
-*   **`_internal/promo_possible_duplicate_candidates.csv`** – Produk mirip yang sengaja dipisahkan dan butuh *review*.
-*   **`_internal/promo_multisource_quality_report.json`** – Ringkasan statistik kualitas data dan metrik penggabungan.
+- **Penyaringan editorial dua lapis:** menolak baris seperti “Berapa Minimum Transaksi…”, “Memanfaatkan Akhir Pekan…”, “Cek Info Promo…”, atau “Promo Paris Baguette BNI Wonderful Weekend” ketika kalimat tersebut sebenarnya judul/klaim kampanye, bukan SKU.
+- **Klaim diskon kampanye dipisahkan:** angka seperti “Diskon 50%” pada judul artikel tidak otomatis dijadikan diskon produk.
+- **Cross-source fuzzy matching:** membandingkan kemiripan nama dengan konteks merchant, ukuran/varian, harga, syarat penawaran, dan periode. Nama mirip saja tidak cukup untuk penggabungan otomatis.
+- **Parser angka Indonesia:** menangani pemisah ribuan rupiah dan persentase desimal dengan aturan yang berbeda.
+- **Validasi periode:** periode estimasi dan konflik tanggal ditandai; baris yang tidak aman masuk review.
+- **Audit transparan:** kandidat yang ditolak, kemungkinan duplikat, sumber artikel, dan metrik kualitas disimpan terpisah.
+- **Perlindungan data lama:** hasil sebelumnya tidak seharusnya diganti dengan katalog kosong hanya karena satu sumber gagal diakses. Periksa run log untuk status sumber dan fallback.
+- **Scanharga berbasis gambar:** URL katalog gambar dicatat untuk pemrosesan lanjutan. Versi ini tidak mengarang data produk/harga jika informasi gambar belum diekstrak; OCR otomatis penuh belum termasuk.
 
 ---
 
-## 🚀 Cara Menjalankan
+## 📂 Struktur Folder
 
-1. Ekstrak ZIP v7 ke folder baru di komputer lokal Anda.
-2. Jalankan `Install_Dependency.bat` (jika dependensi belum tersedia).
-3. Jalankan `Jalankan_Promo.bat` untuk memulai swauji (*self-test*), *scraping*, dan *enhancing*.
-4. Periksa folder `hasil/` untuk melihat katalog final Anda.
+```text
+promo-katalog-engine/
+├── README.md
+├── requirements.txt
+├── Install_Dependency.bat
+├── Jalankan_Promo.bat
+├── input/
+│   ├── momskonten_promo_active.csv
+│   └── promo_catalog_all_merchants.csv
+├── engine/
+│   ├── promo_multisource_collector.py
+│   ├── enrich_existing_promo_catalog_multisource.py
+│   ├── promo_product_validation.py
+│   ├── promo_names.py
+│   ├── promo_catalog_all_merchants_v2.py
+│   └── test_pipeline_v8.py
+├── hasil/       # dibuat otomatis
+└── _internal/   # data antara, log, dan audit; dibuat otomatis
+```
+
+CSV lama yang berada pada folder `input/` digunakan sebagai data pembanding/seed. Ganti atau perbarui file tersebut bila katalog lama berubah. Jangan mengganti file input dengan file output yang dihasilkan pipeline.
+
+---
+
+## 📦 Hasil Output & Laporan Internal
+
+Setelah menjalankan `Jalankan_Promo.bat`, output utama ditulis ke folder `hasil/`:
+
+- **`hasil/Katalog_Promo_Final.xlsx`** — workbook katalog; berisi sheet Aktif, Terkonfirmasi, Perlu Review, Ditolak (Audit), Variasi Nama, dan Kemungkinan Duplikat.
+- **`hasil/Katalog_Promo_Final.csv`** — katalog ringkas untuk analisis/ingest ke sistem lain.
+
+File teknis tersimpan di `_internal/`:
+
+- **`promo_multisource_products_all.csv`** — kandidat produk hasil collector.
+- **`promo_multisource_articles.csv`** — log artikel/halaman yang diperiksa.
+- **`promo_multisource_catalog_images.csv`** — URL gambar katalog yang ditemukan.
+- **`promo_multisource_rejected_candidates.csv`** — kandidat yang ditolak oleh collector.
+- **`promo_product_rows_rejected.csv`** — baris dari CSV lama/hasil collector yang ditolak oleh enhancer.
+- **`promo_possible_duplicate_candidates.csv`** — nama yang mirip tetapi belum aman digabung.
+- **`promo_multisource_runlog.json`** dan **`promo_multisource_quality_report.json`** — ringkasan status sumber, jumlah baris, alasan penolakan, duplikasi, dan kualitas.
+
+File `_internal/` digunakan untuk audit dan diagnosis. Untuk pemakaian sehari-hari, buka workbook atau CSV dari `hasil/`.
+
+---
+
+## 🚀 Cara Menjalankan di Windows
+
+1. Ekstrak seluruh ZIP ke folder baru.
+2. Pastikan Python **3.10 atau lebih baru** sudah terpasang dan opsi *Add Python to PATH* aktif.
+3. Pertama kali, jalankan `Install_Dependency.bat`. Dependensi yang diperlukan adalah `requests`, `beautifulsoup4`, dan `openpyxl`.
+4. Jalankan `Jalankan_Promo.bat`. Script melakukan self-test, uji regresi, collector, enhancer/fuzzy matching, lalu ekspor final.
+5. Buka `hasil/Katalog_Promo_Final.xlsx`.
+
+Atau instal dependensi lewat terminal:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Lalu jalankan pipeline:
+
+```powershell
+python engine/promo_names.py
+python engine/promo_multisource_collector.py --self-test
+python engine/test_pipeline_v8.py
+python engine/promo_multisource_collector.py
+python engine/enrich_existing_promo_catalog_multisource.py
+```
+
+---
+
+## 🧪 Perbaikan v8
+
+- Menambahkan deteksi editorial untuk kasus yang terlihat pada output sebelumnya: `Berapa Minimum Transaksi...`, `Memanfaatkan Akhir Pekan...`, `Promo Paris Baguette...`, dan `Cek Info Promo...` dengan simbol/emoji pembuka; contoh tersebut diuji di collector dan enhancer.
+- Menghapus simbol/emoji di depan nama sebelum memeriksa pola editorial.
+- Membuat aturan judul kampanye lebih selektif agar produk valid seperti `My Baby Body Cologne Sweet Floral 100 ml` dengan klaim diskon tetap tidak ditolak hanya karena nama merek disebut di judul kampanye.
+- Memperluas tes regresi collector dan enhancer agar contoh kesalahan tersebut tidak kembali masuk ke katalog final. Baris tertolak ditampilkan hanya pada sheet `Ditolak (Audit)` dan file audit, bukan di `Aktif`.
+- Memakai `README.md` format Markdown yang siap dipublikasikan ke GitHub.
+
+---
+
+## ⚠️ Batasan & Akurasi
+
+- Scraping memerlukan koneksi internet; situs dapat berubah struktur, membatasi request, atau tidak tersedia.
+- Status “aktif” menunjukkan hasil perhitungan periode yang ditemukan, bukan konfirmasi langsung dari retailer.
+- Harga dan diskon dari agregator perlu verifikasi terhadap syarat, ukuran, wilayah, membership, kanal pembelian, dan tanggal berlaku.
+- *Fuzzy matching* adalah alat bantu deteksi, bukan jaminan bahwa dua nama mengacu pada SKU yang sama. Kandidat ambigu harus diperiksa.
+- Pipeline menghormati status blokir/limit situs dan tidak mencoba melewati CAPTCHA atau proteksi akses.
+
+---
+
+## 📄 Lisensi & Penggunaan
+
+Gunakan hasil scraping sesuai ketentuan situs sumber, hak atas konten, dan aturan yang berlaku. Jika dipublikasikan di GitHub, hindari mengunggah token, kredensial, atau data pribadi. Periksa ketentuan penggunaan masing-masing sumber sebelum menjalankan scraping rutin.

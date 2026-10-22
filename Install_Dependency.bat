@@ -6,7 +6,7 @@ set "PYTHON=python"
 where py >nul 2>nul
 if not errorlevel 1 set "PYTHON=py -3"
 echo =====================================================
-echo INSTALASI DEPENDENSI KATALOG PROMO v7
+echo INSTALASI DEPENDENSI KATALOG PROMO v8
 echo =====================================================
 %PYTHON% -m pip install -r "%~dp0requirements.txt"
 if errorlevel 1 goto :error

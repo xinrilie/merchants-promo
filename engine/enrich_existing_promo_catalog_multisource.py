@@ -1544,8 +1544,9 @@ def build_name_variant_rows(rows):
     return output
 
 
-def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_variant_rows, possible_duplicate_rows):
-    """User-facing workbook: summary, clean catalog, confirmed rows, review and name variants."""
+def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_variant_rows, possible_duplicate_rows, rejected_rows=None):
+    """User-facing workbook: clean catalogs plus separate review/duplicate/rejected audit sheets."""
+    rejected_rows = rejected_rows or []
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, PatternFill
@@ -1567,6 +1568,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ["Promo aktif (estimasi boleh)", len(current_rows)],
         ["Promo aktif terkonfirmasi", len(confirmed_rows)],
         ["Baris perlu review", len(review_rows)],
+        ["Kandidat non-produk ditolak", len(rejected_rows)],
         ["Kelompok variasi nama produk", len(name_variant_rows)],
         ["Kandidat duplikat untuk diperiksa", len(possible_duplicate_rows)],
         ["Sumber produk", "Hemat.id, Katalogpromosi.com, Scanharga.com, dan katalog lama"],
@@ -1620,6 +1622,38 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ws.freeze_panes = "B2"
         ws.auto_filter.ref = ws.dimensions
         ws.sheet_view.showGridLines = False
+
+    # Rejected article headings / non-SKU candidates are visible for diagnosis,
+    # but deliberately isolated from the active catalog sheets.
+    ws = wb.create_sheet("Ditolak (Audit)")
+    rejected_headers = [label for label, _ in CLEAN_COLUMNS] + ["Alasan Penolakan"]
+    ws.append(rejected_headers)
+    rejected_clean_rows = []
+    for row in rejected_rows:
+        clean = make_clean_row(row, review=False)
+        clean["Alasan Penolakan"] = row.get("product_rejection_reason") or row.get("rejection_reason") or "Kandidat tidak lolos validasi produk"
+        rejected_clean_rows.append(clean)
+    rejected_clean_rows.sort(key=lambda r: ((r.get("Merchant") or "").casefold(), (r.get("Nama Produk") or "").casefold()))
+    for row in rejected_clean_rows:
+        ws.append([row.get(h) for h in rejected_headers])
+    rejected_widths = [38, 15, 15, 12, 18, 15, 22, 17, 17, 22, 52, 48, 56, 52, 48]
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="7F6000")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for idx, width in enumerate(rejected_widths, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = width
+        field = rejected_headers[idx - 1]
+        for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
+            cell = col_cells[0]
+            cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Penolakan"})
+            if field in {"Harga Asli (Rp)", "Harga Promo (Rp)", "Hemat (Rp)"}:
+                cell.number_format = '#,##0'
+            elif field == "Diskon (%)":
+                cell.number_format = '0.0"%"'
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
 
     ws = wb.create_sheet("Kemungkinan Duplikat")
     ws.append(POSSIBLE_DUPLICATE_FIELDS)
@@ -1712,7 +1746,7 @@ def main():
     write_audit_rows(OUT_FULL, merged_raw)
     write_audit_rows(OUT_REJECTED_PRODUCTS, rejected_product_rows)
     write_possible_duplicate_csv(OUT_POSSIBLE_DUPES, possible_duplicate_rows)
-    write_excel_catalog(OUT_XLSX, current, confirmed, review, name_variant_rows, possible_duplicate_rows)
+    write_excel_catalog(OUT_XLSX, current, confirmed, review, name_variant_rows, possible_duplicate_rows, rejected_product_rows)
 
     discount_basis = Counter(r.get("discount_percent_basis") or "not_available" for r in current)
     merchant_counts = Counter(r.get("merchant_name") or "UNKNOWN" for r in current)

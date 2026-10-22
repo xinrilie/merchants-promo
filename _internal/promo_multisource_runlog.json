@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-10-23T03:41:04+07:00",
+  "built_at": "2026-10-23T04:27:35+07:00",
   "reference_date": "2026-10-23",
   "sources": [
     "Hemat.id",
@@ -9,12 +9,12 @@
   "request_count": 91,
   "successful_requests": 89,
   "blocked_or_limited_requests": 0,
-  "fresh_product_rows_before_fallback": 1236,
+  "fresh_product_rows_before_fallback": 1221,
   "preserved_previous_rows_by_source": {},
-  "all_product_rows_before_dedup": 1236,
-  "product_rows_after_exact_dedup": 830,
-  "active_rows_including_end_date_estimates": 525,
-  "review_rows": 341,
+  "all_product_rows_before_dedup": 1221,
+  "product_rows_after_exact_dedup": 816,
+  "active_rows_including_end_date_estimates": 517,
+  "review_rows": 329,
   "merchant_counts": {
     "Alfamart": 86,
     "Indomaret": 137,
@@ -23,24 +23,31 @@
     "Yogya": 33,
     "Hari Hari Swalayan": 21,
     "Tip Top": 30,
-    "UNKNOWN": 43,
+    "UNKNOWN": 35,
     "Lotte Mart": 34,
     "Guardian": 2
   },
   "rows_by_source": {
     "Hemat.id": 727,
-    "Katalogpromosi.com": 436,
-    "Scanharga.com": 73
+    "Katalogpromosi.com": 422,
+    "Scanharga.com": 72
   },
-  "rows_with_explicit_discount": 266,
+  "rows_with_explicit_discount": 260,
   "rows_with_price_calculated_discount": 0,
   "image_references_found": 407,
+  "rejected_non_product_candidates": 21,
+  "rejection_reasons": {
+    "editorial_heading_misparsed_as_product": 14,
+    "no_product_level_offer_evidence": 3,
+    "campaign_discount_claim_misparsed_as_product": 4
+  },
   "output_files": [
     "promo_multisource_products_all.csv",
     "promo_multisource_products_active.csv",
     "promo_multisource_products_review.csv",
     "promo_multisource_articles.csv",
     "promo_multisource_catalog_images.csv",
+    "promo_multisource_rejected_candidates.csv",
     "promo_multisource_runlog.json"
   ],
   "limitations": [
@@ -374,7 +381,7 @@
       "error": null,
       "final_url": "https://katalogpromosi.com/promo-cgv-monday-member-day-beli-1-gratis-1-tiket/",
       "title": "Promo CGV Monday Member Day Beli 1 Gratis 1 Tiket",
-      "product_rows": 11,
+      "product_rows": 8,
       "image_count": 2
     },
     {
@@ -398,7 +405,7 @@
       "error": null,
       "final_url": "https://katalogpromosi.com/promo-alfamart-ulang-tahun-27/",
       "title": "Promo Alfamart Ulang Tahun 27 Serba Gratis Beli 1 Gratis 1",
-      "product_rows": 94,
+      "product_rows": 92,
       "image_count": 10
     },
     {
@@ -506,7 +513,7 @@
       "error": null,
       "final_url": "https://katalogpromosi.com/promo-lawson-sms-serius-murah-seminggu/",
       "title": "Promo LAWSON SMS Serius Murah Seminggu 16-23 Oktober 2026",
-      "product_rows": 25,
+      "product_rows": 23,
       "image_count": 2
     },
     {
@@ -542,7 +549,7 @@
       "error": null,
       "final_url": "https://katalogpromosi.com/promo-paris-baguette-bni-wondrful-weekend-diskon-50/",
       "title": "Promo Paris Baguette BNI Wondrful Weekend Diskon 50%",
-      "product_rows": 15,
+      "product_rows": 9,
       "image_count": 2
     },
     {
@@ -578,7 +585,7 @@
       "error": null,
       "final_url": "https://katalogpromosi.com/promo-citilink-flight-sale/",
       "title": "Promo Citilink Flight Sale Diskon Tiket Pesawat hingga 10%",
-      "product_rows": 1,
+      "product_rows": 0,
       "image_count": 2
     },
     {
@@ -827,7 +834,7 @@
       "error": null,
       "final_url": "https://www.scanharga.com/2023/06/promo-golden-lamian-2-for-rp-49ribu.html",
       "title": "Promo Golden Lamian Terbaru 27 Juli - 2 Agustus 2026",
-      "product_rows": 12,
+      "product_rows": 11,
       "image_count": 5
     },
     {
