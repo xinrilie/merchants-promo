@@ -36,7 +36,7 @@ EDITORIAL_PREFIX_RE = re.compile(
     r"cek\s+(?:info|informasi|promo|syarat|ketentuan)\b|"
     r"info\s+(?:promo|lengkap)\b|informasi\s+(?:promo|lengkap)\b|"
     r"dengan\s+lebih\s+hemat\b|untuk\s+(?:mendapatkan|menikmati|mengikuti)\b|"
-    r"tips\b|manfaat\b|benefit\b|keuntungan\b|"
+    r"tips\b|manfaat\b|benefit\b|keuntungan\b|akhirnya\b|ternyata\b|"
     r"penawaran\b|mekanisme\b|syarat\b|ketentuan\b|"
     r"daftar\b|simak\b|ketahui\b|berikut\b|inilah\b|ini\s+dia\b|"
     r"begini\b|panduan\b|bocoran\b|intip\b|mengenal\b|"
@@ -147,9 +147,9 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
     if not has_offer:
         return "no_product_level_offer_evidence"
 
-    # A campaign headline may get split just before 'Diskon 50%'. If there is no
-    # item price or explicit bundle and the alleged name mostly mirrors the
-    # campaign title, it is not a SKU/product row.
+    # A line containing only a campaign-level percentage is not sufficient proof
+    # of an individual SKU. This rule deliberately does not depend on campaign_title:
+    # older CSV rows often have no title populated, which was the v8 false-positive.
     if has_discount and not has_price and not has_bundle:
         overlap, sequence = _campaign_overlap(clean_name, title)
         name_words = len(tokens)
@@ -158,15 +158,34 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
             r"\b(?:promo|promosi|weekend|weekday|campaign|kampanye|benefit|penawaran|mekanisme|cara|apa|bagaimana|cek\s+info)\b",
             name_cf,
         ))
-        # A campaign-heading-shaped line that merely repeats the article title is
-        # not an SKU. Avoid rejecting a real short product name solely because the
-        # campaign title also contains its brand/name.
-        if CAMPAIGN_HEADING_PREFIX_RE.search(clean_name) and (overlap >= 0.35 or sequence >= 0.45):
+        mode = (source_mode or row.get("source_mode") or row.get("source_name") or "").casefold()
+        merchant = _text(row.get("merchant_name") or row.get("merchant"))
+        structured_product_card = "hemat_card" in mode and bool(merchant)
+
+        # If the alleged product starts with a campaign label, the string itself is
+        # a campaign heading. Do not require title overlap: legacy rows may omit it.
+        if CAMPAIGN_HEADING_PREFIX_RE.search(clean_name):
             return "campaign_discount_claim_misparsed_as_product"
-        if headline_terms and overlap >= 0.45 and name_words >= 4:
+
+        # Very short prose fragments (e.g. 'Akhirnya') cannot identify an SKU when
+        # the only offer is a percentage claim. Structured cards with a known
+        # merchant are the narrow exception because their DOM context is product-level.
+        has_sku_attribute = bool(re.search(
+            r"\b\d+(?:[.,]\d+)?\s*(?:ml|l|g|kg|mg|pcs?|pack|sachet|tablet|kaplet|botol|kaleng|gr|gram)\b|\b\d+\s*[x×]\s*\d+",
+            clean_name,
+            re.I,
+        ))
+        if name_words <= 1 and not has_sku_attribute and not structured_product_card:
+            return "discount_claim_without_product_identity"
+
+        # A discount-only line that is mostly editorial prose is rejected even when
+        # the listing/article title is missing or does not match the fragment.
+        if headline_terms and (overlap >= 0.35 or sequence >= 0.45 or name_words <= 3):
             return "campaign_discount_claim_misparsed_as_product"
-        if name_words >= 11 or len(clean_name) > 100:
-            if overlap >= 0.35 or sequence >= 0.72 or EDITORIAL_PHRASE_RE.search(clean_name):
+        if EDITORIAL_PHRASE_RE.search(clean_name):
+            return "editorial_heading_misparsed_as_product"
+        if name_words >= 8 or len(clean_name) > 80:
+            if overlap >= 0.35 or sequence >= 0.72:
                 return "long_narrative_with_discount_claim_not_product_sku"
 
     # Product names extracted from article paragraphs should look like SKU labels,

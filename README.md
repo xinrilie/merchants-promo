@@ -1,4 +1,4 @@
-# 🛒 Merchant Promo Catalog Engine (v8)
+# 🛒 Merchant Promo Catalog Engine (v9)
 
 **Python Version:** 3.10+ | **Platform:** Windows 10/11
 
@@ -26,7 +26,16 @@ Collector memproses satu halaman/sumber pada satu waktu sehingga belum memiliki 
 
 ---
 
-## ✨ Fitur Utama (v8)
+
+## 🛠️ Perbaikan v9 — Validasi klaim diskon tanpa konteks judul
+
+- Baris lama yang kehilangan `campaign_title` kini tetap divalidasi; judul seperti `Promo Paris Baguette BNI Wonderful Weekend` tidak bisa lolos hanya karena kolom judul kosong.
+- Fragmen generik satu kata seperti `Akhirnya` ditolak jika satu-satunya bukti penawaran adalah klaim persentase diskon dan tidak ada bukti SKU.
+- Baris promo bundling tanpa harga satuan tetap dapat lolos jika syarat seperti `Beli 1 Gratis 1` eksplisit.
+- Produk bernama jelas seperti `My Baby Body Cologne Sweet Floral 100 ml` tetap lolos validasi discount-only.
+- Regression tests v9 menguji kasus `campaign_title` kosong agar bug tidak kembali.
+
+## ✨ Fitur Utama (v9)
 
 - **Penyaringan editorial dua lapis:** menolak baris seperti “Berapa Minimum Transaksi…”, “Memanfaatkan Akhir Pekan…”, “Cek Info Promo…”, atau “Promo Paris Baguette BNI Wonderful Weekend” ketika kalimat tersebut sebenarnya judul/klaim kampanye, bukan SKU.
 - **Klaim diskon kampanye dipisahkan:** angka seperti “Diskon 50%” pada judul artikel tidak otomatis dijadikan diskon produk.
@@ -56,7 +65,7 @@ promo-katalog-engine/
 │   ├── promo_product_validation.py
 │   ├── promo_names.py
 │   ├── promo_catalog_all_merchants_v2.py
-│   └── test_pipeline_v8.py
+│   └── test_pipeline_v9.py
 ├── hasil/       # dibuat otomatis
 └── _internal/   # data antara, log, dan audit; dibuat otomatis
 ```
@@ -105,20 +114,19 @@ Lalu jalankan pipeline:
 ```powershell
 python engine/promo_names.py
 python engine/promo_multisource_collector.py --self-test
-python engine/test_pipeline_v8.py
+python engine/test_pipeline_v9.py
 python engine/promo_multisource_collector.py
 python engine/enrich_existing_promo_catalog_multisource.py
 ```
 
 ---
 
-## 🧪 Perbaikan v8
+## 🧪 Pengujian regresi v9
 
-- Menambahkan deteksi editorial untuk kasus yang terlihat pada output sebelumnya: `Berapa Minimum Transaksi...`, `Memanfaatkan Akhir Pekan...`, `Promo Paris Baguette...`, dan `Cek Info Promo...` dengan simbol/emoji pembuka; contoh tersebut diuji di collector dan enhancer.
-- Menghapus simbol/emoji di depan nama sebelum memeriksa pola editorial.
-- Membuat aturan judul kampanye lebih selektif agar produk valid seperti `My Baby Body Cologne Sweet Floral 100 ml` dengan klaim diskon tetap tidak ditolak hanya karena nama merek disebut di judul kampanye.
-- Memperluas tes regresi collector dan enhancer agar contoh kesalahan tersebut tidak kembali masuk ke katalog final. Baris tertolak ditampilkan hanya pada sheet `Ditolak (Audit)` dan file audit, bukan di `Aktif`.
-- Memakai `README.md` format Markdown yang siap dipublikasikan ke GitHub.
+- Baris editorial/kampanye ditolak walaupun `campaign_title` kosong pada CSV lama.
+- Fragmen satu kata seperti `Akhirnya` tidak diterima sebagai SKU hanya karena disertai klaim diskon.
+- Produk nyata dengan atribut SKU (misalnya ukuran) dan penawaran bundling eksplisit tetap dipertahankan.
+- Fuzzy matching tetap menjaga varian, harga, dan syarat promo yang bertentangan tetap terpisah.
 
 ---
 
