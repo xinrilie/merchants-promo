@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 echo =====================================================
-echo KATALOG PROMO - PIPELINE RINGKAS V4
+echo KATALOG PROMO - PIPELINE RINGKAS V5 - FUZZY MATCH
 echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com
 echo =====================================================
 echo.
@@ -23,7 +23,7 @@ echo [1/4] Uji normalisasi nama produk...
 if errorlevel 1 goto :error
 
 echo.
-echo [2/4] Uji konsolidasi produk lintas sumber...
+echo [2/4] Uji fuzzy matching dan konsolidasi produk lintas sumber...
 %PYTHON% "%~dp0engine\test_duplicate_fixes.py"
 if errorlevel 1 goto :error
 

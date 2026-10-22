@@ -11,7 +11,12 @@ from pathlib import Path
 import importlib.util
 import math
 
-from promo_names import clean_product_name, name_variants
+from promo_names import (
+    clean_product_name, name_variants, product_name_similarity,
+    product_names_can_auto_merge, product_name_block_key,
+    product_name_size_signature, product_name_variant_signature,
+    product_name_identity_warnings,
+)
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ENGINE_DIR.parent
@@ -26,6 +31,7 @@ OUT_CONFIRMED = INTERNAL_DIR / "promo_catalog_multisource_confirmed.csv"
 OUT_REVIEW = INTERNAL_DIR / "promo_catalog_multisource_review.csv"
 OUT_FULL = INTERNAL_DIR / "promo_catalog_multisource_full_audit.csv"
 OUT_REPORT = INTERNAL_DIR / "promo_catalog_multisource_quality_report.json"
+OUT_POSSIBLE_DUPES = INTERNAL_DIR / "promo_possible_duplicate_candidates.csv"
 OUT_XLSX = OUTPUT_DIR / "Katalog_Promo_Final.xlsx"
 
 # Reuse the exact parsing/discount logic that is in the revised scraper.
@@ -874,11 +880,12 @@ def _compatible_periods(a, b):
 
 
 def _equivalent_offer_rows(a, b):
-    if norm_key(a.get("merchant_name")) != norm_key(b.get("merchant_name")):
+    merchant_a = norm_key(a.get("merchant_name"))
+    merchant_b = norm_key(b.get("merchant_name"))
+    # Unknown merchant must not be silently assigned to a known retailer.
+    if not merchant_a or not merchant_b or merchant_a != merchant_b:
         return False
-    if norm_key(a.get("product_text")) != norm_key(b.get("product_text")):
-        return False
-    if not norm_key(a.get("product_text")):
+    if not product_names_can_auto_merge(a.get("product_text"), b.get("product_text")):
         return False
     if has_material_period_conflict(a) or has_material_period_conflict(b):
         return False
@@ -909,9 +916,12 @@ def merge_equivalent_cross_source_offers(rows):
     """
     by_product = defaultdict(list)
     for row in rows:
-        key = (norm_key(row.get("merchant_name")), norm_key(row.get("product_text")))
-        if key[0] and key[1]:
-            by_product[key].append(dict(row))
+        merchant_key = norm_key(row.get("merchant_name"))
+        product_key = product_name_block_key(row.get("product_text"))
+        # Block by merchant + first product token, not the entire name, so
+        # near-identical spellings can enter the same fuzzy-comparison cluster.
+        if merchant_key and product_key:
+            by_product[(merchant_key, product_key)].append(dict(row))
 
     output = []
     merged_groups = 0
@@ -1022,10 +1032,8 @@ def merge_equivalent_cross_source_offers(rows):
             output.append(best)
 
     # Retain rows with no merchant/name rather than silently losing them.
-    assigned_ids = {id(r) for group in by_product.values() for r in group}
-    # Every row with a missing product key was not assigned to by_product.
     for row in rows:
-        if not norm_key(row.get("merchant_name")) or not norm_key(row.get("product_text")):
+        if not norm_key(row.get("merchant_name")) or not product_name_block_key(row.get("product_text")):
             output.append(dict(row))
 
     output.sort(key=lambda r: (
@@ -1156,6 +1164,135 @@ def write_audit_rows(path, rows):
         writer.writerows(rows)
 
 
+
+POSSIBLE_DUPLICATE_FIELDS = [
+    "Kemiripan Nama (%)", "Produk A", "Produk B", "Merchant A", "Merchant B",
+    "Harga Promo A (Rp)", "Harga Promo B (Rp)", "Harga Normal A (Rp)", "Harga Normal B (Rp)",
+    "Periode A", "Periode B", "Penawaran A", "Penawaran B", "Sumber A", "Sumber B",
+    "Alasan", "Tindakan",
+]
+
+
+def _source_url_primary(row):
+    # Prefer item-level URL for Hemat cards sharing one listing page; otherwise
+    # use article/page URL as the source identity.
+    return str(row.get("source_item_url") or row.get("source_url") or row.get("source_page_url") or "").strip()
+
+
+def _date_overlap_for_candidate(a, b):
+    da, db = _row_dates(a), _row_dates(b)
+    if da and db:
+        return da[0] <= db[1] and db[0] <= da[1]
+    return True  # incomplete dates are candidates for review, not auto-merge proof
+
+
+def _candidate_reason(a, b, score):
+    reasons = []
+    merchant_a, merchant_b = norm_key(a.get("merchant_name")), norm_key(b.get("merchant_name"))
+    if not merchant_a or not merchant_b:
+        reasons.append("Merchant belum pasti pada salah satu sumber")
+    for field, label in (("promo_price", "Harga promo berbeda"), ("normal_price", "Harga normal berbeda")):
+        va, vb = as_int(a.get(field)), as_int(b.get(field))
+        if va is not None and vb is not None and va != vb:
+            reasons.append(label)
+    if not _compatible_prices(a, b):
+        reasons.append("Bukti harga/diskon tidak cukup kompatibel")
+    if not _compatible_offers(a, b):
+        reasons.append("Jenis atau syarat penawaran berbeda")
+    if has_material_period_conflict(a) or has_material_period_conflict(b):
+        reasons.append("Ada konflik periode dari sumber")
+    if not _row_dates(a) or not _row_dates(b):
+        reasons.append("Periode salah satu sumber belum lengkap")
+    size_a = product_name_size_signature(a.get("product_text"))
+    size_b = product_name_size_signature(b.get("product_text"))
+    if bool(size_a) != bool(size_b):
+        reasons.append("Ukuran/kemasan tidak tercantum pada salah satu nama")
+    variant_a = product_name_variant_signature(a.get("product_text"))
+    variant_b = product_name_variant_signature(b.get("product_text"))
+    if variant_a and variant_b and variant_a != variant_b:
+        reasons.append("Varian rasa/aroma/formula perlu dicek")
+    if score < 0.93:
+        reasons.append("Nama produk hanya mirip, bukan identik")
+    if not reasons:
+        reasons.append("Kandidat produk sama, tetapi gagal syarat penggabungan otomatis")
+    return " | ".join(pipe_unique(reasons))
+
+
+def build_possible_duplicate_rows(rows, max_pairs=500):
+    """Find similar cross-source product rows not auto-merged; never deletes data."""
+    blocks = defaultdict(list)
+    for row in rows:
+        name = row.get("product_text") or ""
+        block = product_name_block_key(name)
+        if block:
+            blocks[block].append(row)
+
+    candidates = []
+    seen_pairs = set()
+    for block_rows in blocks.values():
+        if len(block_rows) < 2:
+            continue
+        for i in range(len(block_rows)):
+            a = block_rows[i]
+            url_a = _source_url_primary(a)
+            for j in range(i + 1, len(block_rows)):
+                b = block_rows[j]
+                url_b = _source_url_primary(b)
+                if url_a and url_b and url_a == url_b:
+                    continue
+                merchant_a, merchant_b = norm_key(a.get("merchant_name")), norm_key(b.get("merchant_name"))
+                # Same product sold by two known different retailers is not a duplicate.
+                if merchant_a and merchant_b and merchant_a != merchant_b:
+                    continue
+                size_a, size_b = product_name_size_signature(a.get("product_text")), product_name_size_signature(b.get("product_text"))
+                if size_a and size_b and size_a != size_b:
+                    continue
+                # Different explicit variants are not auto-merged, but a close
+                # name can still be surfaced as a review candidate with that warning.
+                score = product_name_similarity(a.get("product_text"), b.get("product_text"))
+                if score < 0.84:
+                    continue
+                if not _date_overlap_for_candidate(a, b):
+                    continue
+                # Exact compatible offers should already have been merged upstream.
+                if _equivalent_offer_rows(a, b):
+                    continue
+                pair_key = tuple(sorted((
+                    f"{url_a}|{norm_key(a.get('product_text'))}|{a.get('promo_price')}|{a.get('valid_from')}|{a.get('valid_until')}",
+                    f"{url_b}|{norm_key(b.get('product_text'))}|{b.get('promo_price')}|{b.get('valid_from')}|{b.get('valid_until')}",
+                )))
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                candidates.append({
+                    "Kemiripan Nama (%)": round(score * 100, 1),
+                    "Produk A": a.get("product_text"),
+                    "Produk B": b.get("product_text"),
+                    "Merchant A": a.get("merchant_name") or "Belum diketahui",
+                    "Merchant B": b.get("merchant_name") or "Belum diketahui",
+                    "Harga Promo A (Rp)": as_int(a.get("promo_price")),
+                    "Harga Promo B (Rp)": as_int(b.get("promo_price")),
+                    "Harga Normal A (Rp)": as_int(a.get("normal_price")),
+                    "Harga Normal B (Rp)": as_int(b.get("normal_price")),
+                    "Periode A": f"{a.get('valid_from') or '?'} s.d. {a.get('valid_until') or '?'}",
+                    "Periode B": f"{b.get('valid_from') or '?'} s.d. {b.get('valid_until') or '?'}",
+                    "Penawaran A": a.get("offer_text") or a.get("deal_type") or "",
+                    "Penawaran B": b.get("offer_text") or b.get("deal_type") or "",
+                    "Sumber A": " | ".join(pipe_unique([a.get("source_name") or "", a.get("source_url") or "", a.get("source_item_url") or ""])),
+                    "Sumber B": " | ".join(pipe_unique([b.get("source_name") or "", b.get("source_url") or "", b.get("source_item_url") or ""])),
+                    "Alasan": _candidate_reason(a, b, score),
+                    "Tindakan": "Jangan gabungkan otomatis; periksa sumber dan syarat promo",
+                })
+    candidates.sort(key=lambda row: (-float(row["Kemiripan Nama (%)"]), str(row.get("Merchant A") or "").casefold(), str(row.get("Produk A") or "").casefold()))
+    return candidates[:max_pairs]
+
+
+def write_possible_duplicate_csv(path, rows):
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=POSSIBLE_DUPLICATE_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
 def build_name_variant_rows(rows):
     """Group alternate spellings across offers without deleting distinct promotions."""
     grouped = defaultdict(list)
@@ -1208,7 +1345,7 @@ def build_name_variant_rows(rows):
     return output
 
 
-def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_variant_rows):
+def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_variant_rows, possible_duplicate_rows):
     """User-facing workbook: summary, clean catalog, confirmed rows, review and name variants."""
     try:
         from openpyxl import Workbook
@@ -1232,9 +1369,10 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ["Promo aktif terkonfirmasi", len(confirmed_rows)],
         ["Baris perlu review", len(review_rows)],
         ["Kelompok variasi nama produk", len(name_variant_rows)],
+        ["Kandidat duplikat untuk diperiksa", len(possible_duplicate_rows)],
         ["Sumber produk", "Hemat.id, Katalogpromosi.com, Scanharga.com, dan katalog lama"],
         ["Catatan", "Promo agregator belum tentu diverifikasi retailer resmi."],
-        ["Petunjuk", "Buka sheet Aktif untuk katalog sehari-hari. Sheet lain untuk validasi."],
+        ["Petunjuk", "Buka sheet Aktif untuk katalog sehari-hari. Sheet Kemungkinan Duplikat membantu memeriksa produk mirip yang belum aman digabung."],
         ["File teknis", "Data mentah dan log tersimpan di folder _internal; tidak perlu dibuka untuk pemakaian harian."],
     ]
     for row in summary:
@@ -1283,6 +1421,28 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ws.freeze_panes = "B2"
         ws.auto_filter.ref = ws.dimensions
         ws.sheet_view.showGridLines = False
+
+    ws = wb.create_sheet("Kemungkinan Duplikat")
+    ws.append(POSSIBLE_DUPLICATE_FIELDS)
+    for row in possible_duplicate_rows:
+        ws.append([row.get(h) for h in POSSIBLE_DUPLICATE_FIELDS])
+    candidate_widths = [16, 38, 38, 18, 18, 16, 16, 16, 16, 24, 24, 44, 44, 60, 60, 56, 48]
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="9C6500")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for idx, width in enumerate(candidate_widths, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = width
+        for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
+            cell = col_cells[0]
+            cell.alignment = Alignment(vertical="top", wrap_text=idx not in {1, 6, 7, 8, 9})
+            if idx in {1}:
+                cell.number_format = '0.0"%"'
+            elif idx in {6, 7, 8, 9}:
+                cell.number_format = '#,##0'
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
 
     ws = wb.create_sheet("Variasi Nama")
     variant_headers = ["Nama Standar", "Variasi Nama Asal", "Merchant", "Jumlah Variasi", "Jumlah Baris Promo", "Harga Promo (Rp)", "Mulai Berlaku", "Berakhir", "Sumber", "Catatan"]
@@ -1342,11 +1502,13 @@ def main():
     )]
 
     name_variant_rows = build_name_variant_rows(consolidated)
+    possible_duplicate_rows = build_possible_duplicate_rows(current)
     write_clean_rows(OUT_ACTIVE, current)
     write_clean_rows(OUT_CONFIRMED, confirmed)
     write_clean_rows(OUT_REVIEW, review, review=True)
     write_audit_rows(OUT_FULL, merged_raw)
-    write_excel_catalog(OUT_XLSX, current, confirmed, review, name_variant_rows)
+    write_possible_duplicate_csv(OUT_POSSIBLE_DUPES, possible_duplicate_rows)
+    write_excel_catalog(OUT_XLSX, current, confirmed, review, name_variant_rows, possible_duplicate_rows)
 
     discount_basis = Counter(r.get("discount_percent_basis") or "not_available" for r in current)
     merchant_counts = Counter(r.get("merchant_name") or "UNKNOWN" for r in current)
@@ -1377,6 +1539,8 @@ def main():
         "rows_with_overlapping_offer_periods_before_consolidation": sum(bool(r.get("overlap_period_flag")) for r in merged_raw),
         "cross_dataset_duplicate_groups_or_rows": sum(bool(r.get("cross_dataset_duplicate")) for r in merged_raw),
         "product_name_variant_groups": len(name_variant_rows),
+        "possible_duplicate_candidate_pairs": len(possible_duplicate_rows),
+        "possible_duplicate_high_similarity_pairs": sum(float(r.get("Kemiripan Nama (%)") or 0) >= 93 for r in possible_duplicate_rows),
         "discount_basis_counts_current": dict(discount_basis),
         "merchant_counts_current": dict(merchant_counts),
         "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
@@ -1410,6 +1574,8 @@ def main():
     print("CSV UTAMA:", OUT_ACTIVE.relative_to(ROOT_DIR))
     print("Data teknis/audit disimpan di folder:", INTERNAL_DIR.name)
     print("Kelompok variasi nama produk:", len(name_variant_rows))
+    print("Kandidat duplikat untuk diperiksa:", len(possible_duplicate_rows))
+    print("CSV kandidat duplikat:", OUT_POSSIBLE_DUPES.relative_to(ROOT_DIR))
 
 
 if __name__ == "__main__":

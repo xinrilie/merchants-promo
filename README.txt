@@ -1,4 +1,4 @@
-KATALOG PROMO - PAKET RINGKAS V4
+KATALOG PROMO - PAKET RINGKAS V5 (FUZZY MATCHING)
 ============================
 
 CARA PALING MUDAH
@@ -17,7 +17,7 @@ Jadi tidak, kamu tidak perlu mengelola semua file satu per satu. Cukup jalankan
 Jalankan_Promo.bat dan buka file di folder hasil\. File perantara disimpan di
 _internal\ agar tidak memenuhi folder utama.
 
-NORMALISASI NAMA DAN DEDUPLIKASI LINTAS SUMBER (V4)
+NORMALISASI, FUZZY MATCHING, DAN DEDUPLIKASI LINTAS SUMBER (V5)
 Nama dari situs bisa berbeda karena kapitalisasi, ukuran ditulis dua kali,
 abreviasi kemasan (pck/btl/klg), atau label harga yang salah terbaca sebagai
 nama produk. Mesin membersihkan label seperti "Harga Normal", "Harga Promo",
@@ -44,9 +44,16 @@ untuk nama standar yang sama. Produk dengan ukuran berbeda TIDAK otomatis
 digabung. Penawaran dengan harga, syarat, atau periode berbeda juga tetap dipisah;
 lihat catatan pada sheet variasi jika nama produknya sama tetapi detail promonya beda.
 
+FUZZY MATCHING (DINAMIS)
+- Nama produk yang mirip dinilai memakai algoritma teks standar Python; tidak perlu menambah semua nama baru ke daftar manual. Nama yang hanya mirip dan punya konflik tetap ditampilkan sebagai kandidat, bukan digabung paksa.
+- Penggabungan otomatis hanya dilakukan jika merchant diketahui sama, ukuran/varian cocok, periode bertumpang tindih, serta penawaran dan harga kompatibel.
+- Baris mirip yang tidak aman digabung tidak dibuang; lihat sheet "Kemungkinan Duplikat" dan file _internal\promo_possible_duplicate_candidates.csv.
+- Produk beda ukuran atau varian rasa/formula tidak digabung hanya karena namanya mirip.
+- URL Hemat yang menyebut beberapa retailer sekaligus tidak lagi otomatis dianggap merchant pertama yang cocok.
+
 HASIL YANG DIBUAT
 - hasil\Katalog_Promo_Final.xlsx : sheet Mulai Di Sini, Aktif, Terkonfirmasi,
-  Perlu Review, dan Variasi Nama.
+  Perlu Review, Kemungkinan Duplikat, dan Variasi Nama.
 - hasil\Katalog_Promo_Final.csv  : tabel promo ringkas.
 - _internal\                   : data mentah scraper, log, dan file audit teknis.
   Jangan hapus folder ini jika ingin mekanisme mempertahankan data lama saat situs

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from decimal import Decimal, InvalidOperation
 
 
@@ -160,6 +161,119 @@ def name_variants(value: object) -> list[str]:
     return result
 
 
+
+# Tokens that usually signal a meaningful product variant (flavour, scent, or formula).
+# This is a guardrail, not a complete product dictionary.
+_VARIANT_TOKENS = {
+    "vanilla", "cokelat", "chocolate", "strawberry", "stroberi", "mango", "mangga",
+    "banana", "pisang", "coffee", "kopi", "mocha", "mocca", "matcha", "green",
+    "tea", "teh", "original", "classic", "zero", "less", "sugar", "sugarfree",
+    "jeruk", "lemon", "lime", "orange", "grape", "anggur", "apple", "apel",
+    "durian", "melon", "lychee", "leci", "peach", "coconut", "kelapa", "milk",
+    "susu", "mint", "peppermint", "floral", "sweet", "fresh", "aloe", "lavender",
+    "rose", "pink", "blue", "red", "black", "white", "spicy", "pedas", "bbq",
+    "barbeque", "cheese", "keju", "chicken", "ayam", "beef", "sapi", "seaweed",
+    "rumput", "laut", "garlic", "bawang", "honey", "madu", "creamy", "crunchy",
+}
+
+_SIZE_PACK_RE = re.compile(
+    r"\b(\d+)\s*x\s*(\d+(?:[.,]\d+)?)\s*(ml|g|kg|l)\b", re.IGNORECASE
+)
+_SIZE_SINGLE_RE = re.compile(r"\b(\d+(?:[.,]\d+)?)\s*(ml|g|kg|l)\b", re.IGNORECASE)
+
+
+def _fuzzy_text(value: object) -> str:
+    """A punctuation-insensitive form used only for comparison, not display."""
+    canonical = clean_product_name(value).casefold()
+    return " ".join(re.findall(r"[a-z0-9]+", canonical))
+
+
+def product_name_size_signature(value: object) -> tuple[str, ...]:
+    """Return package-size signature; 10 x 27 g remains distinct from 270 g."""
+    text = clean_product_name(value).casefold()
+    pack = _SIZE_PACK_RE.search(text)
+    if pack:
+        count, amount, unit = pack.groups()
+        return (f"pack:{int(count)}x{_amount(amount)}:{_unit(unit)}",)
+    measures = []
+    for amount, unit in _SIZE_SINGLE_RE.findall(text):
+        value = f"{_amount(amount)}:{_unit(unit)}"
+        if value not in measures:
+            measures.append(value)
+    return tuple(measures)
+
+
+def product_name_variant_signature(value: object) -> frozenset[str]:
+    """Known variant markers used to avoid merging different flavours/formulas."""
+    text = _fuzzy_text(value)
+    tokens = set(text.split())
+    # Multi-token variants that are meaningful but should not be mistaken for
+    # unrelated token noise.
+    if "sugar free" in text:
+        tokens.add("sugarfree")
+    return frozenset(tokens & _VARIANT_TOKENS)
+
+
+def product_name_similarity(a: object, b: object) -> float:
+    """Dynamic similarity score in [0, 1], using only Python's standard library."""
+    left, right = _fuzzy_text(a), _fuzzy_text(b)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    left_tokens, right_tokens = left.split(), right.split()
+    left_set, right_set = set(left_tokens), set(right_tokens)
+    denom = len(left_set) + len(right_set)
+    dice = (2 * len(left_set & right_set) / denom) if denom else 0.0
+    seq = SequenceMatcher(None, left, right, autojunk=False).ratio()
+    sorted_seq = SequenceMatcher(
+        None, " ".join(sorted(left_tokens)), " ".join(sorted(right_tokens)), autojunk=False
+    ).ratio()
+    return round(0.55 * seq + 0.25 * dice + 0.20 * sorted_seq, 4)
+
+
+def product_name_block_key(value: object) -> str:
+    """First normalized token used to reduce fuzzy-comparison work."""
+    text = _fuzzy_text(value)
+    return text.split()[0] if text else ""
+
+
+def product_name_identity_warnings(a: object, b: object) -> list[str]:
+    """Return explicit conflicts that should prevent auto-merging names."""
+    warnings = []
+    sa, sb = product_name_size_signature(a), product_name_size_signature(b)
+    if sa and sb and sa != sb:
+        warnings.append("ukuran/kemasan berbeda")
+    va, vb = product_name_variant_signature(a), product_name_variant_signature(b)
+    if va and vb and va != vb:
+        warnings.append("varian rasa/aroma/formula berbeda")
+    return warnings
+
+
+def product_names_can_auto_merge(a: object, b: object, threshold: float = 0.93) -> bool:
+    """Conservative dynamic matcher: only near-identical names with matching identity cues."""
+    left, right = _fuzzy_text(a), _fuzzy_text(b)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+
+    warnings = product_name_identity_warnings(a, b)
+    if warnings:
+        return False
+
+    # Do not auto-merge if one side omits all explicit size or variant information.
+    if bool(product_name_size_signature(a)) != bool(product_name_size_signature(b)):
+        return False
+    if bool(product_name_variant_signature(a)) != bool(product_name_variant_signature(b)):
+        return False
+
+    left_tokens, right_tokens = left.split(), right.split()
+    if not left_tokens or not right_tokens or left_tokens[0] != right_tokens[0]:
+        return False
+    token_coverage = len(set(left_tokens) & set(right_tokens)) / max(1, min(len(set(left_tokens)), len(set(right_tokens))))
+    return product_name_similarity(a, b) >= threshold and token_coverage >= 0.80
+
 def _self_test() -> None:
     samples = {
         "BENG-BENG Chocolate Drink 10x27g pck": "Beng-Beng Chocolate Drink 10 x 27 g",
@@ -174,7 +288,11 @@ def _self_test() -> None:
     for source, expected in samples.items():
         actual = clean_product_name(source)
         assert actual == expected, f"{source!r}: {actual!r} != {expected!r}"
-    print("SELF-TEST PASSED: normalisasi nama produk dan ukuran kemasan.")
+    assert product_name_similarity("Aice Mochi Vanilla Chocolate 270 g", "Aice Mochi Vanilla / Chocolate 270 g") >= 0.99
+    assert product_names_can_auto_merge("Aice Mochi Vanilla Chocolate 270 g", "Aice Mochi Vanilla / Chocolate 270 g")
+    assert not product_names_can_auto_merge("Aice Mochi Vanilla 270 g", "Aice Mochi Chocolate 270 g")
+    assert not product_names_can_auto_merge("Sunlight Jeruk 755 ml", "Sunlight Jeruk 450 ml")
+    print("SELF-TEST PASSED: normalisasi nama, ukuran, varian, dan fuzzy matching.")
 
 
 if __name__ == "__main__":

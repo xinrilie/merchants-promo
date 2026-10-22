@@ -650,7 +650,13 @@ def make_product_row(
     original_product_text = clean_text(product_text)
     normalized_product_text = clean_product_name(original_product_text)
     pricing = parse_offer_text(original_product_text, offer_text, source_mode)
-    merchant = merchant or infer_merchant(title, source_page_url)
+    if not merchant:
+        if source_name == "Hemat.id":
+            # Combined category URLs can mention multiple retailers. Do not pick the
+            # first one by substring; preserve unknown merchant for review instead.
+            merchant = unambiguous_merchant(title) or unambiguous_merchant(source_item_url or "")
+        else:
+            merchant = infer_merchant(title, source_page_url)
     discount_note = None
     if pricing.get("discount_basis") == "source_explicit_product_claim":
         discount_note = "Persentase dari sumber"
@@ -1131,6 +1137,21 @@ def run_self_tests() -> None:
     assert rows and rows[0]["promo_price"] == 12900 and rows[0]["normal_price"] == 19900
     assert rows[0]["discount_percent"] == 35.0
 
+    # Never infer Alfamart as the merchant merely because a combined Hemat URL
+    # contains "alfamart,hypermart". Ambiguous retailer attribution stays unknown.
+    ambiguous = make_product_row(
+        source_name="Hemat.id",
+        product_text="Aice Mochi Vanilla Chocolate 270 g",
+        offer_text="Harga Promo Rp9.900",
+        title="Katalog Promo Alfamart, Hypermart",
+        merchant=None,
+        meta=parse_promo_metadata("Katalog Promo Alfamart, Hypermart", "", ""),
+        source_url="https://www.hemat.id/katalog-alfamart,hypermart/",
+        source_page_url="https://www.hemat.id/katalog-alfamart,hypermart/",
+        source_mode="hemat",
+    )
+    assert ambiguous["merchant_name"] is None, "Combined Hemat listing must not guess the first retailer"
+
     retained = {
         "source_name": "Hemat.id",
         "source_names": "Hemat.id | Scanharga.com",
@@ -1141,7 +1162,7 @@ def run_self_tests() -> None:
     assert "Scanharga.com" in sources_in_row(retained)
     merged_retained = dedupe_rows([retained])
     assert merged_retained[0]["retained_from_previous_run"] is True
-    print("SELF-TEST PASSED: harga, persen, periode, parser sumber, dan last-good fallback.")
+    print("SELF-TEST PASSED: harga, persen, periode, parser sumber, merchant ambigu, dan last-good fallback.")
 
 
 def main() -> None:

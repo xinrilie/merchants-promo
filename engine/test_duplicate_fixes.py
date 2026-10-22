@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """Regression tests for product-name cleanup and cross-source offer dedupe."""
 
-from promo_names import clean_product_name
-from enrich_existing_promo_catalog_multisource import merge_equivalent_cross_source_offers
+from promo_names import clean_product_name, product_name_similarity, product_names_can_auto_merge
+from enrich_existing_promo_catalog_multisource import merge_equivalent_cross_source_offers, build_possible_duplicate_rows
 
 
 def row(**overrides):
@@ -105,6 +105,49 @@ def main():
     assert merged[0]["normal_price"] == 29990 and merged[0]["promo_price"] == 9900
     assert merged[0]["valid_from"] == "2026-10-16" and merged[0]["valid_until"] == "2026-10-22"
 
+    # A near-identical name can merge dynamically when merchant, size, variant,
+    # period, price and offer evidence are compatible.
+    fuzzy_name_a = "Wall's Ice Cream Avocado Brownie Matcha Strawberry Cookies Cream Strawberry Cheese Tub 350 ml"
+    fuzzy_name_b = "Wall's Cream Avocado Brownie Matcha Strawberry Cookies Cream Strawberry Cheese Tub 350 ml"
+    assert product_name_similarity(fuzzy_name_a, fuzzy_name_b) >= 0.93
+    assert product_names_can_auto_merge(fuzzy_name_a, fuzzy_name_b)
+    f1 = row(product_text=fuzzy_name_a, original_product_text=fuzzy_name_a,
+             product_name_variants=fuzzy_name_a, source_name="Hemat.id",
+             source_dataset="hemat.csv", source_url="https://hemat.example/walls-a",
+             source_item_url="https://hemat.example/item/walls-a")
+    f2 = dict(f1, product_text=fuzzy_name_b, original_product_text=fuzzy_name_b,
+              product_name_variants=fuzzy_name_b, source_name="Momsmoney/Kontan",
+              source_dataset="momsmoney.csv", source_url="https://momsmoney.example/walls-b",
+              source_item_url="https://momsmoney.example/item/walls-b")
+    fuzzy_merged, fuzzy_groups, fuzzy_absorbed = merge_equivalent_cross_source_offers([f1, f2])
+    assert len(fuzzy_merged) == 1 and fuzzy_groups == 1 and fuzzy_absorbed == 1, "High-confidence fuzzy name match was not consolidated"
+
+
+    # Dynamic fuzzy matching should identify spelling/punctuation variation but
+    # protect explicit SKU size and flavour differences.
+    assert product_name_similarity("Aice Mochi Vanilla Chocolate 270 g", "Aice Mochi Vanilla / Chocolate 270 g") >= 0.99
+    assert product_names_can_auto_merge("Aice Mochi Vanilla Chocolate 270 g", "Aice Mochi Vanilla / Chocolate 270 g")
+    assert not product_names_can_auto_merge("Sunlight Jeruk 755 ml", "Sunlight Jeruk 450 ml")
+    assert not product_names_can_auto_merge("Aice Mochi Vanilla 270 g", "Aice Mochi Chocolate 270 g")
+
+    # If an ambiguous multi-retailer listing cannot safely be merged with a
+    # known merchant row, it must appear in the candidate-review sheet.
+    unknown_merchant = row(merchant_name=None, source_name="Hemat.id", source_dataset="hemat.csv",
+        source_url="https://hemat.example/katalog-alfamart,hypermart", source_item_url="https://hemat.example/item/aice",
+        product_text="Aice Mochi Vanilla Chocolate 270 g", original_product_text="Aice Mochi Vanilla Chocolate 270 g",
+        product_name_variants="Aice Mochi Vanilla Chocolate 270 g", promo_price=9900, normal_price=29990,
+        discount_percent=67, discount_percent_basis="calculated_from_unit_prices",
+        offer_text="Harga Normal Rp 29.990 Harga Promo Rp 9.900", deal_type="Diskon Persentase", price_basis="offer_price")
+    known_merchant = row(merchant_name="Hypermart", source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv",
+        source_url="https://momsmoney.example/aice", source_item_url="https://momsmoney.example/item/aice", product_text="Aice Mochi Vanilla / Chocolate 270 g",
+        original_product_text="Aice Mochi Vanilla / Chocolate 270 g", product_name_variants="Aice Mochi Vanilla / Chocolate 270 g",
+        promo_price=9900, normal_price=29990, discount_percent=67,
+        discount_percent_basis="calculated_from_unit_prices", discount_percent_confidence="high",
+        offer_text="Harga Normal Rp 29.990 Harga Promo Rp 9.900", deal_type="Diskon Persentase", price_basis="offer_price")
+    fuzzy_candidates = build_possible_duplicate_rows([unknown_merchant, known_merchant])
+    assert fuzzy_candidates and fuzzy_candidates[0]["Kemiripan Nama (%)"] >= 99
+    assert "Merchant belum pasti" in fuzzy_candidates[0]["Alasan"]
+
     # Conflicting explicit prices must never be silently merged.
     c1 = dict(a2, promo_price=10900, discount_percent=63.7, discount_percent_calculated=63.7,
               source_url="https://hemat.example/aice-price-a", source_name="Hemat.id", source_dataset="hemat.csv")
@@ -112,7 +155,7 @@ def main():
               source_url="https://momsmoney.example/aice-price-b", source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv")
     merged, groups, absorbed = merge_equivalent_cross_source_offers([c1, c2])
     assert len(merged) == 2 and groups == 0, "Conflicting prices were silently merged"
-    print("SELF-TEST PASSED: names cleaned; equivalent offers merged; price conflicts preserved.")
+    print("SELF-TEST PASSED: name cleaning, conservative fuzzy matching, duplicate-candidate review, and price-conflict protection.")
 
 
 if __name__ == "__main__":
