@@ -350,6 +350,7 @@ def extract_period_details(title: str, lead_text: str, published_at: str | None 
     title_period = parse_period_details(title)
     lead_period = parse_period_details(lead_text)
     flags = []
+    evidence_source = "unknown"
 
     title_known = title_period["period_precision"] != "unknown"
     lead_known = lead_period["period_precision"] != "unknown"
@@ -364,13 +365,17 @@ def extract_period_details(title: str, lead_text: str, published_at: str | None 
         # prefer the more precise lead range and retain a diagnostic flag.
         if title_period["period_precision"] == "month" and lead_period["period_precision"] in exact:
             chosen = lead_period
+            evidence_source = "article_lead"
             flags.append("used_more_precise_lead_period")
         else:
             chosen = title_period
+            evidence_source = "campaign_title"
     elif title_known:
         chosen = title_period
+        evidence_source = "campaign_title"
     elif lead_known:
         chosen = lead_period
+        evidence_source = "article_lead"
         flags.append("period_taken_from_lead")
     else:
         chosen = title_period
@@ -389,6 +394,7 @@ def extract_period_details(title: str, lead_text: str, published_at: str | None 
                 end_date = date.fromisoformat(end) if end else None
                 if end_date and published_date <= end_date:
                     start = published_date.isoformat()
+                    evidence_source = "publication_date_estimate"
                     flags.append("start_inferred_from_published_at")
             except ValueError:
                 pass
@@ -399,6 +405,8 @@ def extract_period_details(title: str, lead_text: str, published_at: str | None 
         "period_precision": precision,
         "period_flags": " | ".join(flags) if flags else None,
         "matched_period_text": chosen.get("matched_period_text"),
+        "period_evidence_text": chosen.get("matched_period_text"),
+        "period_evidence_source": evidence_source,
     }
 
 
@@ -914,6 +922,8 @@ def parse_product_line(
         "normal_price": normal_price,
         "price_parse_method": price_method,
         "price_basis": price_basis,
+        "price_evidence_text": offer_text if prices or normal_price is not None or promo_price is not None else None,
+        "discount_evidence_text": offer_text if discount_info.get("discount_percent") is not None else None,
         "purchase_condition": purchase_condition,
         "price_quality_flag": " | ".join(dict.fromkeys(quality_flags)) if quality_flags else None,
         **discount_info,
@@ -1077,7 +1087,14 @@ def fetch_article(session: requests.Session, candidate: dict) -> dict:
         result["period_precision"] = period_info["period_precision"]
         result["period_flags"] = period_info["period_flags"]
         result["matched_period_text"] = period_info["matched_period_text"]
+        result["period_evidence_text"] = period_info["period_evidence_text"]
+        result["period_evidence_source"] = period_info["period_evidence_source"]
         result["promo_status"] = promo_status(start, end, period_info["period_precision"])
+        if "title_lead_period_differs" in (period_info.get("period_flags") or ""):
+            if result["promo_status"] == "active":
+                result["promo_status"] = "active_estimated"
+            elif result["promo_status"] == "upcoming":
+                result["promo_status"] = "upcoming_estimated"
         campaign_discount, campaign_discount_type = parse_explicit_discount(title)
         result["campaign_discount_max_percent"] = campaign_discount if campaign_discount_type == "explicit_max" else None
 
@@ -1090,6 +1107,10 @@ def fetch_article(session: requests.Session, candidate: dict) -> dict:
             product["valid_until"] = end
             product["period_precision"] = period_info["period_precision"]
             product["period_flags"] = period_info["period_flags"]
+            product["matched_period_text"] = period_info["matched_period_text"]
+            product["period_evidence_text"] = period_info["period_evidence_text"]
+            product["period_evidence_source"] = period_info["period_evidence_source"]
+            product["promo_status"] = result["promo_status"]
             product["published_at"] = result.get("published_at")
             product["campaign_discount_max_percent"] = result["campaign_discount_max_percent"]
             product["promo_status"] = result["promo_status"]
@@ -1289,10 +1310,12 @@ def write_csv(path: Path, rows: list[dict]) -> None:
     fields = [
         "product_text", "merchant_name", "campaign_title", "campaign_type",
         "promo_status", "valid_from", "valid_until", "period_precision", "period_flags",
+        "matched_period_text", "period_evidence_text", "period_evidence_source",
         "promo_price", "normal_price", "discount_percent", "discount_percent_basis",
         "discount_percent_confidence", "discount_percent_calculated", "discount_savings_rp",
         "estimated_bundle_discount_percent", "campaign_discount_max_percent",
-        "price_parse_method", "price_basis", "purchase_condition", "price_quality_flag",
+        "price_parse_method", "price_basis", "price_evidence_text", "discount_evidence_text",
+        "purchase_condition", "price_quality_flag",
         "deal_type", "offer_text", "section", "published_at", "source_url",
         "source_urls", "source_campaign_titles", "duplicate_count", "raw_line",
     ]
@@ -1432,6 +1455,15 @@ def main() -> None:
 
         # File attempt menyimpan audit lengkap, termasuk artikel expired/unknown.
         latest_attempt_products = deduplicate_products(active_products + estimated_products)
+        summary["latest_attempt_price_evidence_rows"] = sum(
+            bool(row.get("price_evidence_text")) for row in latest_attempt_products
+        )
+        summary["latest_attempt_discount_evidence_rows"] = sum(
+            bool(row.get("discount_evidence_text")) for row in latest_attempt_products
+        )
+        summary["latest_attempt_period_evidence_rows"] = sum(
+            bool(row.get("period_evidence_text")) for row in latest_attempt_products
+        )
         attempt_payload = {
             **summary,
             "validation": validation,
@@ -1494,6 +1526,9 @@ def main() -> None:
                     "valid_until": item.get("valid_until"),
                     "period_precision": item.get("period_precision"),
                     "period_flags": item.get("period_flags"),
+                    "matched_period_text": item.get("matched_period_text"),
+                    "period_evidence_text": item.get("period_evidence_text"),
+                    "period_evidence_source": item.get("period_evidence_source"),
                     "product_count": item.get("product_count"),
                     "note": item.get("note"),
                 }

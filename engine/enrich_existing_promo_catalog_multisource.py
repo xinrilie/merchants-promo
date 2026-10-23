@@ -65,11 +65,11 @@ TODAY = scraper.TODAY
 FIELDS = [
     "product_text", "original_product_text", "product_name_variants", "merchant_name", "campaign_title", "campaign_type",
     "promo_status", "valid_from", "valid_until", "period_precision",
-    "period_flags", "matched_period_text", "published_at",
+    "period_flags", "matched_period_text", "period_evidence_text", "period_evidence_source", "published_at",
     "promo_price", "normal_price", "discount_percent", "discount_percent_basis",
     "discount_percent_confidence", "discount_percent_calculated", "discount_savings_rp",
     "estimated_bundle_discount_percent", "campaign_discount_percent",
-    "campaign_discount_basis", "price_parse_method", "price_basis",
+    "campaign_discount_basis", "price_parse_method", "price_basis", "price_evidence_text", "discount_evidence_text",
     "purchase_condition", "deal_type", "offer_text", "section",
     "source_url", "source_urls", "source_campaign_titles", "source_dataset",
     "source_name", "source_names", "source_type", "verification_status", "merchant_resolution_method",
@@ -293,6 +293,22 @@ def period_meta(row, title):
     elif precision == "unknown" and (start or end):
         flags = pipe_unique([*flags, "incomplete_period_dates"])
 
+    # An exact-looking pair of dates is not enough by itself: keep it confirmed
+    # only when its evidence phrase can be traced to the article title or source
+    # metadata. This prevents historical CSV dates with missing provenance from
+    # being treated as confirmed current promotions.
+    if precision in exact_precisions and not matched:
+        title_matches_dates = (
+            title_precision in exact_precisions
+            and title_meta.get("valid_from") == start
+            and title_meta.get("valid_until") == end
+        )
+        if title_matches_dates:
+            matched = title_meta.get("matched_period_text")
+        else:
+            precision = "unverified"
+            flags = pipe_unique([*flags, "period_precision_missing_source_evidence"])
+
     # Periode berakhir pada suatu tanggal tanpa awal yang jelas memakai tanggal publikasi
     # hanya sebagai lower bound dan tetap berstatus estimasi.
     if precision == "until" and not start and row.get("published_at"):
@@ -333,6 +349,8 @@ def current_status(start, end, precision, period_flags=None, source_status=None)
             "title_lead_period_differs",
             "title_period_mismatch_with_catalog_dates",
             "source_dates_differ_from_title_period",
+            "title_visible_period_differs",
+            "title_context_period_differs",
         )
     )
     if material_conflict and status == "active":
@@ -464,7 +482,8 @@ def load_source(path, source_label):
         merchant = canonical_merchant(raw.get("merchant_name") or raw.get("merchant"), title)
         original_product = (raw.get("original_product_text") or raw.get("product_text") or "").strip()
         product = clean_product_name(raw.get("product_text") or original_product)
-        offer = (raw.get("offer_text") or raw.get("detail") or "").strip()
+        raw_offer = (raw.get("offer_text") or raw.get("detail") or "").strip()
+        offer = raw_offer
         raw_line = (raw.get("raw_line") or "").strip()
         if not offer:
             offer = raw_line
@@ -479,10 +498,31 @@ def load_source(path, source_label):
 
         # Calculate product-level discount from the SKU's offer text only.
         quality_flags = pipe_unique([raw.get("price_quality_flag") or ""])
+        price_evidence = (raw.get("price_evidence_text") or raw_offer or "").strip()
+        normalized_offer_evidence = norm_key(raw_offer)
+        normalized_price_evidence = norm_key(price_evidence)
+        evidence_belongs_to_offer = bool(raw_offer) and (
+            not raw.get("price_evidence_text")
+            or bool(normalized_price_evidence and normalized_price_evidence == normalized_offer_evidence)
+        )
+        has_price_evidence = evidence_belongs_to_offer and bool(re.search(
+            r"\b(?:rp\.?\s*\d|harga\s+(?:normal|promo|spesial|setelah\s+diskon)\s*[:\-]?\s*\d)",
+            raw_offer,
+            re.IGNORECASE,
+        ))
+        if (promo is not None or normal is not None) and not has_price_evidence:
+            # Do not preserve detached numeric values from legacy/combined rows
+            # when the offer segment itself does not contain price evidence.
+            quality_flags = pipe_unique([*quality_flags, "price_without_offer_evidence_routed_to_review"])
+            promo = None
+            normal = None
+            basis = "no_single_price"
         if raw.get("promo_price") not in (None, "") and promo is None:
-            quality_flags = pipe_unique([*quality_flags, "promo_price_parse_failed"])
+            if has_price_evidence:
+                quality_flags = pipe_unique([*quality_flags, "promo_price_parse_failed"])
         if raw.get("normal_price") not in (None, "") and normal is None:
-            quality_flags = pipe_unique([*quality_flags, "normal_price_parse_failed"])
+            if has_price_evidence:
+                quality_flags = pipe_unique([*quality_flags, "normal_price_parse_failed"])
         if promo is not None and normal is not None and promo > normal:
             quality_flags = pipe_unique([*quality_flags, "promo_price_above_normal_review"])
         discount = safe_discount_fields(
@@ -520,6 +560,11 @@ def load_source(path, source_label):
             "period_precision": precision,
             "period_flags": period_flags,
             "matched_period_text": matched,
+            "period_evidence_text": (raw.get("period_evidence_text") or matched or "").strip() or None,
+            "period_evidence_source": (
+                (raw.get("period_evidence_source") or "").strip()
+                or ("campaign_title" if matched and title and matched in title else "source_period_metadata" if matched else "unverified_legacy")
+            ),
             "published_at": (raw.get("published_at") or "").strip() or None,
             "promo_price": promo,
             "normal_price": normal,
@@ -528,6 +573,8 @@ def load_source(path, source_label):
             "campaign_discount_basis": campaign_disc_basis,
             "price_parse_method": price_method,
             "price_basis": basis or None,
+            "price_evidence_text": price_evidence if has_price_evidence and (promo is not None or normal is not None) else None,
+            "discount_evidence_text": offer if discount.get("discount_percent") is not None else None,
             "purchase_condition": purchase_condition,
             "deal_type": deal_type,
             "offer_text": offer or None,
@@ -1319,6 +1366,8 @@ PERIOD_CONFLICT_MARKERS = (
     "title_lead_period_differs",
     "title_period_mismatch_with_catalog_dates",
     "source_dates_differ_from_title_period",
+    "title_visible_period_differs",
+    "title_context_period_differs",
 )
 
 
@@ -1874,6 +1923,9 @@ def main():
         "possible_duplicate_candidate_pairs": len(possible_duplicate_rows),
         "possible_duplicate_high_similarity_pairs": sum(float(r.get("Kemiripan Nama (%)") or 0) >= 93 for r in possible_duplicate_rows),
         "discount_basis_counts_current": dict(discount_basis),
+        "rows_with_price_evidence": sum(bool(r.get("price_evidence_text")) for r in current),
+        "rows_with_discount_evidence": sum(bool(r.get("discount_evidence_text")) for r in current),
+        "rows_with_period_evidence": sum(bool(r.get("period_evidence_text")) for r in current),
         "merchant_counts_current": dict(merchant_counts),
         "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
         "internal_audit_files": [OUT_CONFIRMED.relative_to(ROOT_DIR).as_posix(), OUT_REVIEW.relative_to(ROOT_DIR).as_posix(), OUT_FULL.relative_to(ROOT_DIR).as_posix(), OUT_REJECTED_PRODUCTS.relative_to(ROOT_DIR).as_posix(), OUT_REPORT.relative_to(ROOT_DIR).as_posix()],

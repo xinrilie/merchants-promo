@@ -148,10 +148,12 @@ PRODUCT_FIELDS = [
     "product_text", "original_product_text", "product_name_variants", "normal_price", "promo_price", "discount_percent",
     "merchant_name", "discount_savings_rp", "discount_note", "deal_type",
     "purchase_condition", "offer_text", "valid_from", "valid_until",
-    "period_precision", "promo_status", "campaign_title", "campaign_type", "published_at",
+    "period_precision", "promo_status", "period_flags", "matched_period_text", "period_evidence_text",
+    "period_evidence_source", "campaign_title", "campaign_type", "published_at",
     "source_name", "source_type", "verification_status", "source_url",
     "source_page_url", "source_item_url", "region_or_channel", "scraped_at",
-    "price_parse_method", "price_basis", "discount_basis", "price_quality_flag",
+    "price_parse_method", "price_basis", "price_evidence_text", "discount_evidence_text",
+    "discount_basis", "price_quality_flag",
     "raw_line", "retained_from_previous_run",
 ]
 ACTIVE_FIELDS = PRODUCT_FIELDS
@@ -159,6 +161,7 @@ REVIEW_FIELDS = PRODUCT_FIELDS + ["review_reason"]
 ARTICLE_FIELDS = [
     "source_name", "title", "source_url", "published_at", "merchant_name",
     "valid_from", "valid_until", "period_precision", "promo_status",
+    "matched_period_text", "period_evidence_text", "period_evidence_source", "period_flags",
     "product_rows_extracted", "image_count", "scrape_status", "note", "scraped_at",
 ]
 IMAGE_FIELDS = [
@@ -415,9 +418,11 @@ def derive_campaign_type(title: str) -> str:
 
 def parse_offer_text(product_text: str, offer_text: str, source_mode: str) -> dict:
     offer = clean_text(offer_text)
-    whole = f"{product_text} {offer}".strip()
-    normal = parse_rupiah_label(whole, r"harga\s+normal")
-    promo = parse_rupiah_label(whole, r"harga\s+promo")
+    # Price evidence must be contained in the product's own offer segment.
+    # Do not search product_text: a malformed card can contain campaign prose
+    # and a number, then accidentally lend that number to the parsed offer.
+    normal = parse_rupiah_label(offer, r"harga\s+normal")
+    promo = parse_rupiah_label(offer, r"harga\s+promo")
     method = "not_extracted"
     basis = "no_single_price"
     purchase_condition = None
@@ -446,7 +451,7 @@ def parse_offer_text(product_text: str, offer_text: str, source_mode: str) -> di
         basis = "offer_price"
     elif source_mode == "hemat" and re.match(r".*\bRp\.?\s*\d", offer, re.IGNORECASE):
         # Hemat card text may contain explicit price labels outside offer_text.
-        promo_match = re.search(r"Harga Promo\s*Rp\.?\s*([0-9][0-9.,]*)", whole, re.IGNORECASE)
+        promo_match = re.search(r"Harga Promo\s*Rp\.?\s*([0-9][0-9.,]*)", offer, re.IGNORECASE)
         if promo_match:
             promo = parse_idr(promo_match.group(1))
             method, basis = "explicit_promo_label", "offer_price"
@@ -544,25 +549,78 @@ def strip_product_name(text: str) -> tuple[str | None, str | None]:
     return name, offer
 
 
+def _period_evidence_span(text: str, precision: str) -> str | None:
+    """Return the date phrase actually used as period evidence."""
+    text = clean_text(text)
+    if not text:
+        return None
+    patterns = {
+        "range": [
+            rf"\b\d{{1,2}}\s+(?:{MONTH_PATTERN})\s*{DATE_SEP}\s*\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b",
+            rf"\b\d{{1,2}}\s*{DATE_SEP}\s*\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b",
+            rf"\b\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\s*{DATE_SEP}\s*\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b",
+        ],
+        "single_day": [rf"\b(?:tanggal|berlaku tanggal|promo tanggal)\s+\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b"],
+        "until": [rf"\b(?:sampai|hingga|s\.d\.|s/d)\s*\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b"],
+        "month": [rf"\b(?:{MONTH_PATTERN})\s+\d{{4}}\b"],
+    }
+    for pattern in patterns.get(precision, []):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(0)
+    return None
+
+
 def parse_promo_metadata(title: str, visible_text: str, card_context: str = "") -> dict:
     start, end, precision = parse_period_range(title)
+    title_start, title_end, title_precision = start, end, precision
+    period_flags: list[str] = []
+    period_evidence_source = "campaign_title" if precision != "unknown" else "unknown"
+    period_evidence_text = _period_evidence_span(title, precision) if precision != "unknown" else None
+    body = visible_text[:5000]
+    body_start, body_end, body_precision = parse_period_range(body)
+    context_start, context_end, context_precision = parse_period_range(card_context)
+    if title_precision in {"range", "single_day"} and context_precision in {"range", "single_day"}:
+        if (title_start, title_end) != (context_start, context_end):
+            period_flags.append("title_context_period_differs")
+    if title_precision in {"range", "single_day"} and body_precision in {"range", "single_day"}:
+        if (title_start, title_end) != (body_start, body_end):
+            period_flags.append("title_visible_period_differs")
     if precision == "unknown":
-        # The lead text can contain a dedicated 'Periode Promo' line. Only use a
-        # day-range expression from this context; never guess a full month as a date.
-        start2, end2, precision2 = parse_period_range(visible_text[:5000])
+        # In listing cards, the nearest card is the strongest context. Article
+        # pages use the visible body only when no card-specific period is present.
+        start2, end2, precision2 = context_start, context_end, context_precision
+        chosen_context = card_context
+        chosen_source = "card_context"
+        if not (start2 and end2):
+            start2, end2, precision2 = body_start, body_end, body_precision
+            chosen_context = body
+            chosen_source = "article_body"
         if start2 and end2:
             start, end, precision = start2, end2, precision2
+            period_evidence_source = chosen_source
+            period_evidence_text = _period_evidence_span(chosen_context, precision)
     if not end:
-        end = parse_end_only(card_context) or parse_end_only(visible_text[:1500])
+        context_end = parse_end_only(card_context)
+        body_end = parse_end_only(visible_text[:1500])
+        end = context_end or body_end
         if end:
             precision = "until"
+            if context_end:
+                period_evidence_source = "card_context"
+                period_evidence_text = _period_evidence_span(card_context, "until")
+            else:
+                period_evidence_source = "article_body"
+                period_evidence_text = _period_evidence_span(visible_text[:1500], "until")
     if precision == "unknown":
         # Month/year in an article title is a reviewable period estimate, not
         # a confirmed full-range promo. Keep it visible as active_estimated or
         # upcoming_estimated instead of incorrectly leaving it unknown.
         month_match = re.search(rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<year>\d{{4}})\b", clean_text(title).casefold(), re.I)
+        month_source = "campaign_title"
         if not month_match:
             month_match = re.search(rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<year>\d{{4}})\b", clean_text(visible_text[:1500]).casefold(), re.I)
+            month_source = "article_body"
         if month_match:
             month = parse_month(month_match.group("month"))
             year = int(month_match.group("year"))
@@ -570,11 +628,24 @@ def parse_promo_metadata(title: str, visible_text: str, card_context: str = "") 
                 month_start = date(year, month, 1)
                 next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
                 start, end, precision = month_start.isoformat(), (next_month - date.resolution).isoformat(), "month"
+                period_evidence_source = month_source
+                evidence_text = title if month_source == "campaign_title" else visible_text[:1500]
+                period_evidence_text = _period_evidence_span(evidence_text, "month")
+    status = determine_status(start, end, precision)
+    if any(flag in period_flags for flag in ("title_visible_period_differs", "title_context_period_differs")):
+        if status == "active":
+            status = "active_estimated"
+        elif status == "upcoming":
+            status = "upcoming_estimated"
     return {
         "valid_from": start,
         "valid_until": end,
         "period_precision": precision,
-        "promo_status": determine_status(start, end, precision),
+        "promo_status": status,
+        "period_flags": " | ".join(period_flags) or None,
+        "matched_period_text": period_evidence_text,
+        "period_evidence_text": period_evidence_text,
+        "period_evidence_source": period_evidence_source,
     }
 
 
@@ -732,6 +803,8 @@ def make_product_row(
         "scraped_at": now_iso(),
         "price_parse_method": pricing.get("price_parse_method"),
         "price_basis": pricing.get("price_basis"),
+        "price_evidence_text": offer_text if pricing.get("normal_price") is not None or pricing.get("promo_price") is not None else None,
+        "discount_evidence_text": offer_text if pricing.get("discount_percent") is not None else None,
         "discount_basis": pricing.get("discount_basis"),
         "price_quality_flag": pricing.get("price_quality_flag"),
         "raw_line": raw_line or None,

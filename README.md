@@ -18,11 +18,13 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 Pipeline memisahkan pengumpulan data dan pemrosesan lintas sumber agar produk dari beberapa situs bisa dibandingkan setelah semua data terkumpul.
 
-1. **Collector — pencari data:** `promo_catalog_all_merchants.py` mengambil artikel Momsmoney/Kontan dari kategori Hemat; setelah itu `promo_multisource_collector.py` mengambil katalog dari Hemat.id, Katalogpromosi.com, dan Scanharga.com; mengekstrak kartu/teks penawaran; menyimpan URL sumber; dan melakukan validasi awal untuk menolak kandidat yang terlihat seperti judul artikel, syarat umum, atau klaim diskon kampanye.
-2. **Enhancer — normalisasi & validasi akhir:** membaca hasil collector terbaru yang lolos freshness gate dan CSV katalog baseline, menormalkan nama/harga/tanggal, mengulang validasi non-produk, melakukan deduplikasi persis serta konsolidasi periode yang aman, kemudian menjalankan *fuzzy matching* lintas sumber sebelum ekspor.
+1. **Collector — pencari data:** `promo_catalog_all_merchants.py` mengambil artikel Momsmoney/Kontan dari kategori Hemat; setelah itu `promo_multisource_collector.py` mengambil katalog dari Hemat.id, Katalogpromosi.com, dan Scanharga.com; mengekstrak kartu/teks penawaran; menyimpan URL sumber dan frasa bukti tanggal/harga/diskon; serta menolak kandidat yang terlihat seperti judul artikel, syarat umum, atau klaim diskon kampanye.
+2. **Enhancer — normalisasi & validasi akhir:** membaca hasil collector terbaru yang lolos freshness gate dan CSV katalog baseline, menormalkan nama/harga/tanggal, mengulang validasi non-produk, memastikan nilai harga didukung oleh teks penawaran yang sama, menurunkan tanggal tanpa bukti yang bisa ditelusuri ke status estimasi/review, melakukan deduplikasi persis serta konsolidasi periode yang aman, kemudian menjalankan *fuzzy matching* lintas sumber sebelum ekspor.
 3. **Product validation:** modul bersama yang dipakai oleh collector dan enhancer. Ini adalah lapisan pertahanan ganda agar judul artikel tidak masuk kembali ke katalog dari sumber lama atau hasil scraping sebelumnya.
 4. **Product name engine:** menyamakan spasi, ejaan, satuan, dan format kemasan. *Fuzzy matching* memberi kandidat kemiripan, tetapi tidak boleh menggabungkan produk jika ukuran/varian atau detail penawaran bertentangan.
 5. **Regression tests:** menguji parsing, baris editorial, produk valid, contoh produk mirip, dan perlindungan terhadap harga/varian yang berbeda.
+
+Harga dan diskon produk diambil dari segmen `offer_text`, bukan dari gabungan nama produk dan teks promo. Audit internal juga menyimpan `price_evidence_text`, `discount_evidence_text`, `period_evidence_text`, dan `period_evidence_source`. Frasa periode pada judul/lead/kartu yang bertentangan ditandai sebagai konflik; tanggal yang tidak punya bukti sumber yang dapat dilacak tidak ditampilkan sebagai periode pasti.
 
 ### Kenapa fuzzy matching dilakukan di enhancer?
 
@@ -71,7 +73,8 @@ promo-katalog-engine/
 │   ├── promo_product_validation.py
 │   ├── promo_names.py
 │   ├── promo_catalog_all_merchants.py
-│   └── test_pipeline.py
+│   ├── test_pipeline.py
+│   └── test_source_regressions.py
 ├── hasil/       # dibuat otomatis
 └── _internal/   # data antara, log, dan audit; dibuat otomatis
 ```
@@ -99,6 +102,7 @@ File teknis tersimpan di `_internal/`:
 - **`promo_product_rows_rejected.csv`** — baris dari CSV lama/hasil collector yang ditolak oleh enhancer.
 - **`promo_possible_duplicate_candidates.csv`** — nama yang mirip tetapi belum aman digabung.
 - **`promo_multisource_runlog.json`** dan **`promo_multisource_quality_report.json`** — ringkasan status sumber, jumlah baris, alasan penolakan, duplikasi, dan kualitas.
+- Kolom bukti di file audit internal menunjukkan segmen teks yang mendukung harga/diskon serta frasa dan asal periode promo. Kolom teknis ini sengaja tidak membebani tampilan katalog utama.
 
 File `_internal/` digunakan untuk audit dan diagnosis. Untuk pemakaian sehari-hari, buka workbook atau CSV dari `hasil/`.
 
@@ -138,6 +142,7 @@ python engine/enrich_existing_promo_catalog_multisource.py
 - Fragmen satu kata seperti `Akhirnya` tidak diterima sebagai SKU hanya karena disertai klaim diskon.
 - Produk nyata dengan atribut SKU (misalnya ukuran) dan penawaran bundling eksplisit tetap dipertahankan.
 - Fuzzy matching tetap menjaga varian, harga, dan syarat promo yang bertentangan tetap terpisah.
+- Tes parser offline memeriksa Hemat.id, Katalogpromosi.com, Scanharga.com, dan Momsmoney/Kontan; tes juga memastikan angka harga tidak dipinjam dari nama produk dan periode tanpa bukti diturunkan ke estimasi/review.
 
 ---
 

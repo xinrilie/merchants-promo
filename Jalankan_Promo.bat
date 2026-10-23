@@ -32,6 +32,9 @@ echo.
 echo [3/6] Uji regresi pipeline, judul artikel, dan fuzzy matching...
 %PYTHON% "%~dp0engine\test_pipeline.py"
 if errorlevel 1 goto :error
+echo Menguji parser dan bukti data per sumber...
+%PYTHON% "%~dp0engine\test_source_regressions.py"
+if errorlevel 1 goto :error
 
 echo.
 echo [4/6] Mengambil artikel promo Momsmoney/Kontan...
