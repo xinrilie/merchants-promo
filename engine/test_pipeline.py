@@ -372,6 +372,68 @@ def test_momsmoney_feed_freshness_gate():
             enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_RUN_LOG = old_feed_path, old_log_path
 
 
+def test_momsmoney_current_attempt_is_available_without_loading_stale_catalog():
+    import json
+    with tempfile.TemporaryDirectory() as temp_dir:
+        folder = Path(temp_dir)
+        stable_feed = folder / "promo_catalog_all_merchants.csv"
+        attempt_feed = folder / "promo_catalog_all_merchants_latest_attempt_products.csv"
+        log_path = folder / "promo_catalog_all_merchants_runlog.json"
+        stable_feed.write_text("product_text\nSTALE PREVIOUS SKU\n", encoding="utf-8")
+        attempt_feed.write_text("product_text,promo_status\nFresh SKU,active\nEstimated SKU,active_estimated\n", encoding="utf-8")
+
+        old_paths = (enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_ATTEMPT_CSV, enhancer.MOMSMONEY_RUN_LOG)
+        try:
+            enhancer.MOMSMONEY_CSV = stable_feed
+            enhancer.MOMSMONEY_ATTEMPT_CSV = attempt_feed
+            enhancer.MOMSMONEY_RUN_LOG = log_path
+            log_path.write_text(json.dumps({
+                "checked_at": enhancer.TODAY.isoformat() + "T06:00:00+07:00",
+                "successful_articles": 60,
+                "output_status": "preserved_previous_catalog",
+                "latest_attempt_product_rows": 2,
+            }), encoding="utf-8")
+
+            path, note = enhancer.momsmoney_fresh_input()
+            assert path == attempt_feed, (path, note)
+            assert "preserved_previous_catalog" in note
+
+            # A stale run log invalidates both files; last-good data is not
+            # mistaken for a current scrape merely because the CSV exists.
+            log_path.write_text(json.dumps({
+                "checked_at": "2001-01-01T06:00:00+07:00",
+                "successful_articles": 60,
+                "output_status": "preserved_previous_catalog",
+                "latest_attempt_product_rows": 2,
+            }), encoding="utf-8")
+            path, _ = enhancer.momsmoney_fresh_input()
+            assert path is None
+        finally:
+            enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_ATTEMPT_CSV, enhancer.MOMSMONEY_RUN_LOG = old_paths
+
+
+def test_multisource_month_periods_are_estimates_and_rank_current_titles_first():
+    canonical_months = {
+        1: "januari", 2: "februari", 3: "maret", 4: "april", 5: "mei", 6: "juni",
+        7: "juli", 8: "agustus", 9: "september", 10: "oktober", 11: "november", 12: "desember",
+    }
+    current_title = f"Promo KFC {collector.TODAY.day}-{collector.TODAY.day} "
+    current_title += f"{canonical_months[collector.TODAY.month]} {collector.TODAY.year}"
+
+    current_priority = collector.article_candidate_priority({"title_hint": current_title})
+    expired_priority = collector.article_candidate_priority({"title_hint": "Promo Lama 1-2 Januari 2000"})
+    assert current_priority > expired_priority, (current_priority, expired_priority)
+
+    month_name = canonical_months[collector.TODAY.month]
+    current_month = collector.parse_promo_metadata(f"Promo Restoran {month_name} {collector.TODAY.year}", "")
+    assert current_month["period_precision"] == "month"
+    assert current_month["promo_status"] == "active_estimated"
+
+    end_only = collector.parse_promo_metadata("Promo Restoran", "Promo berlaku hingga 31 Desember 2099")
+    assert end_only["valid_until"] == "2099-12-31"
+    assert end_only["promo_status"] == "active_estimated"
+
+
 def test_momsmoney_rows_get_source_metadata():
     with tempfile.TemporaryDirectory() as temp_dir:
         path = Path(temp_dir) / "feed.csv"
@@ -404,7 +466,9 @@ def main():
     test_enhancer_defense_in_depth()
     test_cross_source_fuzzy_merge_and_guardrails()
     test_momsmoney_feed_freshness_gate()
+    test_momsmoney_current_attempt_is_available_without_loading_stale_catalog()
     test_momsmoney_rows_get_source_metadata()
+    test_multisource_month_periods_are_estimates_and_rank_current_titles_first()
     print("REGRESSION TESTS PASSED")
     print("- editorial/headline fragments from the screenshot are rejected")
     print("- valid SKU price and bundle examples are kept")
@@ -413,7 +477,9 @@ def main():
     print("- article paragraphs and campaign headings are rejected even when a price was extracted")
     print("- enhancer independently filters stale/old false product rows even when campaign_title is missing")
     print("- fuzzy merge combines corroborated cross-source offers but preserves variant/price conflicts")
-    print("- Momsmoney/Kontan is ingested only when today's latest scrape was successfully updated")
+    print("- Momsmoney/Kontan uses only current-run data; stale last-good CSV is never loaded as fresh data")
+    print("- fresh Momsmoney attempt rows can be reviewed without overwriting a stale last-good catalog")
+    print("- multi-source article selection prioritizes current period evidence; month-only periods remain estimates")
 
 
 if __name__ == "__main__":

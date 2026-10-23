@@ -29,6 +29,7 @@ NEW_CSV = INPUT_DIR / "promo_catalog_all_merchants.csv"
 MULTISOURCE_CSV = INTERNAL_DIR / "promo_multisource_products_all.csv"  # dibuat oleh collector
 MOMSMONEY_CSV = INTERNAL_DIR / "promo_catalog_all_merchants.csv"  # hasil scrape Momsmoney/Kontan
 MOMSMONEY_RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_runlog.json"
+MOMSMONEY_ATTEMPT_CSV = INTERNAL_DIR / "promo_catalog_all_merchants_latest_attempt_products.csv"
 OUT_ACTIVE = OUTPUT_DIR / "Katalog_Promo_Final.csv"
 OUT_CONFIRMED = INTERNAL_DIR / "promo_catalog_multisource_confirmed.csv"
 OUT_REVIEW = INTERNAL_DIR / "promo_catalog_multisource_review.csv"
@@ -405,6 +406,52 @@ def momsmoney_output_is_fresh() -> tuple[bool, str]:
     if checked_at[:10] != TODAY.isoformat():
         return False, f"tanggal run Momsmoney bukan hari ini ({checked_at[:10] or 'tidak tersedia'})"
     return True, "hasil scrape Momsmoney berhasil diperbarui hari ini"
+
+
+def momsmoney_fresh_input() -> tuple[Path | None, str]:
+    """Choose only current-run Momsmoney data, never a stale last-good CSV.
+
+    If collector validation succeeds, the last-good catalog is safe. If it
+    fails its volume guard, use the separately written latest-attempt CSV as
+    candidates: exact-period rows can join the catalog and estimated rows are
+    routed to review by the enhancer. The previous catalog is never substituted
+    for a failed current attempt.
+    """
+    if not MOMSMONEY_RUN_LOG.exists():
+        return None, "run log Momsmoney belum ada"
+    try:
+        log = json.loads(MOMSMONEY_RUN_LOG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"run log Momsmoney tidak terbaca: {type(exc).__name__}"
+
+    checked_at = str(log.get("checked_at") or "")
+    if checked_at[:10] != TODAY.isoformat():
+        return None, f"tanggal run Momsmoney bukan hari ini ({checked_at[:10] or 'tidak tersedia'})"
+
+    successful_articles = as_int(log.get("successful_articles")) or 0
+    if successful_articles <= 0:
+        return None, "tidak ada artikel Momsmoney berhasil dibaca pada run hari ini"
+
+    # Prefer current attempted rows when available, because it includes both
+    # confirmed and estimated candidates with their own period precision.
+    latest_rows = as_int(log.get("latest_attempt_product_rows")) or 0
+    if MOMSMONEY_ATTEMPT_CSV.exists() and latest_rows > 0:
+        status = str(log.get("output_status") or "unknown")
+        if status == "updated":
+            note = f"menggunakan {latest_rows} kandidat percobaan terbaru; katalog collector lolos validasi"
+        else:
+            note = (
+                f"menggunakan {latest_rows} kandidat dari percobaan terbaru; "
+                f"katalog terakhir tetap dipertahankan karena output_status={status}"
+            )
+        return MOMSMONEY_ATTEMPT_CSV, note
+
+    # Backward compatibility for repositories running an older collector:
+    # only load the stable CSV when today's run explicitly passed validation.
+    output_fresh, output_note = momsmoney_output_is_fresh()
+    if output_fresh:
+        return MOMSMONEY_CSV, output_note
+    return None, f"tidak ada kandidat Momsmoney segar yang aman dimuat; {output_note}"
 
 
 def load_source(path, source_label):
@@ -1737,8 +1784,13 @@ def main():
     old_rows = load_source(OLD_CSV, OLD_CSV.name)
     new_rows = load_source(NEW_CSV, NEW_CSV.name)
     multisource_rows = load_source(MULTISOURCE_CSV, MULTISOURCE_CSV.name) if MULTISOURCE_CSV.exists() else []
-    momsmoney_fresh, momsmoney_status_note = momsmoney_output_is_fresh()
-    momsmoney_rows = load_source(MOMSMONEY_CSV, MOMSMONEY_CSV.name) if momsmoney_fresh else []
+    momsmoney_input_path, momsmoney_status_note = momsmoney_fresh_input()
+    momsmoney_fresh = momsmoney_input_path is not None
+    momsmoney_input_label = MOMSMONEY_CSV.name
+    if momsmoney_input_path is not None:
+        momsmoney_rows = load_source(momsmoney_input_path, momsmoney_input_label)
+    else:
+        momsmoney_rows = []
     print("Momsmoney/Kontan fresh scrape:", len(momsmoney_rows), "rows;", momsmoney_status_note)
     all_loaded_rows = old_rows + new_rows + multisource_rows + momsmoney_rows
     rejected_product_rows = [r for r in all_loaded_rows if r.get("product_validation_status") == "rejected"]
@@ -1788,10 +1840,11 @@ def main():
             OLD_CSV.name: len(old_rows),
             NEW_CSV.name: len(new_rows),
             **({MULTISOURCE_CSV.name: len(multisource_rows)} if MULTISOURCE_CSV.exists() else {}),
-            **({MOMSMONEY_CSV.name: len(momsmoney_rows)} if momsmoney_fresh else {}),
+            **({momsmoney_input_path.name: len(momsmoney_rows)} if momsmoney_input_path is not None else {}),
         },
         "momsmoney_fresh_scrape_loaded": momsmoney_fresh,
         "momsmoney_fresh_scrape_note": momsmoney_status_note,
+        "momsmoney_input_file": str(momsmoney_input_path.name) if momsmoney_input_path is not None else None,
         "input_row_count": len(all_loaded_rows),
         "eligible_product_input_rows": len(input_rows),
         "rejected_non_product_rows": len(rejected_product_rows),

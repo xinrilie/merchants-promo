@@ -28,6 +28,7 @@ OUT_JSON = INTERNAL_DIR / "promo_catalog_all_merchants.json"
 OUT_CSV = INTERNAL_DIR / "promo_catalog_all_merchants.csv"
 RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_runlog.json"
 ATTEMPT_JSON = INTERNAL_DIR / "promo_catalog_all_merchants_latest_attempt.json"
+ATTEMPT_PRODUCTS_CSV = INTERNAL_DIR / "promo_catalog_all_merchants_latest_attempt_products.csv"
 HISTORY_DIR = INTERNAL_DIR / "promo_catalog_all_merchants_history"
 MANUAL_URLS = BASE_DIR / "promo_sources.txt"
 
@@ -1430,9 +1431,12 @@ def main() -> None:
         }
 
         # File attempt menyimpan audit lengkap, termasuk artikel expired/unknown.
+        latest_attempt_products = deduplicate_products(active_products + estimated_products)
         attempt_payload = {
             **summary,
             "validation": validation,
+            "latest_attempt_products_file": ATTEMPT_PRODUCTS_CSV.name,
+            "latest_attempt_product_rows": len(latest_attempt_products),
             "listing_search_log": listing_log,
             "articles_checked": articles_checked,
             "active_articles": active_articles,
@@ -1440,6 +1444,15 @@ def main() -> None:
             "active_estimated_articles": estimated_articles,
             "active_estimated_products": estimated_products,
         }
+        # Keep this run's actual candidates separate from OUT_CSV, which is the
+        # last catalog that passed collector-level validation. This lets the
+        # enhancer review fresh candidates without treating a rejected run as
+        # a successful replacement of the last-good catalog.
+        write_csv(ATTEMPT_PRODUCTS_CSV, latest_attempt_products)
+        # Refresh the review output on every run, including a failed catalog
+        # validation, so the review file never silently stays stale.
+        review_csv = INTERNAL_DIR / "promo_catalog_all_merchants_review.csv"
+        write_review_csv(review_csv, review_products)
         save_json(ATTEMPT_JSON, attempt_payload)
 
         if validation["valid"]:
@@ -1459,8 +1472,6 @@ def main() -> None:
             save_json(history_file, catalog_payload)
             save_json(OUT_JSON, catalog_payload)
             write_csv(OUT_CSV, active_products)
-            review_csv = INTERNAL_DIR / "promo_catalog_all_merchants_review.csv"
-            write_review_csv(review_csv, review_products)
             output_status = "updated"
         else:
             output_status = "preserved_previous_catalog"
@@ -1468,6 +1479,8 @@ def main() -> None:
         run_log = {
             **summary,
             "output_status": output_status,
+            "latest_attempt_products_file": ATTEMPT_PRODUCTS_CSV.name,
+            "latest_attempt_product_rows": len(latest_attempt_products),
             "validation": validation,
             "listing_search_log": listing_log,
             "articles": [

@@ -357,7 +357,7 @@ def parse_period_range(text: str) -> tuple[str | None, str | None, str]:
 def parse_end_only(text: str) -> str | None:
     text = clean_text(text).casefold()
     m = re.search(
-        rf"\bsampai\s+(?P<d>\d{{1,2}})\s+(?P<m>{MONTH_PATTERN})\s+(?P<y>\d{{4}})\b",
+        rf"\b(?:sampai|hingga|s\.d\.|s/d)\s*(?P<d>\d{{1,2}})\s+(?P<m>{MONTH_PATTERN})\s+(?P<y>\d{{4}})\b",
         text,
         re.IGNORECASE,
     )
@@ -377,10 +377,14 @@ def determine_status(start: str | None, end: str | None, precision: str) -> str:
         return "unknown"
     if de and de < TODAY:
         return "expired"
+    estimated_precisions = {"month", "until"}
     if ds and ds > TODAY:
-        return "upcoming"
-    if ds and de and ds <= TODAY <= de and precision in {"range", "single_day"}:
-        return "active"
+        return "upcoming_estimated" if precision in estimated_precisions else "upcoming"
+    if ds and de and ds <= TODAY <= de:
+        if precision in {"range", "single_day"}:
+            return "active"
+        if precision in estimated_precisions:
+            return "active_estimated"
     if de and de >= TODAY and not ds:
         return "active_estimated"
     return "unknown"
@@ -542,7 +546,7 @@ def strip_product_name(text: str) -> tuple[str | None, str | None]:
 
 def parse_promo_metadata(title: str, visible_text: str, card_context: str = "") -> dict:
     start, end, precision = parse_period_range(title)
-    if not start or not end:
+    if precision == "unknown":
         # The lead text can contain a dedicated 'Periode Promo' line. Only use a
         # day-range expression from this context; never guess a full month as a date.
         start2, end2, precision2 = parse_period_range(visible_text[:5000])
@@ -552,12 +556,46 @@ def parse_promo_metadata(title: str, visible_text: str, card_context: str = "") 
         end = parse_end_only(card_context) or parse_end_only(visible_text[:1500])
         if end:
             precision = "until"
+    if precision == "unknown":
+        # Month/year in an article title is a reviewable period estimate, not
+        # a confirmed full-range promo. Keep it visible as active_estimated or
+        # upcoming_estimated instead of incorrectly leaving it unknown.
+        month_match = re.search(rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<year>\d{{4}})\b", clean_text(title).casefold(), re.I)
+        if not month_match:
+            month_match = re.search(rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<year>\d{{4}})\b", clean_text(visible_text[:1500]).casefold(), re.I)
+        if month_match:
+            month = parse_month(month_match.group("month"))
+            year = int(month_match.group("year"))
+            if month:
+                month_start = date(year, month, 1)
+                next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+                start, end, precision = month_start.isoformat(), (next_month - date.resolution).isoformat(), "month"
     return {
         "valid_from": start,
         "valid_until": end,
         "period_precision": precision,
         "promo_status": determine_status(start, end, precision),
     }
+
+
+def article_candidate_priority(candidate: dict) -> tuple[int, str, str]:
+    """Rank by period evidence in the visible link title, never by permalink year.
+
+    Some Scanharga permalinks were created years ago but their article content
+    is refreshed with current promotions, so URL path dates are not reliable
+    freshness evidence. If a listing title carries a period, use that instead.
+    """
+    title = clean_text(candidate.get("title_hint") or "")
+    period = parse_promo_metadata(title, "")
+    status_rank = {
+        "active": 6,
+        "active_estimated": 5,
+        "upcoming": 4,
+        "upcoming_estimated": 3,
+        "unknown": 2,
+        "expired": 1,
+    }.get(period.get("promo_status"), 0)
+    return status_rank, str(period.get("valid_until") or ""), str(period.get("valid_from") or "")
 
 
 def find_article_container(soup: BeautifulSoup):
@@ -978,7 +1016,10 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
                 queue.append(target)
         time.sleep(DELAY_SECONDS)
 
-    selected_articles = list(articles.values())[:MAX_ARTICLES_PER_SOURCE]
+    # Prefer article candidates whose visible title says that the offer is
+    # current/upcoming. The stable sort keeps discovery order for ties.
+    ranked_articles = sorted(articles.values(), key=article_candidate_priority, reverse=True)
+    selected_articles = ranked_articles[:MAX_ARTICLES_PER_SOURCE]
     for i, candidate in enumerate(selected_articles, start=1):
         article_url = candidate["url"]
         say(f"[{source_name} article {i}/{len(selected_articles)}] {article_url}")
@@ -1285,6 +1326,10 @@ def main() -> None:
             "built_at": now_iso(),
             "reference_date": TODAY.isoformat(),
             "sources": list(SOURCE_SEEDS),
+            "article_selection_policy": (
+                "Prioritize active/current and upcoming periods parsed from visible article titles; "
+                "month-only periods are estimates; permalink year is not treated as freshness evidence."
+            ),
             "request_count": len(request_log),
             "successful_requests": sum(1 for x in request_log if x.get("status") == "ok"),
             "blocked_or_limited_requests": sum(1 for x in request_log if x.get("status") == "blocked_or_limited"),

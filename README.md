@@ -12,14 +12,14 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 ## 🛰️ Sumber Aktif
 
-`Jalankan_Promo.bat` menjalankan **4 adapter sumber live**: Momsmoney/Kontan (kategori Hemat), Hemat.id, Katalogpromosi.com, dan Scanharga.com. Dua CSV pada `input/` tetap dipakai sebagai baseline historis. CSV Momsmoney terbaru hanya digabungkan jika run log menunjukkan `output_status=updated` dan tanggal eksekusi sama dengan hari ini; CSV lama yang tersisa setelah validasi gagal tidak dihitung sebagai hasil scrape baru.
+`Jalankan_Promo.bat` menjalankan **4 adapter sumber live**: Momsmoney/Kontan (kategori Hemat), Hemat.id, Katalogpromosi.com, dan Scanharga.com. Dua CSV pada `input/` tetap dipakai sebagai baseline historis. Momsmoney menyimpan katalog terakhir yang lolos validasi terpisah dari `promo_catalog_all_merchants_latest_attempt_products.csv`. Jika validasi katalog gagal, hanya kandidat dari percobaan hari ini yang boleh masuk enhancer; CSV katalog lama tidak dipakai sebagai scrape baru. Produk dengan periode estimasi tetap ditandai dan diarahkan ke review, tidak disamarkan sebagai periode pasti.
 
 ## ⚙️ Arsitektur Sistem & Alur Kerja
 
 Pipeline memisahkan pengumpulan data dan pemrosesan lintas sumber agar produk dari beberapa situs bisa dibandingkan setelah semua data terkumpul.
 
 1. **Collector — pencari data:** `promo_catalog_all_merchants.py` mengambil artikel Momsmoney/Kontan dari kategori Hemat; setelah itu `promo_multisource_collector.py` mengambil katalog dari Hemat.id, Katalogpromosi.com, dan Scanharga.com; mengekstrak kartu/teks penawaran; menyimpan URL sumber; dan melakukan validasi awal untuk menolak kandidat yang terlihat seperti judul artikel, syarat umum, atau klaim diskon kampanye.
-2. **Enhancer — normalisasi & validasi akhir:** membaca hasil collector dan CSV katalog lama, menormalkan nama/harga/tanggal, mengulang validasi non-produk, melakukan deduplikasi persis serta konsolidasi periode yang aman, kemudian menjalankan *fuzzy matching* lintas sumber sebelum ekspor.
+2. **Enhancer — normalisasi & validasi akhir:** membaca hasil collector terbaru yang lolos freshness gate dan CSV katalog baseline, menormalkan nama/harga/tanggal, mengulang validasi non-produk, melakukan deduplikasi persis serta konsolidasi periode yang aman, kemudian menjalankan *fuzzy matching* lintas sumber sebelum ekspor.
 3. **Product validation:** modul bersama yang dipakai oleh collector dan enhancer. Ini adalah lapisan pertahanan ganda agar judul artikel tidak masuk kembali ke katalog dari sumber lama atau hasil scraping sebelumnya.
 4. **Product name engine:** menyamakan spasi, ejaan, satuan, dan format kemasan. *Fuzzy matching* memberi kandidat kemiripan, tetapi tidak boleh menggabungkan produk jika ukuran/varian atau detail penawaran bertentangan.
 5. **Regression tests:** menguji parsing, baris editorial, produk valid, contoh produk mirip, dan perlindungan terhadap harga/varian yang berbeda.
@@ -91,6 +91,7 @@ File teknis tersimpan di `_internal/`:
 
 - **`promo_multisource_products_all.csv`** — kandidat produk dari Hemat.id, Katalogpromosi.com, dan Scanharga.com.
 - **`promo_catalog_all_merchants.csv`** — hasil scrape terbaru Momsmoney/Kontan; dipakai hanya jika run log menyatakan scrape berhasil diperbarui pada tanggal berjalan.
+- **`promo_catalog_all_merchants_latest_attempt_products.csv`** — kandidat produk periode pasti dan estimasi dari percobaan Momsmoney terbaru. File ini hanya dipakai bila run log berasal dari hari berjalan dan menunjukkan artikel berhasil dibaca; file ini tidak menggantikan katalog terakhir yang lolos validasi.
 - **`promo_catalog_all_merchants_review.csv`** — kandidat periode estimasi atau penawaran yang perlu ditinjau dari collector Momsmoney/Kontan.
 - **`promo_multisource_articles.csv`** — log artikel/halaman yang diperiksa.
 - **`promo_multisource_catalog_images.csv`** — URL gambar katalog yang ditemukan.
@@ -146,6 +147,7 @@ python engine/enrich_existing_promo_catalog_multisource.py
 - Harga dan diskon dari agregator perlu verifikasi terhadap syarat, ukuran, wilayah, membership, kanal pembelian, dan tanggal berlaku.
 - *Fuzzy matching* adalah alat bantu deteksi, bukan jaminan bahwa dua nama mengacu pada SKU yang sama. Kandidat ambigu harus diperiksa.
 - Pipeline menghormati status blokir/limit situs dan tidak mencoba melewati CAPTCHA atau proteksi akses.
+- Pemilihan artikel agregator memprioritaskan periode yang terbaca pada judul. Tahun di permalink tidak otomatis dianggap sebagai tanggal konten, sebab beberapa URL lama dapat memiliki isi promo yang diperbarui. Status promo dihitung dari teks periode yang berhasil diekstrak.
 
 ---
 
