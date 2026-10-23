@@ -134,6 +134,7 @@ python engine/enrich_existing_promo_catalog_multisource.py
 ## 🧪 Pengujian regresi
 
 - Baris editorial/kampanye ditolak walaupun `campaign_title` kosong pada CSV lama.
+- Kalimat teaser seperti `Kalau Kamu Lagi Cari Promo...` ditolak meski mewarisi promo `Diskon 50%` atau `Beli 1 Gratis 1` dari kartu; produk SKU nyata tetap diuji agar tidak ikut terbuang.
 - Fragmen satu kata seperti `Akhirnya` tidak diterima sebagai SKU hanya karena disertai klaim diskon.
 - Produk nyata dengan atribut SKU (misalnya ukuran) dan penawaran bundling eksplisit tetap dipertahankan.
 - Fuzzy matching tetap menjaga varian, harga, dan syarat promo yang bertentangan tetap terpisah.

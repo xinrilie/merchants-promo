@@ -61,6 +61,27 @@ EDITORIAL_PHRASE_RE = re.compile(
     re.I,
 )
 
+# High-confidence conversational/editorial language that can leak from a listing
+# card's teaser text. Apply before offer/bundle checks: a campaign paragraph must
+# not become a SKU simply because it inherits "Diskon 50%" or "Beli 1 Gratis 1".
+CONVERSATIONAL_EDITORIAL_PREFIX_RE = re.compile(
+    r"^(?:kalau|jika|bila|ketika|saat)\s+(?:kamu|anda|kalian)\b|"
+    r"^(?:buat|bagi)\s+(?:kamu|anda)\b",
+    re.I,
+)
+EDITORIAL_SENTENCE_CUE_RE = re.compile(
+    r"\b(?:adalah\s+jawabannya|"
+    r"(?:kamu|anda|kalian)\s+(?:bisa|dapat|akan)\s+(?:nikmati|menikmati|"
+    r"memilih|menemukan|mendapatkan|menghemat)|"
+    r"berbagai\s+penawaran(?:\s+menarik)?|penawaran\s+menarik|"
+    r"kalau\s+(?:kamu|anda)\s+lagi\s+cari)\b",
+    re.I,
+)
+EDITORIAL_LONG_PROSE_CUE_RE = re.compile(
+    r"\b(?:kamu|anda|kalian|jawabannya|menikmati|penawaran|kebutuhan)\b",
+    re.I,
+)
+
 # These words are strong evidence that a discount-only line is a campaign/article
 # heading rather than a product SKU. They are not used to reject normal priced SKUs.
 CAMPAIGN_HEADING_PREFIX_RE = re.compile(
@@ -149,6 +170,14 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
     # when a parser also extracted a price from the surrounding article paragraph.
     if CAMPAIGN_HEADING_PREFIX_RE.search(clean_name):
         return "campaign_or_article_heading_misparsed_as_product"
+
+    # Reject sentence-like campaign teasers independent of source type and offer
+    # evidence. Structured cards can accidentally expose the whole teaser anchor,
+    # and their generic bundle discount must not make that paragraph product-like.
+    if CONVERSATIONAL_EDITORIAL_PREFIX_RE.search(clean_name) or EDITORIAL_SENTENCE_CUE_RE.search(clean_name):
+        return "editorial_sentence_misparsed_as_product"
+    if len(tokens) >= 16 and EDITORIAL_LONG_PROSE_CUE_RE.search(clean_name) and re.search(r"[,!?;]", clean_name):
+        return "long_editorial_sentence_misparsed_as_product"
 
     # A repeated pair of leading numbers is a known symptom of a malformed card
     # extraction (e.g. "2 2 Zespri Kiwi Sungold 2"), not reliable SKU identity.

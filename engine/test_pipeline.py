@@ -23,6 +23,7 @@ def test_article_headlines_are_not_products():
         "Memanfaatkan Akhir Pekan Ini Untuk Menikmati Pilihan Menu Paris Baguette Dengan Lebih Hemat Bersama Promo",
         "Promo Paris Baguette Bni Wonderful Weekend",
         "☞ Cek Info Promo Paris Baguette Bni Wonderful Weekend",
+        "Kalau Kamu Lagi Cari Promo Belanja Hemat, Promo Alfamidi Katalog Mingguan Adalah Jawabannya! Dari Tanggal 16-31 Oktober 2026, Kamu Bisa Nikmati Berbagai Penawaran Menarik Mulai Dari",
         # Regression: titles can be missing in legacy/stale CSV rows.
         "Akhirnya",
     ]
@@ -47,7 +48,65 @@ def test_article_headlines_are_not_products():
                 "campaign_or_article_heading_misparsed_as_product",
                 "long_narrative_with_discount_claim_not_product_sku",
                 "discount_claim_without_product_identity",
+                "editorial_sentence_misparsed_as_product",
+                "long_editorial_sentence_misparsed_as_product",
             }, (name, title, reason)
+
+
+def test_editorial_teaser_rejected_even_with_structured_bundle_offer():
+    # Exact leak shown in the user's workbook screenshot. The product-looking row
+    # inherited a generic B1G1 / 50% offer from an Alfamidi promo card.
+    row = {
+        "product_text": (
+            "Kalau Kamu Lagi Cari Promo Belanja Hemat, Promo Alfamidi Katalog Mingguan "
+            "Adalah Jawabannya! Dari Tanggal 16-31 Oktober 2026, Kamu Bisa Nikmati "
+            "Berbagai Penawaran Menarik Mulai Dari"
+        ),
+        "offer_text": "Beli 1 Gratis 1",
+        "purchase_condition": "Beli 1 Gratis 1",
+        "discount_percent": 50,
+        "merchant_name": "Alfamidi",
+        "source_name": "Hemat.id",
+        "campaign_title": "Katalog Promo Alfamidi 16-31 Oktober 2026",
+    }
+    reason = product_candidate_rejection_reason(row, "hemat_card")
+    assert reason in {
+        "editorial_sentence_misparsed_as_product",
+        "long_editorial_sentence_misparsed_as_product",
+    }, (row["product_text"], reason)
+
+    # Exercise the live collector path, not only the shared validator.
+    from bs4 import BeautifulSoup
+    import promo_multisource_collector as collector
+    html = """<div class="product-card">
+      <a href="/promo">{product_text} Diskon 50%, Beli 1 Gratis 1</a>
+      <span>16-31 Oktober 2026</span><a href="/katalog-alfamidi/">Alfamidi</a>
+    </div>""".format(product_text=row["product_text"])
+    collector.REJECTED_PRODUCT_CANDIDATES.clear()
+    extracted = collector.extract_hemat_cards(
+        BeautifulSoup(html, "html.parser"), "https://www.hemat.id/katalog-alfamidi/"
+    )
+    assert extracted == [], [item.get("product_text") for item in extracted]
+    assert any(
+        item.get("rejection_reason") in {
+            "editorial_sentence_misparsed_as_product",
+            "long_editorial_sentence_misparsed_as_product",
+        }
+        for item in collector.REJECTED_PRODUCT_CANDIDATES
+    ), collector.REJECTED_PRODUCT_CANDIDATES
+
+    # Real structured-card products with the same B1G1 offer must remain eligible.
+    valid_product = {
+        "product_text": "Cultusia Hair Serum Joyfull Romance Morning Fresh 30 ml",
+        "offer_text": "Beli 1 Gratis 1",
+        "purchase_condition": "Beli 1 Gratis 1",
+        "discount_percent": 50,
+        "merchant_name": "Alfamidi",
+        "source_name": "Hemat.id",
+        "campaign_title": "Katalog Promo Alfamidi 16-31 Oktober 2026",
+    }
+    assert product_candidate_rejection_reason(valid_product, "hemat_card") is None
+
 
 
 def test_real_products_stay_eligible():
@@ -124,16 +183,27 @@ def test_enhancer_rejects_stale_false_rows_without_campaign_title():
         with path.open("w", encoding="utf-8-sig", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
             writer.writeheader()
-            for name in ["Akhirnya", "Promo Paris Baguette BNI Wonderful Weekend"]:
+            cases = [
+                ("Akhirnya", "Diskon 50%", "", ""),
+                ("Promo Paris Baguette BNI Wonderful Weekend", "Diskon 50%", "", ""),
+                (
+                    "Kalau Kamu Lagi Cari Promo Belanja Hemat, Promo Alfamidi Katalog Mingguan "
+                    "Adalah Jawabannya! Dari Tanggal 16-31 Oktober 2026, Kamu Bisa Nikmati "
+                    "Berbagai Penawaran Menarik Mulai Dari",
+                    "Beli 1 Gratis 1", "Beli 1 Gratis 1", "Alfamidi",
+                ),
+            ]
+            for name, offer, purchase_condition, merchant in cases:
                 writer.writerow({
                     "product_text": name, "campaign_title": "", "promo_status": "active",
                     "valid_from": "2026-10-23", "valid_until": "2026-10-24",
                     "normal_price": "", "promo_price": "", "discount_percent": "50",
-                    "offer_text": "Diskon 50%", "source_url": "https://katalogpromosi.com/test/",
-                    "merchant_name": "", "deal_type": "Diskon Persentase",
+                    "offer_text": offer, "purchase_condition": purchase_condition,
+                    "source_url": "https://hemat.id/test/", "merchant_name": merchant,
+                    "deal_type": "Beli 1 Gratis 1" if purchase_condition else "Diskon Persentase",
                 })
         rows = enhancer.load_source(path, path.name)
-        assert len(rows) == 2
+        assert len(rows) == 3
         assert all(r.get("product_validation_status") == "rejected" for r in rows), [
             (r.get("product_text"), r.get("product_validation_status"), r.get("product_rejection_reason")) for r in rows
         ]
@@ -457,6 +527,7 @@ def test_momsmoney_rows_get_source_metadata():
 
 def main():
     test_article_headlines_are_not_products()
+    test_editorial_teaser_rejected_even_with_structured_bundle_offer()
     test_real_products_stay_eligible()
     test_discount_only_short_fragments_need_product_identity()
     test_article_paragraphs_and_campaign_titles_are_rejected_even_with_prices()
@@ -471,6 +542,7 @@ def main():
     test_multisource_month_periods_are_estimates_and_rank_current_titles_first()
     print("REGRESSION TESTS PASSED")
     print("- editorial/headline fragments from the screenshot are rejected")
+    print("- conversational promo teaser is rejected even when a card has a B1G1/50% offer")
     print("- valid SKU price and bundle examples are kept")
     print("- fuzzy name matching preserves size/flavour distinctions")
     print("- collector filters screenshot editorial false positives before writing scrape output")
