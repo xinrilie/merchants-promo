@@ -26,6 +26,10 @@ OFFER_RE = re.compile(
 # Structural/article-language patterns, rather than a retailer/product blacklist.
 EDITORIAL_PREFIX_RE = re.compile(
     r"^(?:"
+    # Sentence fragments copied from PWP explanatory paragraphs, not product SKUs.
+    r"karena\b|sebab\b|"
+    r"hanya\s+dengan\s+belanja(?:\s+minimal)?\b|"
+    r"mulai\s+dari\s+tanggal\b|bunda\s+semua\b|"
     # Article/question headings commonly misread as a product name.
     r"apa(?:\s+saja|\s+benefit|\s+manfaat|\s+yang|\s+keuntungan)?\b|"
     r"berapa(?:\s+(?:minimum|minimal|maksimum|maximal|besar|banyak|harga|biaya|transaksi))?\b|"

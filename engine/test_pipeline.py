@@ -239,10 +239,72 @@ def test_article_paragraphs_and_campaign_titles_are_rejected_even_with_prices():
             "promo_price": None, "offer_text": "Diskon 65%, Pembelian Ke-2",
             "campaign_title": "Promo Unggulan Alfamart VS Yogya minggu ini",
         },
+        # Live catalog leaks from PWP text that incorrectly inherited an offer price.
+        {
+            "product_text": "Hanya Dengan Belanja Minimal Mulai", "merchant_name": "Alfamidi",
+            "promo_price": 50000,
+            "offer_text": "Rp. 50.000 bisa tebus Murah 1 Produk TTM",
+            "campaign_title": "Promo ALFAMIDI TTM Terbaru 16-31 Oktober 2026",
+        },
+        {
+            "product_text": "Karena Mulai Dari Tanggal 15 Sampai Dengan 28 Oktober 2026, Bunda Semua Hanya Cukup Belanja Atau Transaksi Minimal",
+            "merchant_name": "Indomaret", "promo_price": 50000,
+            "offer_text": "Rp. 50.000 di semua toko Indomaret, otomatis bisa ikutan Tebus Murah",
+            "campaign_title": "Promo PWP Indomaret Tebus Murah 15-28 Oktober 2026",
+        },
     ]
     for row in cases:
         reason = product_candidate_rejection_reason(row, source_mode="article")
         assert reason, f"Editorial/noisy candidate passed validation: {row['product_text']}"
+
+
+def test_pwp_explanatory_fragments_are_rejected_even_with_prices():
+    """Protect against editorial snippets leaking as priced PWP products."""
+    cases = [
+        {
+            "product_text": "Hanya Dengan Belanja Minimal Mulai",
+            "offer_text": "Rp. 50.000 bisa tebus Murah 1 Produk TTM",
+            "promo_price": "50000", "merchant_name": "Alfamidi",
+            "campaign_title": "Promo ALFAMIDI TTM Terbaru 16-31 Oktober 2026",
+            "source_name": "Scanharga.com",
+        },
+        {
+            "product_text": "Karena Mulai Dari Tanggal 15 Sampai Dengan 28 Oktober 2026, Bunda Semua Hanya Cukup Belanja Atau Transaksi Minimal",
+            "offer_text": "Rp. 50.000 di semua toko Indomaret, otomatis bisa ikutan Tebus Murah",
+            "promo_price": "50000", "merchant_name": "Indomaret",
+            "campaign_title": "Promo PWP Indomaret Tebus Murah 15-28 Oktober 2026",
+            "source_name": "Scanharga.com",
+        },
+    ]
+    for row in cases:
+        reason = product_candidate_rejection_reason(row, source_mode="Scanharga.com article")
+        assert reason == "editorial_heading_misparsed_as_product", (row["product_text"], reason)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "pwp_editorial_leaks.csv"
+        fields = [
+            "product_text", "campaign_title", "promo_status", "valid_from", "valid_until",
+            "normal_price", "promo_price", "discount_percent", "offer_text", "source_url",
+            "merchant_name", "deal_type", "purchase_condition", "price_basis", "period_precision",
+        ]
+        with path.open("w", encoding="utf-8-sig", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields)
+            writer.writeheader()
+            for row in cases:
+                output_row = {
+                    **row,
+                    "promo_status": "active", "valid_from": "2026-10-23", "valid_until": "2026-10-31",
+                    "normal_price": "", "discount_percent": "", "source_url": "https://www.scanharga.com/test",
+                    "deal_type": "Tebus Murah / PWP", "purchase_condition": "", "price_basis": "offer_price",
+                    "period_precision": "range",
+                }
+                writer.writerow({key: value for key, value in output_row.items() if key in fields})
+        loaded = enhancer.load_source(path, path.name)
+        assert len(loaded) == 2
+        assert all(row.get("product_validation_status") == "rejected" for row in loaded), [
+            (r.get("product_text"), r.get("product_validation_status"), r.get("product_rejection_reason"))
+            for r in loaded
+        ]
 
 
 def test_name_fuzzy_guardrails():
@@ -531,6 +593,7 @@ def main():
     test_real_products_stay_eligible()
     test_discount_only_short_fragments_need_product_identity()
     test_article_paragraphs_and_campaign_titles_are_rejected_even_with_prices()
+    test_pwp_explanatory_fragments_are_rejected_even_with_prices()
     test_enhancer_rejects_stale_false_rows_without_campaign_title()
     test_name_fuzzy_guardrails()
     test_collector_article_extraction_regression()
@@ -547,6 +610,7 @@ def main():
     print("- fuzzy name matching preserves size/flavour distinctions")
     print("- collector filters screenshot editorial false positives before writing scrape output")
     print("- article paragraphs and campaign headings are rejected even when a price was extracted")
+    print("- PWP explanatory sentence fragments are rejected even when they inherit a price")
     print("- enhancer independently filters stale/old false product rows even when campaign_title is missing")
     print("- fuzzy merge combines corroborated cross-source offers but preserves variant/price conflicts")
     print("- Momsmoney/Kontan uses only current-run data; stale last-good CSV is never loaded as fresh data")
