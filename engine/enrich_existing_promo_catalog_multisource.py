@@ -15,7 +15,6 @@ from promo_names import (
     clean_product_name, name_variants, product_name_similarity,
     product_names_can_auto_merge, product_name_block_key,
     product_name_size_signature, product_name_variant_signature,
-    product_name_identity_warnings,
 )
 from promo_product_validation import product_candidate_rejection_reason, product_candidate_review_reason
 from promo_multisource_collector import infer_merchant_dynamic
@@ -41,6 +40,7 @@ OUT_REPORT = INTERNAL_DIR / "promo_catalog_multisource_quality_report.json"
 OUT_POSSIBLE_DUPES = INTERNAL_DIR / "promo_possible_duplicate_candidates.csv"
 OUT_XLSX = OUTPUT_DIR / "Katalog_Promo_Final.xlsx"
 OUT_REJECTED_PRODUCTS = INTERNAL_DIR / "promo_product_rows_rejected.csv"
+CATEGORY_REVIEW_LIST_CSV = INPUT_DIR / "category_review_list.csv"
 
 # Reuse the exact parsing/discount logic that is in the revised scraper.
 spec = importlib.util.spec_from_file_location(
@@ -66,7 +66,8 @@ if _missing_functions:
 TODAY = scraper.TODAY
 
 FIELDS = [
-    "product_text", "original_product_text", "product_name_variants", "product_category", "product_subcategory", "merchant_name", "campaign_title", "campaign_type",
+    "product_text", "original_product_text", "product_name_variants", "product_category", "product_subcategory",
+    "previous_product_category", "previous_product_subcategory", "merchant_name", "campaign_title", "campaign_type",
     "promo_status", "valid_from", "valid_until", "period_precision",
     "period_flags", "matched_period_text", "period_evidence_text", "period_evidence_source", "period_certainty", "published_at",
     "promo_price", "normal_price", "discount_percent", "discount_percent_basis",
@@ -624,6 +625,10 @@ def load_source(path, source_label):
             "product_text": product,
             "original_product_text": original_product or None,
             "product_name_variants": (raw.get("product_name_variants") or original_product or product or "").strip() or None,
+            # Retain the last source-side category only for a reproducible audit sheet.
+            # The public category columns are always recomputed by the current classifier.
+            "previous_product_category": (raw.get("product_category") or raw.get("Kategori Produk") or "").strip() or None,
+            "previous_product_subcategory": (raw.get("product_subcategory") or raw.get("Subkategori") or "").strip() or None,
             "merchant_name": merchant,
             "campaign_title": title,
             "campaign_type": canonical_campaign_type(raw.get("campaign_type"), title),
@@ -966,10 +971,6 @@ BUNDLE_RATIO_RE = re.compile(
     r"\b(?:beli|buy)\s*(\d+)\s*(?:pcs?|buah|item|produk)?\s*(?:gratis|free|get)\s*(\d+)\b",
     re.IGNORECASE,
 )
-
-
-def _row_source_values(row, field_single, field_multi):
-    return pipe_unique([row.get(field_single) or "", row.get(field_multi) or ""])
 
 
 def _row_dates(row):
@@ -1794,7 +1795,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ["Kategori utama", len(CATEGORY_TAXONOMY)],
         ["Sumber produk", "Hemat.id, Katalogpromosi.com, Scanharga.com, dan katalog lama"],
         ["Catatan", "Kepastian periode dipisahkan dari verifikasi sumber; agregator dan artikel publik bukan verifikasi resmi retailer."],
-        ["Petunjuk", "Buka sheet Aktif untuk katalog sehari-hari. Gunakan filter Kategori Produk dan Subkategori untuk mencari jenis barang. Sheet Ringkasan Kategori menunjukkan jumlah promo aktif per kategori; Referensi Kategori berisi daftar 29 kategori yang digunakan."],
+        ["Petunjuk", f"Buka sheet Aktif untuk katalog sehari-hari. Gunakan filter Kategori Produk dan Subkategori untuk mencari jenis barang. Ringkasan Kategori menunjukkan jumlah promo aktif per kategori; Referensi Kategori berisi daftar {len(CATEGORY_TAXONOMY)} kategori. Daftar Filter Produk mengulang daftar contoh klasifikasi yang disimpan di input/category_review_list.csv."],
         ["File teknis", "Data mentah dan log tersimpan di folder _internal; tidak perlu dibuka untuk pemakaian harian."],
     ]
     for row in summary:
@@ -1854,6 +1855,42 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for column, width in {"A": 8, "B": 34, "C": 64, "D": 78}.items():
+        ws.column_dimensions[column].width = width
+    for row_cells in ws.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
+
+    # Rebuild this QA sheet from a checked-in CSV instead of relying on a
+    # manually edited workbook sheet that would disappear at the next export.
+    ws = wb.create_sheet("Daftar Filter Produk")
+    ws.append(["No.", "Nama Produk dari Daftar", "Kategori Hasil", "Subkategori Hasil", "Status Klasifikasi", "Catatan"])
+    review_names = []
+    if CATEGORY_REVIEW_LIST_CSV.is_file():
+        try:
+            with CATEGORY_REVIEW_LIST_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+                review_names = [
+                    (row.get("product_text") or row.get("Nama Produk") or "").strip()
+                    for row in csv.DictReader(handle)
+                ]
+        except (OSError, csv.Error) as exc:
+            print(f"Peringatan: daftar filter kategori tidak dapat dibaca: {exc}")
+    for idx, product_name in enumerate((name for name in review_names if name), start=1):
+        category, subcategory = classify_promo_category({"product_text": product_name})
+        needs_review = category == "Lainnya / Perlu Review"
+        ws.append([
+            idx, product_name, category, subcategory,
+            "Perlu review manual" if needs_review else "Terkategori otomatis — cek sampel",
+            "Identitas nama belum cukup jelas; tidak ditebak." if needs_review else
+            "Kategori ditentukan dari jenis produk; audit sampel tetap disarankan.",
+        ])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for column, width in {"A": 8, "B": 52, "C": 34, "D": 34, "E": 32, "F": 68}.items():
         ws.column_dimensions[column].width = width
     for row_cells in ws.iter_rows(min_row=2):
         for cell in row_cells:
@@ -1939,6 +1976,55 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
             elif field == "Diskon (%)":
                 cell.number_format = '0.0"%"'
     ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
+
+    # Rebuild a category-change audit on every export. Prior categories are only
+    # taken from stored source rows; missing historical labels are not invented.
+    ws = wb.create_sheet("Audit Kategori")
+    audit_headers = [
+        "Sheet Sumber", "Baris Excel", "Nama Produk", "Kategori Sebelumnya",
+        "Subkategori Sebelumnya", "Kategori Baru", "Subkategori Baru",
+        "Kampanye", "URL Sumber", "Alasan Perubahan",
+    ]
+    ws.append(audit_headers)
+    audit_sheets = [
+        ("Aktif", current_rows, False, False),
+        ("Periode Pasti", confirmed_rows, False, False),
+        ("Perlu Review", review_rows, True, False),
+        ("Ditolak (Audit)", rejected_rows, False, True),
+    ]
+    for audit_sheet_name, audit_source_rows, is_review_sheet, is_rejected_sheet in audit_sheets:
+        pairs = [(row, make_clean_row(row, review=is_review_sheet)) for row in audit_source_rows]
+        if is_rejected_sheet:
+            pairs.sort(key=lambda pair: ((pair[1].get("Merchant") or "").casefold(), (pair[1].get("Nama Produk") or "").casefold()))
+        else:
+            pairs.sort(key=lambda pair: clean_sort_key(pair[1]))
+        for excel_row, (source_row, clean_row) in enumerate(pairs, start=2):
+            old_category = str(source_row.get("previous_product_category") or "").strip()
+            old_subcategory = str(source_row.get("previous_product_subcategory") or "").strip()
+            if not old_category and not old_subcategory:
+                continue
+            new_category = clean_row.get("Kategori Produk") or ""
+            new_subcategory = clean_row.get("Subkategori") or ""
+            if old_category == new_category and old_subcategory == new_subcategory:
+                continue
+            ws.append([
+                audit_sheet_name, excel_row, clean_row.get("Nama Produk"), old_category or "(kosong)",
+                old_subcategory or "(kosong)", new_category, new_subcategory,
+                clean_row.get("Kampanye"), clean_row.get("Sumber URL"),
+                "Klasifikasi dihitung ulang dari jenis produk oleh classifier saat ini.",
+            ])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="8064A2")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for column, width in {"A": 20, "B": 14, "C": 42, "D": 32, "E": 32, "F": 34, "G": 34, "H": 48, "I": 58, "J": 68}.items():
+        ws.column_dimensions[column].width = width
+    for row_cells in ws.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
 

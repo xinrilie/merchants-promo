@@ -8,7 +8,7 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 > **Penting:** data Hemat.id, Katalogpromosi.com, dan Scanharga.com merupakan data agregator/konten. Data tidak otomatis dikonfirmasi oleh retailer resmi. Gunakan kolom sumber dan status verifikasi sebelum menjadikan harga sebagai referensi final.
 
-> **Paket build diperbarui (24 Oktober 2026):** klasifikasi kategori dan cache regex diperbarui; validasi sumber independen diperketat; collector menghentikan permintaan setelah rate limit, timeout, server error, atau redirect lintas domain; serta ditambahkan `engine/test_access_limits.py`. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 44 passed.
+> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, tidak hanya disimpan manual di workbook. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 50 passed.
 
 ---
 
@@ -170,7 +170,7 @@ Gunakan hasil scraping sesuai ketentuan situs sumber, hak atas konten, dan atura
 ### Kategori Produk dan Subkategori
 
 - Katalog final memiliki kolom **Kategori Produk** dan **Subkategori** pada sheet Aktif, Periode Pasti, Perlu Review, dan Ditolak (Audit), serta pada CSV katalog ringkas. Keduanya bisa dipakai dengan filter Excel.
-- Taksonomi terdiri dari 29 kategori utama, mulai dari makanan/bahan pokok, minuman, perawatan tubuh, cuci pakaian, kebutuhan rumah tangga, restoran, elektronik, voucher/cashback, transportasi, hiburan, hingga layanan. Daftar lengkap dan contoh subkategori ada di sheet **Referensi Kategori** dan modul `engine/promo_categories.py`.
+- Taksonomi terdiri dari 29 kategori utama, dengan **Snack & Makanan Kemasan** terpisah dari **Restoran & Makanan Siap Saji** agar filter belanja lebih spesifik. Daftar lengkap dan contoh subkategori ada di sheet **Referensi Kategori** dan modul `engine/promo_categories.py`. Sheet **Audit Kategori** dibuat ulang setiap ekspor dari label sebelumnya yang tersimpan pada source rows, sedangkan **Daftar Filter Produk** dibuat dari `input/category_review_list.csv` (126 nama unik setelah menghapus satu entri `Min. Belanja` yang berulang).
 - Sheet **Ringkasan Kategori** menghitung jumlah baris promo aktif per kategori. Angka ini menghitung baris promo, bukan jumlah SKU unik sepanjang waktu.
 - Nama produk/SKU diprioritaskan daripada klaim kampanye. Kampanye/rangkuman umum dikelompokkan ke **Promo Umum / Multi-Kategori**; teks yang tidak cukup jelas ditempatkan di **Lainnya / Perlu Review**. Kategori tidak mengubah status aktif, penilaian harga, bukti periode, atau validasi retailer.
 - Kategorisasi bersifat otomatis berbasis aturan dan dapat salah pada nama produk yang tidak deskriptif; nilai `Lainnya / Perlu Review` tersedia agar sistem tidak menebak. Tes regresi kategori ikut dijalankan sebelum scraping.

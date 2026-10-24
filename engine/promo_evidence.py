@@ -7,7 +7,6 @@ an auditable text snippet for values that were extracted from source content.
 """
 
 import re
-from datetime import date
 
 MONTH_PATTERN = (
     r"januari|jan|februari|feb|maret|mar|april|apr|mei|juni|jun|juli|jul|"

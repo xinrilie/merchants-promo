@@ -1,50 +1,50 @@
-# Merchant Promo Project — Audit & Fix Summary
+# Hasil Audit Kode — Merchant Promo Catalog Engine
 
-## Scope
-Reviewed the uploaded project source, applied corrections, ran offline regression tests, and rebuilt the workbook from the local input/cache files. No live scraping was run during final export.
+Tanggal audit: 24 Oktober 2026  
+Basis audit: paket ZIP yang diunggah pengguna. Pemeriksaan ini bersifat offline; **tidak ada scraping live yang dijalankan saat audit akhir**.
 
-## Code files to replace
-Keep each file in the same `engine/` path in the project:
-- `engine/promo_categories.py`
-- `engine/promo_product_validation.py`
-- `engine/promo_catalog_all_merchants.py`
-- `engine/promo_multisource_collector.py`
-- `engine/enrich_existing_promo_catalog_multisource.py`
+## Hasil yang dipertahankan
 
-Updated/additional tests:
-- `engine/test_categories.py`
-- `engine/test_evidence_quality.py`
-- `engine/test_access_limits.py` (new)
+- Tiga collector tetap dipertahankan untuk Hemat.id, Katalogpromosi.com, dan Scanharga.com; adapter Momsmoney/Kontan tetap menjadi sumber sekunder.
+- CSV input historis, cache `_internal/`, dan workbook hasil lama tidak dihapus karena berisi baseline dan data *last-good* yang dapat dipakai saat sumber dibatasi. Menghapusnya akan menghilangkan kemampuan fallback dan konteks audit.
+- Validasi produk, bukti harga/periode, pemeriksaan akses sumber, deduplikasi konservatif, serta sheet kualitas dan duplikat tetap dipertahankan.
 
-## Fixes
-- Restored the broken `fetch_selected_articles` function in the Momsmoney collector; no article pages are requested after listing failure/rate limiting.
-- Stops a source run after HTTP 429, server-side 5xx, request timeout, or off-domain redirect. Partial results are discarded so previous good product rows can be preserved.
-- Prevents an incomplete Momsmoney scrape from overwriting the last-good review CSV with an empty/partial review list.
-- Added source-host validation after redirects for the multi-source collector.
-- Reworked the category rules to return only labels in the 29-category taxonomy, including split between packaged snacks and restaurant/ready-to-eat promotions.
-- Added a persistent regex compilation cache to the category classifier. This avoids cache churn in Python's small built-in regex cache.
-- Fixed source-evidence counting so a dataset/CSV filename does not count as an independent publication.
-- Removed duplicate literal keys in the enhancer report dictionary.
+## Perbaikan kode
 
-## Validation results
-- `python -m compileall -q engine`: passed.
-- `python engine/promo_names.py`: passed.
-- `python engine/promo_multisource_collector.py --self-test`: passed.
-- `python engine/test_duplicate_fixes.py`: passed.
-- `python -m pytest -q`: **44 passed**.
-- AST scan found no duplicate string keys in dictionary literals.
-- Category audit: 2,024 local source rows; 29 unique categories; 0 labels outside the reference taxonomy.
-- Workbook ZIP integrity test passed.
-- Rebuilt local enhancer in about 15 seconds after regex-cache optimization.
+1. **Redirect listing Momsmoney/Kontan:** respons yang berakhir di domain lain sekarang ditolak sebelum tautan diproses.
+2. **Redirect artikel Momsmoney/Kontan:** redirect keluar domain ditandai sebagai `redirected_offsite`; loop artikel berhenti dan review lama tidak ditimpa hasil parsial.
+3. **Timeout/kegagalan request artikel:** `requests.RequestException` sekarang dicatat sebagai `request_error`, bukan `error` generik. Status redirect, URL sumber tidak valid, request gagal, dan error tak terduga menghentikan loop serta mempertahankan output review sebelumnya.
+4. **Kategorisasi:** taksonomi dikembalikan menjadi **29 kategori utama**, memisahkan `Snack & Makanan Kemasan` dari `Restoran & Makanan Siap Saji`. Produk yang tidak jelas tetap masuk `Lainnya / Perlu Review`; rangkuman kampanye tetap bisa masuk `Promo Umum / Multi-Kategori`.
+5. **Reproduksibilitas sheet Excel:** `Daftar Filter Produk` kini dibuat dari `input/category_review_list.csv`, sedangkan `Audit Kategori` dibangun ulang dari kategori sumber yang tersimpan. Sheet tersebut tidak lagi bergantung pada workbook yang diedit manual, yang sebelumnya akan hilang saat ekspor Excel berikutnya.
+6. **Tes duplikasi:** pemeriksaan deduplikasi lintas sumber di `test_duplicate_fixes.py` kini dikumpulkan oleh `pytest`; pemanggilan terpisah dari BAT dan CI dihapus agar tidak menjalankan tes yang sama dua kali.
+7. **Kode mati/import tidak terpakai:** menghapus import `product_name_identity_warnings`, `date` dari `promo_evidence.py`, dan `parse_qs` dari collector, serta fungsi internal yang tidak dipanggil `_row_source_values` dan `_dynamic_merchant_candidate_from_title`.
+8. **Daftar contoh kategori:** diekstrak dari sheet lama ke `input/category_review_list.csv`. Satu entri `Min. Belanja` yang duplikat dihapus; tersisa **126 nama unik**. Ini membuat worksheet QA dapat diproduksi ulang.
 
-## Important data caveat
-The final workbook was rebuilt from the local source CSVs/cache already contained in the uploaded project. The report states that the Momsmoney/Kontan scrape was not fresh for 2026-10-23, so the 18-row latest attempt was not loaded as fresh data. This was intentional under the project's freshness gate. The workbook is therefore a refreshed local build, not a claim that live sources were successfully updated today.
+## Validasi yang dijalankan
 
-## Suggested local verification
-From the project root on Windows:
+- `python -m compileall -q engine`: lulus.
+- `python -m pytest -q`: **50 passed**.
+- `python engine/promo_names.py`: self-test lulus.
+- `python engine/promo_multisource_collector.py --self-test`: self-test lulus.
+- `python engine/test_duplicate_fixes.py`: self-test lulus (opsional untuk menjalankan skrip langsung; tesnya juga sudah dikumpulkan oleh pytest).
+- Workbook kategori dites untuk 29 kategori, sheet audit, sheet daftar filter, serta perubahan kategori contoh.
+- ZIP arsip akan diperiksa kembali setelah packaging.
+
+## Batasan dan catatan data
+
+- Klasifikasi otomatis masih berbasis aturan, bukan model semantik penuh. Nama pendek/ambigu tetap harus diperiksa; tidak semua label yang berubah berarti label lama pasti salah.
+- Sheet kategori dan workbook final akan berisi data dari CSV/cache lokal yang tersedia. Itu **bukan klaim bahwa sumber promo live berhasil diperbarui pada tanggal audit**.
+- Source health dan label `fresh` menjelaskan status ekstraksi internal, bukan konfirmasi harga dari retailer resmi.
+- File cache yang termasuk dalam paket dipertahankan secara sengaja untuk menjaga fallback *last-good*. Untuk penggunaan rutin, jangan menghapus `_internal/` sebelum mempunyai cadangan.
+
+## Cara verifikasi lokal
+
+Dari root proyek Windows:
+
 ```powershell
 python -m compileall -q engine
 python -m pytest -q
 python engine/enrich_existing_promo_catalog_multisource.py
 ```
-For a live run, use `Jalankan_Promo.bat`; external sites may be rate-limited. The code now stops safely rather than attempting to bypass restrictions.
+
+Untuk menjalankan scraping live dan ekspor lengkap, gunakan `Jalankan_Promo.bat`. Jika ada HTTP 401/403/429, timeout, server error, atau redirect keluar domain, pipeline harus berhenti dengan aman dan mempertahankan data *last-good* yang sesuai.

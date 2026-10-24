@@ -65,6 +65,18 @@ def test_common_product_types_map_to_expected_category_and_subcategory():
         ), product
 
 
+def test_packaged_food_and_restaurant_promos_have_separate_main_categories():
+    assert promo_categories.classify_promo_category({"product_text": "Indomie Goreng 5 pcs"}) == (
+        "Snack & Makanan Kemasan", "Mi instan"
+    )
+    assert promo_categories.classify_promo_category({"product_text": "Paket Ayam Goreng HokBen"}) == (
+        "Restoran & Makanan Siap Saji", "Menu/paket restoran"
+    )
+    assert promo_categories.classify_promo_category({"product_text": "Promo JSM Indomaret 23-25 Oktober 2026"}) == (
+        "Promo Umum / Multi-Kategori", "Kampanye Umum"
+    )
+
+
 def test_product_category_is_prioritized_over_campaign_discount_language():
     row = {
         "product_text": "Susu UHT Full Cream 1 L",
@@ -135,6 +147,42 @@ def test_clean_excel_rows_include_filterable_category_columns_and_reference_shee
                 assert "Subkategori" in headers
             ref_sheet = workbook["Referensi Kategori"]
             assert ref_sheet.max_row == 30  # header + 29 categories
+            assert "Audit Kategori" in workbook.sheetnames
+            assert "Daftar Filter Produk" in workbook.sheetnames
+            assert workbook["Daftar Filter Produk"].max_row == 127  # header + 126 unique review names
+        finally:
+            workbook.close()
+
+
+def test_category_change_audit_uses_previous_source_label():
+    from tempfile import TemporaryDirectory
+    from openpyxl import load_workbook
+
+    row = {
+        "product_text": "Indomie Goreng 5 pcs",
+        "merchant_name": "Indomaret",
+        "campaign_title": "Promo Indomaret Oktober 2026",
+        "offer_text": "Beli 5",
+        "promo_status": "active",
+        "valid_from": "2026-10-01",
+        "valid_until": "2026-10-31",
+        "source_url": "https://example.test/indomie",
+        "previous_product_category": "Makanan, Snack & Siap Saji",
+        "previous_product_subcategory": "Mi instan",
+    }
+    with TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "category_audit_test.xlsx"
+        enhancer.write_excel_catalog(path, [row], [row], [], [], [], [])
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            ws = workbook["Audit Kategori"]
+            headers = [cell.value for cell in ws[1]]
+            values = list(ws.iter_rows(min_row=2, values_only=True))
+            assert any(
+                r[headers.index("Kategori Sebelumnya")] == "Makanan, Snack & Siap Saji"
+                and r[headers.index("Kategori Baru")] == "Snack & Makanan Kemasan"
+                for r in values
+            )
         finally:
             workbook.close()
 
@@ -150,6 +198,43 @@ def test_ambiguous_brand_and_flavour_words_do_not_override_product_type():
         "My Baby Body Cologne Sweet Floral 100 ml": ("Bayi & Anak", "Perawatan kulit/tubuh bayi"),
         "Sunlight Jeruk Nipis 755 ml": ("Kebersihan Rumah Tangga", "Sabun cuci piring"),
         "Kino Larutan Jeruk 320 ml": ("Minuman & Produk Susu", "Minuman herbal/penyegar"),
+        "Sparkle Dish Wash Jeruk Nipis 650 ml": ("Kebersihan Rumah Tangga", "Sabun cuci piring"),
+        "Hemaviton C1000 Lemon 330 ml": ("Minuman & Produk Susu", "Minuman vitamin"),
+        "Salonpas Koyo Extra Hot": ("Kesehatan & Farmasi", "Koyo/obat herbal"),
+        "Big Fresh Tomat Cherry 200 g": ("Produk Segar & Beku", "Buah/sayur/daging/produk beku"),
+        "Gery Chocolatos Gold Original 350 g": ("Minuman & Produk Susu", "Minuman cokelat/vitamin"),
+        "Promina Melty Buns Original 42 g": ("Bayi & Anak", "MPASI/snack bayi"),
+        "Golden Farm Potato Nuggets 750 g": ("Produk Segar & Beku", "Buah/sayur/daging/produk beku"),
+        "Tropicana Slim Sweetener No Calori Diabetics Box 50 x 1.8 g": ("Makanan & Bahan Pokok", "Pemanis rendah kalori"),
+        "Generic Pear Xiang 100 g": ("Produk Segar & Beku", "Buah/sayur/daging/produk beku"),
+        "Sweety Silver / Max Pro Pants XXL 22": ("Bayi & Anak", "Popok"),
+        "Sayang Liquid 2In1 700 ml": ("Cuci Pakaian", "Deterjen"),
+        "Viva Face Tonic Bengkoang 200 ml": ("Perawatan Rambut & Kulit", "Perawatan wajah/sunscreen"),
+        "Bukrim Oxyklin Violet Scent 700 g": ("Cuci Pakaian", "Penghilang noda pakaian"),
+        "China Jeruk Lemon Impor Cina 100 g": ("Produk Segar & Beku", "Buah/sayur/daging/produk beku"),
+        "Seafoodking Chikuwa Mini 200 g": ("Produk Segar & Beku", "Buah/sayur/daging/produk beku"),
+        "Bebio Minyak Telon Plus 60 ml": ("Bayi & Anak", "Perawatan kulit/tubuh bayi"),
+        "Quaker Oats Instant 800 g": ("Makanan & Bahan Pokok", "Oatmeal/sereal sarapan"),
+        "Vidoran Xmart 3+ Madu Vanilla 900 g": ("Bayi & Anak", "Susu pertumbuhan anak"),
+        "Del Monte Ketchup 135 ml": ("Makanan & Bahan Pokok", "Saus/sambal/bumbu"),
+        "Lifree 10 Pants Ekstra Serap XL": ("Kesehatan & Farmasi", "Popok dewasa/inkontinensia"),
+        "Pokana Flou Night Wings 34 cm": ("Perawatan Tubuh & Mandi", "Pembalut/feminine hygiene"),
+        "Borges Olive Oil Extra Virgin 250 ml": ("Makanan & Bahan Pokok", "Minyak zaitun/minyak masak"),
+        "Minimum Pembelanjaan": ("Promo Umum / Multi-Kategori", "Syarat minimum belanja"),
+        "ABC Alkaline LR-06 MP AA LR-03 MP AAA": ("Elektronik & Gadget", "Baterai/perangkat listrik"),
+        "Nivea Facial Foam Sparkling Bright 100 g": ("Perawatan Rambut & Kulit", "Perawatan wajah/sunscreen"),
+        "Ayu Pop Sabun Mawar 65 g": ("Perawatan Tubuh & Mandi", "Sabun mandi/body wash"),
+        "Johnson's H&B Aloe Pntl Refill 375 ml": ("Perawatan Tubuh & Mandi", "Sabun mandi/body wash"),
+        "Cuddlesoft Korek Kuping Dewasa 100'S": ("Perawatan Tubuh & Mandi", "Cotton buds/kebersihan telinga"),
+        "Shower Puff Sabut Mandi": ("Perawatan Tubuh & Mandi", "Aksesori mandi"),
+        "Nivea Deo Lotion Cool Kick 9 ml": ("Perawatan Tubuh & Mandi", "Body lotion/serum"),
+        "Philips LED Mycare 11W": ("Elektronik & Gadget", "Lampu LED"),
+        "Vape AEO Plus Orange Breeze 600 ml": ("Kebersihan Rumah Tangga", "Anti nyamuk/serangga"),
+        "Fursure Pakan Kucing Dewasa 500 g": ("Hewan Peliharaan", "Makanan hewan"),
+        "Coin Minyak 60 ml": ("Lainnya / Perlu Review", "Produk belum teridentifikasi"),
+        "Collagena Steril 189 ml": ("Lainnya / Perlu Review", "Produk belum teridentifikasi"),
+        "Extra": ("Lainnya / Perlu Review", "Produk belum teridentifikasi"),
+        "Pasti": ("Lainnya / Perlu Review", "Produk belum teridentifikasi"),
     }
     for product, expected in cases.items():
         assert promo_categories.classify_promo_category({"product_text": product}) == expected, product

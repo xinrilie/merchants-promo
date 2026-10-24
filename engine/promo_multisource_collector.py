@@ -20,7 +20,7 @@ import time
 from collections import OrderedDict, Counter
 from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, urldefrag, parse_qs
+from urllib.parse import urljoin, urlparse, urldefrag
 from zoneinfo import ZoneInfo
 
 import requests
@@ -279,11 +279,6 @@ def infer_merchant(*texts: object) -> str | None:
                     continue
             return canonical
     return None
-
-
-def _dynamic_merchant_candidate_from_title(title: object) -> str | None:
-    """Compatibility wrapper around shared, allow-list-free title parsing."""
-    return infer_merchant_candidate_from_title(title)
 
 
 def infer_merchant_dynamic(title: object = "", page_url: object = "", context_label: object = "") -> str | None:

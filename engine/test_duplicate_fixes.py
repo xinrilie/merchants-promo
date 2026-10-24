@@ -63,7 +63,7 @@ def row(**overrides):
     return base
 
 
-def main():
+def test_duplicate_fixes_regressions():
     # Price/promotion labels must not become part of the product name.
     assert clean_product_name("Aice Mochi Vanilla/ Chocolate - Harga Normal 270 g") == "Aice Mochi Vanilla / Chocolate 270 g"
     assert clean_product_name("Aice Mochi Vanilla/ Chocolate 270 g") == "Aice Mochi Vanilla / Chocolate 270 g"
@@ -197,4 +197,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    test_duplicate_fixes_regressions()

@@ -59,6 +59,15 @@ def test_momsmoney_listing_stops_after_http_429():
     assert listing_log[0]["status"] == "blocked_or_limited"
 
 
+def test_momsmoney_listing_rejects_offsite_redirect_before_parsing():
+    session = RedirectSession("https://unrelated.example.com/rubrik/342/Hemat")
+    candidates, listing_log = momsmoney.discover_articles(session)
+
+    assert len(session.calls) == 1
+    assert candidates == []
+    assert listing_log[0]["status"] == "redirected_offsite"
+
+
 def test_momsmoney_article_loop_stops_after_first_block(monkeypatch):
     calls = []
 
@@ -203,3 +212,33 @@ def test_multisource_collector_rejects_cross_site_redirect(monkeypatch):
     assert products == []
     assert images == []
     assert request_log[0]["status"] == "redirected_offsite"
+
+
+def test_momsmoney_article_redirect_stops_later_requests_and_preserves_review(monkeypatch):
+    monkeypatch.setattr(momsmoney.time, "sleep", lambda _seconds: None)
+    session = RedirectSession("https://unrelated.example.com/news/promo")
+    selected = [
+        {"url": "https://momsmoney.kontan.co.id/news/promo-a"},
+        {"url": "https://momsmoney.kontan.co.id/news/promo-b"},
+    ]
+
+    checked, stopped = momsmoney.fetch_selected_articles(session, selected)
+
+    assert len(session.calls) == 1
+    assert len(checked) == 1
+    assert checked[0]["status"] == "redirected_offsite"
+    assert stopped is True
+    assert momsmoney.should_refresh_review_output([{"status": "ok"}], checked, stopped) is False
+
+
+def test_momsmoney_article_timeout_is_classified_as_request_error():
+    class ArticleTimeoutSession:
+        def get(self, url, **kwargs):
+            raise requests.Timeout("simulated article timeout")
+
+    result = momsmoney.fetch_article(
+        ArticleTimeoutSession(),
+        {"url": "https://momsmoney.kontan.co.id/news/promo-test"},
+    )
+    assert result["status"] == "request_error"
+    assert "Timeout" in result["note"]

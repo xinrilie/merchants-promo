@@ -73,11 +73,6 @@ echo [PRA-TEST 4/4] Menjalankan tes regresi...
 %PYTHON_CMD% -m pytest -q "%~dp0engine"
 if errorlevel 1 goto :error
 
-echo.
-echo Self-test deduplikasi dan fuzzy matching...
-%PYTHON_CMD% -u "%~dp0engine\test_duplicate_fixes.py"
-if errorlevel 1 goto :error
-
 if /I "%MODE%"=="test" goto :test_success
 
 echo.

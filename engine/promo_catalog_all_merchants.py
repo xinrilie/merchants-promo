@@ -692,6 +692,14 @@ def discover_articles(session: requests.Session) -> tuple[list[dict], list[dict]
                 break
 
             response.raise_for_status()
+            final_listing_url = getattr(response, "url", listing_url) or listing_url
+            final_listing_host = (urlparse(final_listing_url).hostname or "").casefold()
+            if final_listing_host != ARTICLE_HOST.casefold():
+                record["status"] = "redirected_offsite"
+                record["error"] = "Redirect keluar dari domain Momsmoney/Kontan; halaman tidak diproses."
+                listing_log.append(record)
+                say(f"  ! {record['error']}")
+                break
             soup = BeautifulSoup(response.text, "html.parser")
             links = soup.select('a[href*="/news/"]')
             record["links_seen"] = len(links)
@@ -1072,7 +1080,13 @@ def fetch_article(session: requests.Session, candidate: dict) -> dict:
             return result
         response.raise_for_status()
 
-        final_url = clean_article_url(response.url)
+        response_final_url = getattr(response, "url", url) or url
+        if (urlparse(response_final_url).hostname or "").casefold() != ARTICLE_HOST.casefold():
+            result["status"] = "redirected_offsite"
+            result["note"] = "Redirect keluar dari domain Momsmoney/Kontan; halaman tidak diproses."
+            return result
+
+        final_url = clean_article_url(response_final_url)
         if not final_url:
             result["status"] = "invalid_source_url"
             result["note"] = "URL akhir bukan halaman artikel Momsmoney yang dikenali."
@@ -1156,6 +1170,9 @@ def fetch_article(session: requests.Session, candidate: dict) -> dict:
                 "Tanggal mulai/akhir promo tidak dapat dipastikan; "
                 "artikel tidak dimasukkan ke katalog aktif."
             )
+    except requests.RequestException as exc:
+        result["status"] = "request_error"
+        result["note"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         result["status"] = "error"
         result["note"] = f"{type(exc).__name__}: {exc}"
@@ -1408,6 +1425,9 @@ def should_refresh_review_output(
         "blocked_or_limited",
         "server_error",
         "request_error",
+        "redirected_offsite",
+        "invalid_source_url",
+        "error",
     }
     if any(item.get("status") in terminal_article_errors for item in articles_checked):
         return False
@@ -1447,7 +1467,10 @@ def fetch_selected_articles(
         if item.get("note"):
             say(f"  Catatan: {item['note']}")
 
-        if item.get("status") in {"blocked_or_limited", "server_error", "request_error"}:
+        if item.get("status") in {
+            "blocked_or_limited", "server_error", "request_error",
+            "redirected_offsite", "invalid_source_url", "error",
+        }:
             stopped_early = True
             say(
                 "  ! Menghentikan pengambilan artikel berikutnya setelah "

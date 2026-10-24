@@ -14,8 +14,8 @@ import unicodedata
 CATEGORY_TAXONOMY = [
     ("Makanan & Bahan Pokok", "Beras, minyak goreng, gula, tepung, telur, bumbu, saus"),
     ("Minuman & Produk Susu", "Air mineral, kopi, teh, susu, yoghurt, keju, jus"),
-    ("Snack & Makanan Kemasan", "Makanan kemasan, snack, mi instan, roti/pastry, biskuit, wafer, makanan ringan"),
-    ("Restoran & Makanan Siap Saji", "Menu, paket makanan siap saji, dan promo restoran/kafe"),
+    ("Snack & Makanan Kemasan", "Makanan kemasan, snack, mi instan, biskuit, roti kemasan, dan makanan olahan"),
+    ("Restoran & Makanan Siap Saji", "Menu dan paket restoran/kafe, makanan siap saji, serta minuman yang dijual sebagai menu outlet"),
     ("Produk Segar & Beku", "Buah, sayur, daging, ikan, seafood, makanan beku"),
     ("Perawatan Tubuh & Mandi", "Sabun mandi, body wash, deodorant, body lotion"),
     ("Perawatan Rambut & Kulit", "Sampo, kondisioner, skincare, facial wash, sunscreen"),
@@ -76,11 +76,11 @@ RULES: list[tuple[str, str, tuple[str, ...]]] = [
 
 # Clear SKU-like food and retail terms; product text wins over campaign-level offers.
 FOOD_RULES: list[tuple[str, str, tuple[str, ...]]] = [
-    ("Makanan, Snack & Siap Saji", "Menu/paket restoran", (r"\bmenu\b", r"\bpaket makanan\b", r"\bpaket nasi\b", r"\bpaket hemat\b", r"\bset menu\b", r"\bcombo meal\b", r"\bbento\b", r"\bcajun fries\b", r"\bgrilled chicken\b", r"\bcrispy chicken\b", r"\bchicken wings\b", r"\bchicken tenders\b", r"\bbulgogi\b", r"\bchillz\b", r"\bmilo float\b", r"\bburger\b", r"\bsandwich\b", r"\bsushi\b", r"\bramen\b", r"\budon\b", r"\bpizza\b", r"\bpasta\b", r"\bayam goreng\b", r"\bfried chicken\b", r"\brice bowl\b", r"\bayam crispy\b", r"\bkentang goreng\b", r"\bhotdog\b", r"\bsteak\b", r"\bdimsum\b", r"\bdim sum\b", r"\bbakmi\b", r"\bmie ayam\b", r"\bbakso\b", r"\bsiomay\b", r"\bsoto\b", r"\bcroissant\b", r"\bdonat\b", r"\bdonut\b", r"\broti isi\b", r"\bmochi\b", r"\bparis baguette\b", r"\bpopeyes\b", r"\brotio\b", r"\broti'o\b", r"\bkopi kenangan\b", r"\bstarbucks\b", r"\bhokben\b", r"\bkfc\b", r"\bmcdonald\b", r"\bmcd\b", r"\bsubway\b", r"\bwingstop\b", r"\bbakmi gm\b", r"\bj\.co\b", r"\bgokana\b", r"\bmarugame\b", r"\byoshinoya\b", r"\bpizza hut\b", r"\bphd\b", r"\bfore coffee\b", r"\bjanji jiwa\b", r"\britchee?se\b", r"\bgenki sushi\b", r"\bchatime\b", r"\bmixue\b", r"\bburger bangor\b", r"\bpoint coffee\b", r"\bsolaria\b", r"\bes teler 77\b", r"\ba&w\b")),
+    ("Restoran & Makanan Siap Saji", "Menu/paket restoran", (r"\bmenu\b", r"\bpaket makanan\b", r"\bpaket nasi\b", r"\bpaket hemat\b", r"\bset menu\b", r"\bcombo meal\b", r"\bbento\b", r"\bcajun fries\b", r"\bgrilled chicken\b", r"\bcrispy chicken\b", r"\bchicken wings\b", r"\bchicken tenders\b", r"\bbulgogi\b", r"\bchillz\b", r"\bmilo float\b", r"\bburger\b", r"\bsandwich\b", r"\bsushi\b", r"\bramen\b", r"\budon\b", r"\bpizza\b", r"\bpasta\b", r"\bayam goreng\b", r"\bfried chicken\b", r"\brice bowl\b", r"\bayam crispy\b", r"\bkentang goreng\b", r"\bhotdog\b", r"\bsteak\b", r"\bdimsum\b", r"\bdim sum\b", r"\bbakmi\b", r"\bmie ayam\b", r"\bbakso\b", r"\bsiomay\b", r"\bsoto\b", r"\bcroissant\b", r"\bdonat\b", r"\bdonut\b", r"\broti isi\b", r"\bmochi\b", r"\bparis baguette\b", r"\bpopeyes\b", r"\brotio\b", r"\broti'o\b", r"\bkopi kenangan\b", r"\bstarbucks\b", r"\bhokben\b", r"\bkfc\b", r"\bmcdonald\b", r"\bmcd\b", r"\bsubway\b", r"\bwingstop\b", r"\bbakmi gm\b", r"\bj\.co\b", r"\bgokana\b", r"\bmarugame\b", r"\byoshinoya\b", r"\bpizza hut\b", r"\bphd\b", r"\bfore coffee\b", r"\bjanji jiwa\b", r"\britchee?se\b", r"\bgenki sushi\b", r"\bchatime\b", r"\bmixue\b", r"\bburger bangor\b", r"\bpoint coffee\b", r"\bsolaria\b", r"\bes teler 77\b", r"\ba&w\b")),
     ("Makanan & Bahan Pokok", "Bahan pokok/bumbu", (r"\beras\b", r"\bminyak goreng\b", r"\bcooking oil\b", r"\bgula pasir\b", r"\bgula aren\b", r"\btepung\b", r"\btelur\b", r"\bbumbu\b", r"\bgaram\b", r"\bkecap\b", r"\bsaus sambal\b", r"\bsaus tomat\b", r"\bmargarin\b", r"\bmentega\b", r"\bsantan\b", r"\bkaldu\b", r"\bmi instan bumbu\b", r"\bspice mix\b")),
     ("Minuman & Produk Susu", "Minuman/susu/kopi/teh", (r"\bair mineral\b", r"\bair putih\b", r"\bsusu\b", r"\byogh?urt\b", r"\bkeju\b", r"\bkrimer\b", r"\bkopi\b", r"\bcoffee\b", r"\bteh\b", r"\bjus\b", r"\bjuice\b", r"\bsoda\b", r"\bminuman\b", r"\bsirup\b", r"\benergi drink\b", r"\bisotonik\b", r"\bsoft drink\b", r"\bcola\b", r"\bminuman serbuk\b", r"\bminuman cokelat\b", r"\buht\b", r"\bfull cream\b")),
     ("Produk Segar & Beku", "Buah/sayur/daging/beku", (r"^(?:buah\s+)?(?:jeruk|apel|alpukat|pisang|anggur|semangka|pepaya|melon|wortel)(?:\s+(?:medan|mandarin|malang|segar|lokal|impor|import))?(?:\s+\d.*)?$", r"^sayur(?:an)?\b", r"\bdaging segar\b", r"\bikan segar\b", r"\bseafood segar\b", r"\bfrozen food\b", r"\bmakanan beku\b", r"\bnugget\b", r"\bsosis beku\b", r"\bes krim\b", r"\bice cream\b")),
-    ("Makanan, Snack & Siap Saji", "Snack/mi/biskuit/makanan kemasan", (r"\bmi instan\b", r"\bmie instan\b", r"\bindomie\b", r"\bmie sedaap\b", r"\bkeripik\b", r"\bchips\b", r"\bsnack\b", r"\bbiskuit\b", r"\bbiscuit\b", r"\bcookies\b", r"\bwafer\b", r"\bcokelat\b", r"\bchocolate\b", r"\bpermen\b", r"\bcandy\b", r"\bpopcorn\b", r"\bkacang\b", r"\broti tawar\b", r"\broti kemasan\b", r"\bmakanan kaleng\b", r"\babon\b", r"\bgranola bar\b", r"\bcereal bar\b", r"\bpop mie\b", r"\bmalkist\b")),
+    ("Snack & Makanan Kemasan", "Snack/mi/biskuit/makanan kemasan", (r"\bmi instan\b", r"\bmie instan\b", r"\bindomie\b", r"\bmie sedaap\b", r"\bkeripik\b", r"\bchips\b", r"\bsnack\b", r"\bbiskuit\b", r"\bbiscuit\b", r"\bcookies\b", r"\bwafer\b", r"\bcokelat\b", r"\bchocolate\b", r"\bpermen\b", r"\bcandy\b", r"\bpopcorn\b", r"\bkacang\b", r"\broti tawar\b", r"\broti kemasan\b", r"\bmakanan kaleng\b", r"\babon\b", r"\bgranola bar\b", r"\bcereal bar\b", r"\bpop mie\b", r"\bmalkist\b")),
 ]
 
 GENERAL_CAMPAIGN_PATTERNS = (
@@ -113,7 +113,7 @@ SUBCATEGORY_RULES: list[tuple[str, str, tuple[str, ...]]] = [
     ("Kesehatan & Farmasi", "Obat/perawatan medis", (r"\bcounterpain\b", r"\bbiotrue\b", r"\bbiotrue multipurpose solution\b", r"\bika alkohol\b", r"\balkohol 70%\b", r"\bfreshcare\b", r"\bimboost\b", r"\bom3heart\b", r"\brohto\b", r"\bobat mata\b", r"\bplester\b")),
     ("Produk Segar & Beku", "Es krim/dessert beku", (r"\bjoyday\b", r"\bwall s\b", r"\bwalls\b", r"\bmagnum\b", r"\bcornetto\b", r"\baice\b", r"\bglico\b", r"\bpaddle pop\b", r"\bmonaka\b", r"\bhisteria\b", r"\bfeast\b", r"\bice cream\b", r"\bes krim\b", r"\bcream cup\b")),
     ("Produk Segar & Beku", "Daging olahan/beku", (r"\bchamp chicken sausage\b", r"\bchicken sausage\b", r"\bsosis ayam\b", r"\bsausage\b")),
-    ("Makanan, Snack & Siap Saji", "Pasta/cereal/snack kemasan", (r"\bwow spageti\b", r"\bspageti\b", r"\bspaghetti\b", r"\bparoti\b", r"\bbagelen\b", r"\bchuba\b", r"\bcassava\b", r"\bpotabee\b", r"\bchilli? beef\b", r"\bkellogg\b", r"\bfroot loops\b", r"\bcoco fills\b", r"\bselection round kapas\b", r"\bmom s recipe\b", r"\bsilky pud\b", r"\bpudding\b", r"\bpuding\b", r"\bmini bites\b", r"\bcheese cake\b")),
+    ("Snack & Makanan Kemasan", "Pasta/cereal/snack kemasan", (r"\bwow spageti\b", r"\bspageti\b", r"\bspaghetti\b", r"\bparoti\b", r"\bbagelen\b", r"\bchuba\b", r"\bcassava\b", r"\bpotabee\b", r"\bchilli? beef\b", r"\bkellogg\b", r"\bfroot loops\b", r"\bcoco fills\b", r"\bselection round kapas\b", r"\bmom s recipe\b", r"\bsilky pud\b", r"\bpudding\b", r"\bpuding\b", r"\bmini bites\b", r"\bcheese cake\b")),
     ("Kebersihan Rumah Tangga", "Perlengkapan rumah tangga", (r"\bsarung tangan plastik\b", r"\bbagus sarung tangan\b")),
     # Common shorthand and high-frequency Indonesian FMCG brands found in catalog feeds.
     ("Bayi & Anak", "Mainan/perlengkapan anak", (r"\bhot wheels\b", r"\btoy(?:s)?\b", r"\bmainan anak\b")),
@@ -134,7 +134,7 @@ SUBCATEGORY_RULES: list[tuple[str, str, tuple[str, ...]]] = [
     ("Kesehatan & Farmasi", "Pereda demam/perawatan kesehatan", (r"\bkoolfever\b", r"\bplester demam\b", r"\bkondom\b", r"\bcondom\b", r"\bsutra kondom\b", r"\bnutrive benecol\b", r"\bbenecol\b", r"\bconfidence adult\b")),
     ("Produk Segar & Beku", "Es krim/dessert beku", (r"\bwall s\b", r"\bwalls\b", r"\bmagnum\b", r"\bcornetto\b", r"\baice\b", r"\bglico\b", r"\bpaddle pop\b", r"\bmonaka\b", r"\bhisteria\b", r"\bfeast\b", r"\bice cream\b", r"\bes krim\b", r"\bcream cup\b")),
     ("Makanan & Bahan Pokok", "Mayones/saus/sambal/bumbu", (r"\bmayo\b", r"\bmayonnaise\b", r"\bkewpie\b", r"\bmaestro mayo\b", r"\bsambal\b", r"\bsbl\b", r"\bdelmonte\b", r"\bleekumkee\b", r"\blee kum kee\b", r"\bblue band\b", r"\bminyak wijen\b", r"\bsesame oil\b", r"\btep terigu\b", r"\bbwn kukus\b", r"\bnutricake\b", r"\bsasa sbl\b", r"\bindomie? food sbl\b")),
-    ("Makanan, Snack & Siap Saji", "Cokelat/permen/snack kemasan", (r"\bcadbury\b", r"\bsilver ?queen\b", r"\bmentos\b", r"\byupi\b", r"\bpringles\b", r"\bsoyjoy\b", r"\bkuaci\b", r"\boat bar\b", r"\bcereal cup\b", r"\bkoko krunch\b", r"\bspaghetti instant\b", r"\bmie grg\b", r"\bmie goreng\b", r"\bsedaap mie grg\b", r"\bnata de coco\b", r"\bjelly\b", r"\bchoco\b", r"\bchocolate\b", r"\bagar\b", r"\bwafer\b", r"\bbrownies\b", r"\bcake mix\b")),
+    ("Snack & Makanan Kemasan", "Cokelat/permen/snack kemasan", (r"\bcadbury\b", r"\bsilver ?queen\b", r"\bmentos\b", r"\byupi\b", r"\bpringles\b", r"\bsoyjoy\b", r"\bkuaci\b", r"\boat bar\b", r"\bcereal cup\b", r"\bkoko krunch\b", r"\bspaghetti instant\b", r"\bmie grg\b", r"\bmie goreng\b", r"\bsedaap mie grg\b", r"\bnata de coco\b", r"\bjelly\b", r"\bchoco\b", r"\bchocolate\b", r"\bagar\b", r"\bwafer\b", r"\bbrownies\b", r"\bcake mix\b")),
     ("Minuman & Produk Susu", "Air mineral/minuman herbal", (r"\bvio\b", r"\bpristine\b", r"\bcleo\b", r"\ble minerale\b", r"\bair mnrl\b", r"\bad(e|em) m sari\b", r"\badem sari\b", r"\bsidomuncul\b", r"\bkunyit asam\b", r"\blarutan penyegar\b", r"\bcap kaki tiga\b", r"\boatside\b", r"\boat milk\b", r"\bmilk barista\b")),
     ("Makanan & Bahan Pokok", "Makanan kaleng/saus ikan", (r"\bsardines?\b", r"\btuna\b", r"\bikan kaleng\b", r"\basahi sardines\b", r"\bmaya tuna\b", r"\bcan 155 g\b")),
     ("Bayi & Anak", "Popok", (r"\bpopok\b", r"\bpampers\b", r"\bdiapers?\b", r"\bpants bayi\b")),
@@ -186,16 +186,16 @@ SUBCATEGORY_RULES: list[tuple[str, str, tuple[str, ...]]] = [
     ("Minuman & Produk Susu", "Kopi", (r"\bkopi\b", r"\bcoffee\b", r"\bcappuccino\b", r"\blatte\b")),
     ("Minuman & Produk Susu", "Teh", (r"\bteh\b", r"\btea\b")),
     ("Minuman & Produk Susu", "Air mineral/minuman ringan", (r"\bair mineral\b", r"\bair putih\b", r"\bjus\b", r"\bjuice\b", r"\bsoda\b", r"\bminuman\b", r"\bsirup\b", r"\bisotonik\b", r"\bsoft drink\b", r"\bcola\b", r"\bminuman serbuk\b")),
-    ("Makanan, Snack & Siap Saji", "Menu/paket restoran", (r"\bmenu\b", r"\bpaket makanan\b", r"\bpaket nasi\b", r"\bpaket hemat\b", r"\bset menu\b", r"\bcombo meal\b", r"\bbento\b", r"\bburger\b", r"\bsandwich\b", r"\bsushi\b", r"\bramen\b", r"\budon\b", r"\bpizza\b", r"\bpasta\b", r"\bayam goreng\b", r"\bfried chicken\b", r"\brice bowl\b", r"\bayam crispy\b", r"\bkentang goreng\b", r"\bhotdog\b", r"\bsteak\b", r"\bdimsum\b", r"\bdim sum\b", r"\bbakmi\b", r"\bmie ayam\b", r"\bbakso\b", r"\bsiomay\b", r"\bsoto\b", r"\bcroissant\b", r"\bdonat\b", r"\bdonut\b", r"\broti isi\b", r"\bmochi\b", r"\bparis baguette\b", r"\brotio\b", r"\broti'o\b", r"\bkopi kenangan\b", r"\bstarbucks\b", r"\bhokben\b", r"\bkfc\b", r"\bmcdonald\b", r"\bmcd\b", r"\bsubway\b", r"\bwingstop\b", r"\bbakmi gm\b", r"\bj\.co\b", r"\bgokana\b", r"\bmarugame\b", r"\byoshinoya\b", r"\bpizza hut\b", r"\bphd\b", r"\bfore coffee\b", r"\bjanji jiwa\b", r"\britchee?se\b", r"\bgenki sushi\b", r"\bchatime\b", r"\bmixue\b", r"\bburger bangor\b", r"\bpoint coffee\b", r"\bsolaria\b", r"\bes teler 77\b", r"\ba w\b")),
+    ("Restoran & Makanan Siap Saji", "Menu/paket restoran", (r"\bmenu\b", r"\bpaket makanan\b", r"\bpaket nasi\b", r"\bpaket hemat\b", r"\bset menu\b", r"\bcombo meal\b", r"\bbento\b", r"\bburger\b", r"\bsandwich\b", r"\bsushi\b", r"\bramen\b", r"\budon\b", r"\bpizza\b", r"\bpasta\b", r"\bayam goreng\b", r"\bfried chicken\b", r"\brice bowl\b", r"\bayam crispy\b", r"\bkentang goreng\b", r"\bhotdog\b", r"\bsteak\b", r"\bdimsum\b", r"\bdim sum\b", r"\bbakmi\b", r"\bmie ayam\b", r"\bbakso\b", r"\bsiomay\b", r"\bsoto\b", r"\bcroissant\b", r"\bdonat\b", r"\bdonut\b", r"\broti isi\b", r"\bmochi\b", r"\bparis baguette\b", r"\brotio\b", r"\broti'o\b", r"\bkopi kenangan\b", r"\bstarbucks\b", r"\bhokben\b", r"\bkfc\b", r"\bmcdonald\b", r"\bmcd\b", r"\bsubway\b", r"\bwingstop\b", r"\bbakmi gm\b", r"\bj\.co\b", r"\bgokana\b", r"\bmarugame\b", r"\byoshinoya\b", r"\bpizza hut\b", r"\bphd\b", r"\bfore coffee\b", r"\bjanji jiwa\b", r"\britchee?se\b", r"\bgenki sushi\b", r"\bchatime\b", r"\bmixue\b", r"\bburger bangor\b", r"\bpoint coffee\b", r"\bsolaria\b", r"\bes teler 77\b", r"\ba w\b")),
     ("Produk Segar & Beku", "Buah", (r"\bbuah\b", r"\balpukat\b", r"\bapel\b", r"\bapples?\b", r"\bpisang\b", r"\banggur\b", r"\bsemangka\b", r"\bpepaya\b", r"\bmelon\b")),
     ("Produk Segar & Beku", "Sayur", (r"\bsayur(?:an)?\b", r"\bwortel\b", r"\bbayam\b", r"\bkangkung\b", r"\bbawang\b", r"\bcabai\b", r"\bkentang segar\b")),
     ("Produk Segar & Beku", "Daging/ikan/seafood", (r"\bdaging\b", r"\bikan segar\b", r"\bseafood\b", r"\budang\b", r"\bsalmon\b", r"\bayam mentah\b")),
     ("Produk Segar & Beku", "Makanan beku", (r"\bfrozen food\b", r"\bmakanan beku\b", r"\bnugget\b", r"\bsosis beku\b", r"\bes krim\b", r"\bice cream\b")),
-    ("Makanan, Snack & Siap Saji", "Mi instan", (r"\bmi instan\b", r"\bmie instan\b", r"\bindomie\b", r"\bmie sedaap\b", r"\bpop mie\b")),
-    ("Makanan, Snack & Siap Saji", "Snack/keripik", (r"\bkeripik\b", r"\bchips\b", r"\bsnack\b", r"\bpopcorn\b", r"\bkacang\b")),
-    ("Makanan, Snack & Siap Saji", "Biskuit/wafer/roti kemasan", (r"\bbiskuit\b", r"\bbiscuit\b", r"\bcookies\b", r"\bwafer\b", r"\broti tawar\b", r"\broti kemasan\b", r"\bmalkist\b")),
-    ("Makanan, Snack & Siap Saji", "Cokelat/permen", (r"\bcokelat\b", r"\bchocolate\b", r"\bpermen\b", r"\bcandy\b")),
-    ("Makanan, Snack & Siap Saji", "Makanan kemasan lainnya", (r"\bmakanan kaleng\b", r"\babon\b", r"\bgranola bar\b", r"\bcereal bar\b")),
+    ("Snack & Makanan Kemasan", "Mi instan", (r"\bmi instan\b", r"\bmie instan\b", r"\bindomie\b", r"\bmie sedaap\b", r"\bpop mie\b")),
+    ("Snack & Makanan Kemasan", "Snack/keripik", (r"\bkeripik\b", r"\bchips\b", r"\bsnack\b", r"\bpopcorn\b", r"\bkacang\b")),
+    ("Snack & Makanan Kemasan", "Biskuit/wafer/roti kemasan", (r"\bbiskuit\b", r"\bbiscuit\b", r"\bcookies\b", r"\bwafer\b", r"\broti tawar\b", r"\broti kemasan\b", r"\bmalkist\b")),
+    ("Snack & Makanan Kemasan", "Cokelat/permen", (r"\bcokelat\b", r"\bchocolate\b", r"\bpermen\b", r"\bcandy\b")),
+    ("Snack & Makanan Kemasan", "Makanan kemasan lainnya", (r"\bmakanan kaleng\b", r"\babon\b", r"\bgranola bar\b", r"\bcereal bar\b")),
     ("Pembayaran, Cashback & Loyalitas", "Cashback", (r"\bcashback\b", r"\bcash back\b")),
     ("Pembayaran, Cashback & Loyalitas", "Pembayaran/bank/QRIS", (r"\bqris\b", r"\bkartu kredit\b", r"\bkartu debit\b", r"\bpromo bank\b", r"\bpaylater\b", r"\bcicilan\b", r"\bmybca\b")),
     ("Pembayaran, Cashback & Loyalitas", "Poin/reward/loyalitas", (r"\bpoin reward\b", r"\breward points?\b", r"\bloyalty points?\b", r"\bmember day\b", r"\brewards?\b")),
@@ -290,12 +290,358 @@ def _is_non_product_phrase(product: str) -> bool:
     return False
 
 
+
+def _provided_name_override(p: str):
+    """High-confidence rules for recurring products in the review queue.
+
+    These patterns are intentionally based on product type or a strong
+    brand/category combination. Flavor words such as jeruk/lemon, marketing
+    terms such as hijab/parfum, and package words must not decide a category
+    on their own.
+    """
+    if not p:
+        return None
+
+    # These are purchase conditions, not sellable product SKUs.
+    if _matches(p, (
+        r"^(?:minimum pembelanjaan|minimum belanja|minimum transaksi|"
+        r"min\.?\s*belanja|min\.?\s*pembelanjaan)$",
+    )):
+        return (GENERAL, "Syarat minimum belanja")
+
+    # Explicit dishwashing product wins over incidental citrus words.
+    if _matches(p, (
+        r"\bsparkle\b.*\bdish\s*wash(?:ing)?\b",
+        r"\bdish\s*wash(?:ing)?\b",
+        r"\bdishwash(?:ing)?\b",
+        r"\bsabun cuci piring\b",
+        r"\bpencuci piring\b",
+        r"\bekonomi\b.*\b(liquid|refill|jeruk nipis)\b",
+    )):
+        return ("Kebersihan Rumah Tangga", "Sabun cuci piring")
+
+    # Laundry and stain-removal product identity wins over scent/perfume words.
+    if _matches(p, (
+        r"\boxyklin\b",
+        r"\bbukrim\b.*\boxyklin\b",
+        r"\bsayang\b.*\bliquid\b.*\b2\s*in\s*1\b",
+        r"\bsayang liquid\b",
+        r"\b(doube|double)\b.*\b(detergent|deterjen|detergen|stain|noda)\b",
+        r"\bfleckz\b.*\bsabun krim\b",
+        r"\bsabun krim\b.*\b(laundry|cucian|pakaian)\b",
+    )):
+        if _matches(p, (r"\b(oxyclin|oxyklin|stain|noda|vanish)\b",)):
+            return ("Cuci Pakaian", "Penghilang noda pakaian")
+        if _matches(p, (r"\bsabun krim\b",)):
+            return ("Cuci Pakaian", "Sabun krim cucian")
+        return ("Cuci Pakaian", "Deterjen")
+
+    # Toilet cleaners and insect-control products remain distinct subcategories.
+    if _matches(p, (
+        r"\b(harpic|vixal)\b",
+        r"\bpembersih toilet\b",
+        r"\bpembersih kloset\b",
+        r"\btoilet cleaner\b",
+        r"\btoilet bowl\b",
+        r"\bpembersih kerak toilet\b",
+    )):
+        return ("Kebersihan Rumah Tangga", "Pembersih toilet/kloset")
+
+    if _matches(p, (
+        r"\bkapur ajaib\b",
+        r"\banti nyamuk\b",
+        r"\bobat nyamuk\b",
+        r"\banti serangga\b",
+        r"\bpembasmi serangga\b",
+        r"\binsektisida\b",
+        r"\bvape\b.*\b(aeo|aero|aerosol|orange breeze)\b",
+    )):
+        return ("Kebersihan Rumah Tangga", "Anti nyamuk/serangga")
+
+    # Adult incontinence products are not infant diapers.
+    if _matches(p, (
+        r"\blifree\b.*\b(pants|popok|ekstra serap|tipis|nyaman)\b",
+        r"\bpopok dewasa\b",
+        r"\badult diaper\b",
+        r"\binkontinensia\b",
+    )):
+        return ("Kesehatan & Farmasi", "Popok dewasa/inkontinensia")
+
+    # Infant-branded cologne/body care must be assigned before general body-care cues.
+    if _matches(p, (
+        r"\bmy baby\b",
+        r"\bcussons baby\b",
+        r"\bbaby cologne\b",
+        r"\bbaby body cologne\b",
+        r"\bkolonye bayi\b",
+        r"\bjohnson.?s\b.*\b(kolonye bayi|baby cologne|swing h berries|happy berries)\b",
+        r"\bbebio\b.*\bminyak telon\b",
+        r"\bminyak telon\b",
+    )):
+        return ("Bayi & Anak", "Perawatan kulit/tubuh bayi")
+
+    # Baby/child products: separate diapers, formula/growth milk, MPASI and care.
+    if _matches(p, (
+        r"\bsweety\b.*\b(pants|tape|silver|bronze|skin premium|max pro)\b",
+        r"\bmerries\b.*\b(pants|good skin|popok)\b",
+        r"\bmakuku\b.*\b(pants|comfort fit|dry care)\b",
+        r"\bpopok bayi\b",
+        r"\bpampers\b.*\b(pants|diapers?)\b",
+        r"\bdiapers? bayi\b",
+    )):
+        return ("Bayi & Anak", "Popok")
+
+    if _matches(p, (r"\bpromina\b", r"\bmpasi\b", r"\bsnack bayi\b")):
+        return ("Bayi & Anak", "MPASI/snack bayi")
+
+    if _matches(p, (
+        r"\bvidoran\b.*\b(xmart|1\+|3\+|madu|vanilla)\b",
+        r"\bchil\s*[- ]?kid\b",
+        r"\bmorigro\b.*\b(madu|vanilla|800\s*g|1\+|3\+)\b",
+        r"\bsusu formula\b",
+        r"\bsusu pertumbuhan\b",
+    )):
+        return ("Bayi & Anak", "Susu pertumbuhan anak")
+
+    if _matches(p, (
+        r"\bbebio\b.*\bminyak telon\b",
+        r"\bkolonye bayi\b",
+        r"\bjohnson.?s\b.*\b(kolonye bayi|baby cologne|swing h berries|happy berries)\b",
+        r"\bbaby cologne\b",
+        r"\bminyak telon\b",
+        r"\bperawatan bayi\b",
+    )):
+        return ("Bayi & Anak", "Perawatan kulit/tubuh bayi")
+
+    # Feminine hygiene is placed with personal hygiene, not fashion or baby care.
+    if _matches(p, (
+        r"\bpokana\b.*\b(wings|day|night|flou)\b",
+        r"\bflou\b.*\b(wings|day|night)\b",
+        r"\bpembalut wanita\b",
+        r"\bsanitary pad\b",
+    )):
+        return ("Perawatan Tubuh & Mandi", "Pembalut/feminine hygiene")
+
+    # Personal-care product identity beats unrelated brand variants.
+    # Keep the subcategory precise: deodorant, soap/body wash and bath
+    # accessories are different types of goods.
+    if _matches(p, (
+        r"\b(nivea|posh)\b.*\b(roll\s*on|deo|deodorant|deodoran|antiperspirant|deo lotion)\b",
+        r"\bdeo\s*lotion\b",
+        r"\bdeodorant\b",
+        r"\bdeodoran\b",
+        r"\broll\s*on\b",
+        r"\bbody cologne\b",
+    )):
+        return ("Perawatan Tubuh & Mandi", "Deodorant/kebersihan tubuh")
+
+    if _matches(p, (
+        r"\bsabun mawar\b",
+        r"\bsabun mandi\b",
+        r"\bbody wash\b",
+        r"\bshower gel\b",
+        r"\bbath gel\b",
+        r"\bjohnson.?s\b.*\bh\s*(?:and|&)\s*b\b.*\b(aloe|refill|lotion)\b",
+    )):
+        return ("Perawatan Tubuh & Mandi", "Sabun mandi/body wash")
+
+    if _matches(p, (
+        r"\bkorek kuping\b",
+        r"\bcotton buds?\b",
+        r"\bear buds?\b",
+    )):
+        return ("Perawatan Tubuh & Mandi", "Cotton buds/kebersihan telinga")
+
+    if _matches(p, (
+        r"\bshower puff\b",
+        r"\bsabut mandi\b",
+    )):
+        return ("Perawatan Tubuh & Mandi", "Aksesori mandi")
+
+    # Face care and sunscreen must not be sent to generic review/cosmetics.
+    if _matches(p, (
+        r"\bviva\b.*\b(face tonic|tonic|toner|cleanser|bengkoang|bengkuang)\b",
+        r"\bface tonic\b",
+        r"\bfacial tonic\b",
+        r"\bfacial cleanser\b",
+        r"\bface cleanser\b",
+        r"\bfacial foam\b",
+        r"\b(nivea|sun protect|sun oil)\b.*\b(spf\s*50|spf50|sun protect|sun oil|facial foam)\b",
+        r"\bsunscreen\b",
+        r"\bsunblock\b",
+    )):
+        return ("Perawatan Rambut & Kulit", "Perawatan wajah/sunscreen")
+
+    # Therapeutic patches and herbal medicinal products.
+    if _matches(p, (
+        r"\bsalonpas\b.*\bkoyo\b",
+        r"\bkoyo\b.*\b(extra hot|salonpas|pereda nyeri)\b",
+        r"\bbejo\b.*\b(jahe merah|herbal)\b",
+    )):
+        return ("Kesehatan & Farmasi", "Koyo/obat herbal")
+
+    # Adult vitamin C beverage, separate from tablet/supplement forms.
+    if _matches(p, (
+        r"\bhemaviton\b.*\bc1000\b.*\b(330\s*ml|lemon|health drink)\b",
+        r"\bhemaviton c1000\b",
+        r"\bc1000 health drink\b",
+    )):
+        return ("Minuman & Produk Susu", "Minuman vitamin")
+
+    # Baby growth milk vs adult nutrition milk.
+    if _matches(p, (
+        r"\b(vidoran|chil\s*[- ]?kid|morigro)\b",
+    )):
+        return ("Bayi & Anak", "Susu pertumbuhan anak")
+    if _matches(p, (
+        r"\bentrasol\b",
+        r"\btiga sapi\b.*\b(kkm|susu kental manis)\b",
+        r"\bsusu kental manis\b",
+        r"\bcimory\b.*\b(eat milk|milk)\b",
+    )):
+        return ("Minuman & Produk Susu", "Susu/produk susu")
+
+    # Drinks and powdered beverage products are identified before generic snack cues.
+    if _matches(p, (
+        r"\bgery chocolatos gold\b.*\b350\s*g\b",
+        r"\bchocolatos gold original\b",
+        r"\bminuman cokelat bubuk\b",
+        r"\bhemaviton c1000\b",
+    )):
+        return ("Minuman & Produk Susu", "Minuman cokelat/vitamin")
+
+    # Fresh fruit/vegetables and meat rely on explicit item-type words, not flavour.
+    if _matches(p, (
+        r"\btomat cherry\b",
+        r"\bpear xiang\b",
+        r"\bjeruk lemon\b",
+        r"\blemon impor\b",
+        r"\bkiwi\b",
+        r"\bmangga\b",
+        r"\bjamur enoki\b",
+        r"\bkembang kol\b",
+        r"\bbeef saikoro\b",
+        r"\bbeef rib\b",
+        r"\bayam broiler\b",
+        r"\bayam broiler utuh\b",
+        r"\bpotato nuggets?\b",
+        r"\bfrench fries\b",
+        r"\bgolden farm\b.*\b(potato|fries|nugget|french fries)\b",
+        r"\bseafoodking\b.*\b(chikuwa|seafood)\b",
+        r"\bchikuwa\b",
+        r"\b(hypermart|lotte mart|generic)\b.*\b(ayam broiler|beef rib|beef saikoro)\b",
+        r"\b(fiest[a]?|belfoods|hemato gold|yummy choice)\b.*\b(naget|nugget|karaage|spicy wing|chicken tender|cheesy bombs|tori ball|rice bites|egg roll)\b",
+        r"\b(naget ayam|nugget ayam|karaage|chicken tender|spicy wing|cheesy bombs)\b",
+        r"\b(ayam broiler|daging sapi|beef rib|beef saikoro)\b",
+        r"\b(lotte mart|hypermart)\b.*\bayam\b.*\bfrozen\b",
+    )):
+        return ("Produk Segar & Beku", "Buah/sayur/daging/produk beku")
+
+    # Adult and toddler nutritional products above are handled separately.
+    # Staples and cooking ingredients stay distinct from snacks and ready-to-eat food.
+    if _matches(p, (
+        r"\btropicana slim\b.*\b(sweetener|sweetener no calori|no calori|diabetics)\b",
+        r"\b(sweetener|pemanis rendah kalori|pemanis tanpa kalori)\b",
+    )):
+        return ("Makanan & Bahan Pokok", "Pemanis rendah kalori")
+
+    if _matches(p, (
+        r"\b(borges|tropicana slim)\b.*\bolive oil\b",
+        r"\bolive oil\b",
+        r"\bminyak zaitun\b",
+    )):
+        return ("Makanan & Bahan Pokok", "Minyak zaitun/minyak masak")
+
+    if _matches(p, (
+        r"\bdel monte\b.*\bketchup\b",
+        r"\bketchup\b",
+        r"\bsaus\b|\bsambal\b|\bkecap\b|\bmayones\b|\bsaus tiram\b",
+    )):
+        return ("Makanan & Bahan Pokok", "Saus/sambal/bumbu")
+
+    if _matches(p, (r"\bmaestro\b.*\bwijen sangrai\b", r"\bwijen sangrai\b")):
+        return ("Makanan & Bahan Pokok", "Bahan masak/topping")
+
+    if _matches(p, (r"\bquaker\b.*\b(oats?|oatmeal)\b", r"\boatmeal\b")):
+        return ("Makanan & Bahan Pokok", "Oatmeal/sereal sarapan")
+
+    if _matches(p, (r"\bmy vla\b.*\bvla instan\b", r"\bvla instan\b")):
+        return ("Makanan & Bahan Pokok", "Bahan dessert/vla instan")
+
+    if _matches(p, (r"\bovomaltine\b.*\bcrunchy cream\b", r"\bselai\b.*\b(cokelat|chocolate|kacang)\b")):
+        return ("Makanan & Bahan Pokok", "Selai/olesan")
+
+    # Packaged snacks; the explicitly identified powdered Chocolatos product above
+    # remains a beverage while Chocolatos wafers/snacks remain food products.
+    if _matches(p, (
+        r"\bnutella\b.*\bb-ready\b",
+        r"\bportos\b.*\bsingle bite\b",
+        r"\bdelfi\b.*\btake it share\b",
+        r"\bmilkita\b.*\bmilky bar\b",
+        r"\bmonde\b.*\begg roll\b",
+        r"\bchocolatos\b.*\b(wafer|snack|stick|coated wafer)\b",
+        r"\btao kae noi\b",
+        r"\blemonilo\b.*\b(bronis|brownies|krispi|crunchy)\b",
+        r"\btaiko\b.*\bkrezz\b",
+        r"\bdelixios\b.*\broti sobek\b",
+        r"\b(gery|portos|delfi|milkita|monde|nutella|tao kae noi|lemonilo|taiko)\b.*\b(wafer|b-ready|single bite|milky bar|egg roll|snack|camilan|brownies|bronis)\b",
+        r"\byummy choice\b.*\b(okane|egg roll|tori ball|spicy chicken tender)\b",
+        r"\balfamidi\b.*\bsamosa\b",
+        r"\bdeltafoods\b.*\btongkol\b",
+    )):
+        return ("Snack & Makanan Kemasan", "Snack/makanan kemasan/siap saji")
+
+    # Named pet-food product.
+    if _matches(p, (
+        r"\bfursure\b.*\bpakan kucing\b",
+        r"\bpakan kucing\b",
+        r"\bcat food\b",
+        r"\bpet food\b",
+    )):
+        return ("Hewan Peliharaan", "Makanan hewan")
+
+    # Batteries and household lighting are electrical products, but retain
+    # distinct subcategories to avoid mixing AA/AAA cells with LED bulbs.
+    if _matches(p, (
+        r"\babc alkaline\b.*\blr-0[36]\b",
+        r"\blr-0[36]\b.*\b(aa|aaa)\b",
+        r"\balkaline\b.*\b(aa|aaa)\b",
+    )):
+        return ("Elektronik & Gadget", "Baterai/perangkat listrik")
+
+    if _matches(p, (
+        r"\bphilips\b.*\bled\b.*\b(11w|watt)\b",
+        r"\bled\b.*\b(11w|watt)\b",
+    )):
+        return ("Elektronik & Gadget", "Lampu LED")
+
+    # General body-care brand/product type catches explicit names from the list.
+    if _matches(p, (
+        r"\bnivea\b.*\b(roll on|pearl|derma control|deo)\b",
+        r"\bposh deo\b",
+        r"\bdeo roll on\b",
+        r"\bdeo lotion\b",
+        r"\bminyak telon\b",
+        r"\bsabun mawar\b",
+        r"\bkorek kuping\b",
+        r"\bshower puff\b",
+    )):
+        return ("Perawatan Tubuh & Mandi", "Kebersihan tubuh/deodorant")
+
+    return None
+
+
 def _strict_product_override(product: str):
     """High-confidence product rules; specific item type outranks flavour/marketing words."""
     p = _norm(product)
 
     if not p:
         return None
+
+    # Review-queue overrides: high-confidence item type/brand rules take priority.
+    provided_override = _provided_name_override(p)
+    if provided_override:
+        return provided_override
 
     # Explicit baby-care brands/forms belong to Bayi & Anak rather than
     # the general body-care category. Avoid matching flavour names like "Baby Bears".
@@ -670,7 +1016,7 @@ def _strict_product_override(product: str):
         r"\bpermen kopi\b",
         r"\bkopiko candy\b",
     )):
-        return ("Makanan, Snack & Siap Saji", "Cokelat/permen/snack kemasan")
+        return ("Snack & Makanan Kemasan", "Cokelat/permen/snack kemasan")
 
     # The Sukses's family is instant noodles even if the source does not
     # explicitly retain the words "mi instan" in its product title.
@@ -678,7 +1024,7 @@ def _strict_product_override(product: str):
         _matches(p, (r"\bsukses\b", r"\bsuksess\b"))
         and _matches(p, (r"\bmie goreng\b", r"\bmi goreng\b"))
     ):
-        return ("Makanan, Snack & Siap Saji", "Mi instan")
+        return ("Snack & Makanan Kemasan", "Mi instan")
 
     # Named instant-noodle and packaged-biscuit products outrank incidental
     # seasoning words (e.g. kaldu, goreng, peanut butter, chocolate).
@@ -693,7 +1039,7 @@ def _strict_product_override(product: str):
         r"\bnissin biscuit\b",
         r"\bserena biscuit\b",
     )):
-        return ("Makanan, Snack & Siap Saji", "Snack/makanan kemasan")
+        return ("Snack & Makanan Kemasan", "Snack/makanan kemasan")
 
     # Explicit snack product forms are checked before broad words such as
     # "susu", "tea", and "water" used as flavours/variant names.
@@ -705,7 +1051,7 @@ def _strict_product_override(product: str):
         r"\bmie sedaap\b",
         r"\bpop mie\b",
     )):
-        return ("Makanan, Snack & Siap Saji", "Mi instan")
+        return ("Snack & Makanan Kemasan", "Mi instan")
 
     if _matches(p, (
         r"\bcheetos\b",
@@ -744,8 +1090,8 @@ def _strict_product_override(product: str):
             r"\bmie sedaap\b", r"\bpop mie\b", r"\bpopcorn\b",
             r"\bceres choco spread\b", r"\bchoco spread\b",
         )):
-            return ("Makanan, Snack & Siap Saji", "Snack/makanan kemasan")
-        return ("Makanan, Snack & Siap Saji", "Makanan kemasan")
+            return ("Snack & Makanan Kemasan", "Snack/makanan kemasan")
+        return ("Snack & Makanan Kemasan", "Makanan kemasan")
 
 
     # Explicit beverage types and formats beat fruit-flavour words.
@@ -883,7 +1229,7 @@ def _classify_promo_category_unmapped(row: dict | None) -> tuple[str, str]:
         if _matches(context, (r"\b(?:rangkuman|kumpulan|beberapa|berbagai|\d+\s+promo|multi[- ]merchant|multi[- ]kategori)\b",)):
             return GENERAL, _generic_campaign_subcategory(context)
         if _matches(context, (r"\b(hokben|mcdonald|mcd|kfc|burger king|subway|wingstop|bakmi gm|kopi kenangan|starbucks|j\.co|gokana|marugame|yoshinoya|pizza hut|phd|fore coffee|janji jiwa|richeese|genki sushi|chatime|mixue|burger bangor|point coffee|solaria|es teler 77|paris baguette|popeyes|a w)\b",)) and _matches(context, (r"\b(menu|paket|makanan|minuman|kopi|promo|diskon|bundling|beli|gratis|weekend|restoran|kafe|cafe|fries|chicken|ice cone|float|chillz)\b",)):
-            return "Makanan, Snack & Siap Saji", "Promo menu/restoran"
+            return "Restoran & Makanan Siap Saji", "Promo menu/restoran"
         if _matches(context, (r"\bcashback\b", r"\bqris\b", r"\bkartu kredit\b", r"\bpaylater\b", r"\bpromo bank\b")):
             return "Pembayaran, Cashback & Loyalitas", "Cashback/pembayaran"
         if _matches(context, (r"\bvoucher\b", r"\bkupon\b", r"\bgift card\b")):
@@ -920,13 +1266,13 @@ def _classify_promo_category_unmapped(row: dict | None) -> tuple[str, str]:
         category, subcategory = food_match
         # Packaged coffee/tea sold in a grocery context remains a grocery beverage.
         # Menu/paket cues and recognized food-service brands route to restaurant.
-        if category == "Makanan, Snack & Siap Saji":
+        if category in {"Snack & Makanan Kemasan", "Restoran & Makanan Siap Saji"}:
             return category, subcategory
         if category == "Minuman & Produk Susu" and _matches(product + " " + merchant + " " + title, (
             r"\b(menu|paket hemat|paket makanan|set menu|combo meal|dine in|take away)\b",
             r"\b(hokben|mcdonald|mcd|kfc|burger king|subway|wingstop|bakmi gm|kopi kenangan|starbucks|j\.co|gokana|marugame|yoshinoya|pizza hut|phd|fore coffee|janji jiwa|richeese|genki sushi|chatime|mixue|burger bangor|point coffee|solaria|es teler 77|paris baguette|popeyes|a w)\b",
         )):
-            return "Makanan, Snack & Siap Saji", "Menu/minuman siap saji"
+            return "Restoran & Makanan Siap Saji", "Menu/minuman siap saji"
         return category, subcategory
 
     # If the text is a campaign or catalog heading rather than a product, don't
@@ -942,7 +1288,7 @@ def _classify_promo_category_unmapped(row: dict | None) -> tuple[str, str]:
     # product's text itself does not carry a recognizable item/category signal.
     dining_context = " ".join([title, merchant, section, product, offer])
     if _matches(dining_context, (r"\b(hokben|mcdonald|mcd|kfc|burger king|subway|wingstop|bakmi gm|kopi kenangan|starbucks|j\.co|gokana|marugame|yoshinoya|pizza hut|phd|fore coffee|janji jiwa|richeese|genki sushi|chatime|mixue|burger bangor|point coffee|solaria|es teler 77|paris baguette|popeyes|a w)\b",)) and _matches(dining_context, (r"\b(menu|paket|makanan|minuman|kopi|promo|diskon|bundling|beli|gratis|weekend|restoran|kafe|cafe|fries|chicken|ice cone|float|chillz)\b",)):
-        return "Makanan, Snack & Siap Saji", "Promo menu/restoran"
+        return "Restoran & Makanan Siap Saji", "Promo menu/restoran"
 
     # An unclear one-word "product" must not inherit its category from a
     # payment/campaign note. Keep it in Review unless the SKU itself matched.
@@ -965,12 +1311,7 @@ def _classify_promo_category_unmapped(row: dict | None) -> tuple[str, str]:
 
 
 def _canonical_category_pair(row: dict | None, pair: tuple[str, str]) -> tuple[str, str]:
-    """Map legacy intermediate labels to the canonical 29-category taxonomy.
-
-    The food rules historically emitted one combined label. The workbook and
-    tests require packaged food/snacks and restaurant/ready-to-eat offers to be
-    distinct, so this adapter makes every classifier path return canonical names.
-    """
+    """Refine subcategories and reject labels outside the 29-category taxonomy."""
     category, subcategory = pair
     row = row or {}
     product = _norm(
@@ -978,23 +1319,9 @@ def _canonical_category_pair(row: dict | None, pair: tuple[str, str]) -> tuple[s
         or row.get("original_product_text")
         or row.get("Nama Produk")
     )
-    offer = _norm(row.get("offer_text") or row.get("Detail Penawaran"))
-    title = _norm(row.get("campaign_title") or row.get("Kampanye") or row.get("title"))
-    merchant = _norm(row.get("merchant_name") or row.get("Merchant"))
-    context = " ".join(x for x in (product, merchant, title, offer) if x)
 
-    if category == "Makanan, Snack & Siap Saji":
-        sub = _norm(subcategory)
-        restaurant_cue = bool(re.search(
-            r"\b(menu|paket restoran|promo menu|menu restoran|minuman siap saji|restoran|kafe|cafe)\b",
-            sub,
-        ))
-        if restaurant_cue:
-            category = "Restoran & Makanan Siap Saji"
-            if subcategory in {"Menu/minuman siap saji", "Promo menu/restoran"}:
-                subcategory = "Menu/paket restoran"
-        else:
-            category = "Snack & Makanan Kemasan"
+    # Active rules emit final taxonomy labels directly; this function only
+    # applies subcategory refinements and rejects labels outside the taxonomy.
 
     # Refine broad subcategories where the SKU text carries an exact item type.
     # These refinements affect labels only, never price, date, or verification.

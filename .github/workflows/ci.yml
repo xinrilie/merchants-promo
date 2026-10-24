@@ -29,7 +29,5 @@ jobs:
         run: python engine/promo_names.py
       - name: Run collector self-test
         run: python engine/promo_multisource_collector.py --self-test
-      - name: Run duplicate and merge safeguards
-        run: python engine/test_duplicate_fixes.py
       - name: Run regression tests
         run: python -m pytest -q
