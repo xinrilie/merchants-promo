@@ -8,7 +8,7 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 > **Penting:** data Hemat.id, Katalogpromosi.com, dan Scanharga.com merupakan data agregator/konten. Data tidak otomatis dikonfirmasi oleh retailer resmi. Gunakan kolom sumber dan status verifikasi sebelum menjadikan harga sebagai referensi final.
 
-> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, serta guardrail tambahan untuk judul artikel, syarat minimum belanja, jumlah benefit pembayaran QRIS, dan pemulihan nama SKU yang sempat terpotong. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 57 passed.
+> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, serta guardrail tambahan untuk judul artikel, syarat minimum belanja, jumlah benefit pembayaran QRIS, pemulihan nama SKU terpotong, serta gerbang kualitas sebelum ekspor. Kolom `Status Validasi Produk` kini terpisah dari `Status Promo`; merchant tidak dikenal, kategori yang belum yakin, dan sinyal harga berisiko dialihkan ke `Perlu Review`. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 66 passed.
 
 ---
 
@@ -43,6 +43,16 @@ Collector memproses satu halaman/sumber pada satu waktu sehingga belum memiliki 
 - Nama pendek/ambigu yang mungkin merupakan produk atau label merchant tidak di-blacklist; bila bukti item belum cukup, baris diarahkan ke `Perlu Review`.
 - Produk bernama jelas seperti `My Baby Body Cologne Sweet Floral 100 ml` tetap lolos validasi discount-only.
 - Tes regresi menguji kasus `campaign_title` kosong agar bug tidak kembali.
+
+## 🚦 Gerbang kualitas sebelum ekspor
+
+Enhancer menjalankan `apply_export_quality_gate()` sebelum menulis katalog final. Gerbang ini bukan pengganti parser dan tidak menghapus bukti sumber; fungsinya adalah mencegah kandidat yang tampak aktif tetapi belum aman dipakai masuk ke sheet `Aktif`/`Periode Pasti`.
+
+- Kolom `Status Promo` menjelaskan waktu/status promo (misalnya `Aktif` atau `Aktif (periode estimasi)`). Kolom `Status Validasi Produk` terpisah dan berisi `Valid`, `Perlu review`, atau `Ditolak`.
+- Nama kosong/generik, merchant kosong/`UNKNOWN`, kategori `Lainnya / Perlu Review`, sumber URL hilang, harga yang tidak cocok dengan teks sumber, nominal pembayaran/QRIS yang terbaca sebagai harga produk, persentase diskon tidak masuk akal, serta konflik unit/harga lintas sumber diarahkan ke review.
+- Jika nominal harga tidak bisa dipertanggungjawabkan sebagai harga produk, kolom harga terkait dikosongkan di tampilan katalog; teks penawaran dan sumber tetap dipertahankan untuk audit. Flag bundling yang memang berupa estimasi tetap diberi catatan, bukan disamakan dengan harga satuan.
+- Sebelum workbook/CSV ditimpa, gate melakukan pemeriksaan kedua pada semua baris yang akan masuk katalog aktif. Bila masih ada blocker, pipeline berhenti dan hasil katalog lama tidak ditimpa.
+- Rincian jumlah baris dialihkan dan alasan tiap baris dicatat di `_internal/promo_export_quality_gate_report.json` serta diringkas di `_internal/promo_catalog_multisource_quality_report.json`.
 
 ## ✨ Fitur Utama
 

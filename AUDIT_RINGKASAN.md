@@ -23,7 +23,7 @@ Basis audit: paket ZIP yang diunggah pengguna. Pemeriksaan ini bersifat offline;
 ## Validasi yang dijalankan
 
 - `python -m compileall -q engine`: lulus.
-- `python -m pytest -q`: **57 passed**.
+- `python -m pytest -q`: **66 passed** (sesudah gerbang kualitas ekspor ditambahkan).
 - `python engine/promo_names.py`: self-test lulus.
 - `python engine/promo_multisource_collector.py --self-test`: self-test lulus.
 - `python engine/test_duplicate_fixes.py`: self-test lulus (opsional untuk menjalankan skrip langsung; tesnya juga sudah dikumpulkan oleh pytest).
@@ -74,3 +74,27 @@ Perbaikan:
 4. Tes regresi baru menguji kedua pola (`Potongan harga` dan `Harga spesial`), pastikan status review, nominal produk dikosongkan, dan label display tidak blank.
 
 Hasil build lokal setelah perbaikan: tidak ada nama produk kosong pada CSV utama, sheet `Aktif`, atau sheet `Periode Pasti`; dua kasus yang ditemukan hanya tampil pada `Perlu Review` dengan harga kosong. Validasi: compileall dan self-test lulus; **57 tes lulus**. Tidak ada scraping live yang dijalankan.
+
+
+## Fase 1: gerbang kualitas data sebelum ekspor
+
+Diterapkan pada build 24 Oktober 2026, di atas paket false-positive fix.
+
+1. Menambahkan kolom **`Status Validasi Produk`** ke CSV dan seluruh sheet katalog. Kolom ini terpisah dari `Status Promo`; promo yang masih aktif tanggalnya tetap dapat ditandai `Perlu review` jika identitas/merchant/harga produk belum aman.
+2. Menambahkan `apply_export_quality_gate()` sebelum output final ditulis. Baris aktif dicek atas identitas produk kosong/generik, merchant tidak diketahui, kategori yang masih `Lainnya / Perlu Review`, URL sumber yang hilang, harga tanpa bukti yang cocok, nominal pembayaran/QRIS yang keliru dianggap harga produk, harga inferred/konflik unit, konflik harga lintas sumber, dan diskon di luar rentang 0–100%.
+3. Baris yang gagal tidak dibuang diam-diam: statusnya menjadi `review`, alasan dan flag disimpan, sementara nominal yang tidak dapat dipastikan sebagai harga produk dikosongkan dari kolom harga/diskon terkait. Bukti teks, judul, merchant, dan URL tetap ada untuk audit.
+4. Gerbang melakukan pemeriksaan kedua terhadap semua baris yang akan dipublikasikan. Bila masih ditemukan blocker, enhancer menulis `_internal/promo_export_quality_gate_report.json` dan berhenti sebelum menimpa katalog final sebelumnya.
+5. Workbook `Mulai Di Sini` menjelaskan perbedaan `Status Promo` dan `Status Validasi Produk`, serta menampilkan ringkasan hasil gate.
+6. Tes regresi baru menguji pemisahan status, merchant tidak diketahui, kategori belum terklasifikasi, nominal QRIS/cashback, nama generik, harga inferred, konflik harga lintas sumber, diskon di atas 100%, serta produk valid yang tetap lolos.
+
+### Hasil build lokal setelah penerapan gate
+
+- Kandidat aktif sebelum gate: **970**.
+- Diterima di katalog aktif setelah gate: **935**.
+- Dialihkan ke `Perlu Review`: **35** (26 merchant tidak diketahui, 9 kategori perlu pemeriksaan; sebagian baris memiliki lebih dari satu flag terkait harga).
+- Katalog aktif: tidak ada nama kosong dan tidak ada merchant kosong/`UNKNOWN`.
+- Kolom `Status Validasi Produk` pada katalog aktif: seluruh baris berstatus `Valid`.
+- Excel mempunyai sheet `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori`, `Kemungkinan Duplikat`, `Variasi Nama`, serta ringkasan dan referensi kategori.
+- Verifikasi: `compileall`, semua self-test, **66/66 tes lulus**, ekspor Excel/CSV lulus.
+
+**Batas verifikasi:** build Excel memakai CSV/cache lokal. Log Momsmoney/Kontan yang tersedia bertanggal 23 Oktober 2026 sehingga tidak dipakai sebagai scrape segar pada build 24 Oktober. Tidak ada scraping live yang dijalankan saat tahap audit ini.

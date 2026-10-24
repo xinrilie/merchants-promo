@@ -37,6 +37,7 @@ OUT_CONFIRMED = INTERNAL_DIR / "promo_catalog_multisource_confirmed.csv"
 OUT_REVIEW = INTERNAL_DIR / "promo_catalog_multisource_review.csv"
 OUT_FULL = INTERNAL_DIR / "promo_catalog_multisource_full_audit.csv"
 OUT_REPORT = INTERNAL_DIR / "promo_catalog_multisource_quality_report.json"
+OUT_GATE_REPORT = INTERNAL_DIR / "promo_export_quality_gate_report.json"
 OUT_POSSIBLE_DUPES = INTERNAL_DIR / "promo_possible_duplicate_candidates.csv"
 OUT_XLSX = OUTPUT_DIR / "Katalog_Promo_Final.xlsx"
 OUT_REJECTED_PRODUCTS = INTERNAL_DIR / "promo_product_rows_rejected.csv"
@@ -81,7 +82,7 @@ FIELDS = [
     "source_page_url", "source_item_url", "region_or_channel", "scraped_at",
     "duplicate_count", "duplicate_group_id", "cross_dataset_duplicate", "overlapping_offer_count",
     "overlap_period_flag", "price_quality_flag", "data_quality_flags", "retained_from_previous_run", "raw_line",
-    "product_validation_status", "product_rejection_reason", "product_review_reason",
+    "product_validation_status", "product_rejection_reason", "product_review_reason", "export_gate_flags",
 ]
 
 
@@ -1539,6 +1540,239 @@ def has_material_period_conflict(row):
     return any(marker in flags for marker in PERIOD_CONFLICT_MARKERS)
 
 
+GENERIC_PRODUCT_NAME_RE = re.compile(
+    r"^(?:produk(?:\s+(?:belum\s+teridentifikasi|pilihan|tertentu))?|item\s+pilihan|"
+    r"potongan(?:\s+harga)?|harga\s+(?:promo|spesial|normal)|promo(?:si)?|diskon|"
+    r"min(?:imum)?\.?\s*(?:belanja|pembelanjaan|transaksi)|syarat\s+belanja|"
+    r"penawaran\s+(?:menarik|spesial))$",
+    re.I,
+)
+NON_PRODUCT_AMOUNT_CONTEXT_RE = re.compile(
+    r"\b(?:cashback|cash\s*back|qris|voucher|kupon|minimum|minimal|min\.?|"
+    r"belanja|pembelanjaan|transaksi|pembayaran|kartu\s+kredit|poin|reward|saldo)\b",
+    re.I,
+)
+EXPLICIT_PRODUCT_PRICE_LABEL_RE = re.compile(
+    r"\b(?:harga\s+(?:promo|normal|spesial|setelah\s+diskon)|promo\s+rp|normal\s+rp)\b",
+    re.I,
+)
+
+
+def product_validation_display(row):
+    """Expose product identity/price validation separately from promo date status."""
+    status = str(row.get("product_validation_status") or "review").strip().casefold()
+    if status == "eligible":
+        return "Valid"
+    if status == "rejected":
+        return "Ditolak"
+    return "Perlu review"
+
+
+def _product_price_gate_issue(row, field, kind):
+    amount = as_int(row.get(field))
+    if amount is None:
+        return None
+    if amount <= 0:
+        return f"{field}_not_positive"
+
+    evidence_field = f"{field}_evidence_text"
+    evidence = str(row.get(evidence_field) or "").strip()
+    offer = str(row.get("offer_text") or "").strip()
+    raw_line = str(row.get("raw_line") or "").strip()
+    matching = find_amount_evidence(evidence, amount, kind) if evidence else None
+    if not matching:
+        source_text = " ".join(part for part in (offer, raw_line) if part)
+        matching = find_amount_evidence(source_text, amount, kind)
+    if not matching:
+        return f"{field}_missing_matching_source_evidence"
+
+    # Numeric amounts associated with payment/cashback/transaction conditions are
+    # not item prices unless the same snippet explicitly labels a product price.
+    if NON_PRODUCT_AMOUNT_CONTEXT_RE.search(matching) and not EXPLICIT_PRODUCT_PRICE_LABEL_RE.search(matching):
+        return f"{field}_looks_like_payment_or_purchase_condition"
+
+    # Keep the evidence snippet on the row so the audit can show what passed.
+    row[evidence_field] = matching
+    return None
+
+
+def export_quality_gate_issues(row):
+    """Return blockers for a row that is about to enter the user-facing active catalog."""
+    issues = []
+    validation_status = str(row.get("product_validation_status") or "").strip().casefold()
+    if validation_status != "eligible":
+        issues.append("product_validation_status_not_eligible")
+
+    product = clean_product_name(str(row.get("product_text") or ""))
+    if not product or not product.strip() or GENERIC_PRODUCT_NAME_RE.fullmatch(product.strip().strip(" .:-–—")):
+        issues.append("product_identity_empty_or_generic")
+
+    merchant = str(row.get("merchant_name") or "").strip()
+    category, subcategory = classify_promo_category(row)
+    if (not merchant or merchant.casefold() in {"unknown", "n/a", "none", "belum diketahui"}) and category != "Promo Umum / Multi-Kategori":
+        issues.append("merchant_missing_or_unknown")
+    if category == "Lainnya / Perlu Review":
+        issues.append("category_requires_manual_review")
+    if category not in CATEGORY_NAMES:
+        issues.append("category_not_in_taxonomy")
+    if not str(row.get("source_url") or "").strip():
+        issues.append("source_url_missing")
+
+    promo = as_int(row.get("promo_price"))
+    normal = as_int(row.get("normal_price"))
+    if promo is not None:
+        issue = _product_price_gate_issue(row, "promo_price", "promo")
+        if issue:
+            issues.append(issue)
+    if normal is not None:
+        issue = _product_price_gate_issue(row, "normal_price", "normal")
+        if issue:
+            issues.append(issue)
+    if promo is not None and normal is not None and promo > normal:
+        issues.append("promo_price_above_normal_price")
+
+    # Source/adapter quality flags must survive fuzzy merges as blockers when they
+    # describe an unresolved amount, unit or cross-source price conflict. Benign
+    # notes (e.g. evidence reconstructed from visible text or a labelled bundle
+    # estimate) intentionally do not block a row by themselves.
+    price_flags = {part.strip() for part in str(row.get("price_quality_flag") or "").split("|") if part.strip()}
+    if promo is not None:
+        if "price_inferred" in price_flags:
+            issues.append("promo_price_inferred_needs_review")
+        if "promo_price_above_normal_review" in price_flags:
+            issues.append("promo_price_above_normal_review")
+        if "promo_price_parse_failed_or_unverified" in price_flags or "promo_price_without_matching_offer_evidence" in price_flags:
+            issues.append("promo_price_source_quality_unverified")
+        if "additional_payment_amount_not_unit_price" in price_flags or "additional_payment_not_unit_price" in price_flags:
+            issues.append("promo_price_is_additional_payment_not_item_price")
+    if normal is not None:
+        if "normal_price_ambiguous_unit" in price_flags:
+            issues.append("normal_price_unit_is_ambiguous")
+        if "normal_price_parse_failed_or_unverified" in price_flags or "normal_price_without_matching_offer_evidence" in price_flags:
+            issues.append("normal_price_source_quality_unverified")
+    if (promo is not None or normal is not None) and "price_unit_context_requires_review" in price_flags:
+        issues.append("price_unit_context_requires_review")
+    if (promo is not None or normal is not None) and "cross_source_price_disagreement" in price_flags:
+        issues.append("cross_source_price_disagreement")
+    if "payment_benefit_amount_not_product_price" in price_flags and promo is not None:
+        issues.append("promo_price_is_payment_benefit_not_item_price")
+
+    discount = as_decimal(row.get("discount_percent"))
+    if discount is not None and (discount < 0 or discount > 100):
+        issues.append("product_discount_out_of_range")
+    if discount is not None and "discount_without_matching_offer_evidence" in price_flags:
+        issues.append("product_discount_missing_matching_offer_evidence")
+    return list(OrderedDict.fromkeys(issues))
+
+
+def _quarantine_for_export_gate(row, issues):
+    """Keep the source record for review while removing unsupported product money fields."""
+    issues = list(OrderedDict.fromkeys(issues))
+    row["export_gate_flags"] = " | ".join(issues)
+    row["product_validation_status"] = "review"
+    row["product_review_reason"] = " | ".join(pipe_unique([
+        row.get("product_review_reason") or "",
+        "Gerbang kualitas ekspor: " + ", ".join(issues),
+    ]))
+    if "product_identity_empty_or_generic" in issues:
+        for field in (
+            "promo_price", "normal_price", "promo_price_evidence_text", "normal_price_evidence_text",
+            "discount_evidence_text", "discount_percent", "discount_percent_calculated",
+            "discount_savings_rp", "estimated_bundle_discount_percent",
+        ):
+            row[field] = None
+        row["discount_percent_basis"] = "not_available"
+        row["discount_percent_confidence"] = "unknown"
+        row["price_basis"] = None
+        row["price_parse_method"] = "export_gate_cleared_unidentified_product"
+        row["product_category"] = "Lainnya / Perlu Review"
+        row["product_subcategory"] = "Produk belum teridentifikasi"
+    else:
+        clear_promo = any(issue.startswith("promo_price_") for issue in issues)
+        clear_normal = any(issue.startswith("normal_price_") for issue in issues)
+        if clear_promo:
+            for field in ("promo_price", "promo_price_evidence_text"):
+                row[field] = None
+        if clear_normal:
+            for field in ("normal_price", "normal_price_evidence_text"):
+                row[field] = None
+        if (clear_promo or clear_normal) and row.get("discount_percent_basis") == "calculated_from_unit_prices":
+            row["discount_percent"] = None
+            row["discount_percent_calculated"] = None
+            row["discount_savings_rp"] = None
+            row["discount_evidence_text"] = None
+            row["discount_percent_basis"] = "not_available"
+            row["discount_percent_confidence"] = "unknown"
+        if "product_discount_out_of_range" in issues or "product_discount_missing_matching_offer_evidence" in issues:
+            row["discount_percent"] = None
+            row["discount_percent_calculated"] = None
+            row["discount_savings_rp"] = None
+            row["discount_evidence_text"] = None
+            row["discount_percent_basis"] = "not_available"
+            row["discount_percent_confidence"] = "unknown"
+        if "promo_price_above_normal_price" in issues and row.get("discount_percent_basis") == "calculated_from_unit_prices":
+            row["discount_percent"] = None
+            row["discount_percent_calculated"] = None
+            row["discount_savings_rp"] = None
+            row["discount_evidence_text"] = None
+            row["discount_percent_basis"] = "not_available"
+            row["discount_percent_confidence"] = "unknown"
+    row["data_quality_flags"] = " | ".join(pipe_unique([
+        row.get("data_quality_flags") or "",
+        "export_quality_gate_review",
+        *["export_quality_gate:" + issue for issue in issues],
+    ])) or None
+    return row
+
+
+def apply_export_quality_gate(consolidated_rows):
+    """Partition active candidates into clean catalog vs review, with audit details."""
+    current = []
+    quarantined = []
+    issue_counts = Counter()
+    candidates = [
+        row for row in consolidated_rows
+        if row.get("promo_status") in {"active", "active_estimated"}
+        and row.get("product_validation_status") != "review"
+        and not has_material_period_conflict(row)
+    ]
+    for row in candidates:
+        issues = export_quality_gate_issues(row)
+        if issues:
+            _quarantine_for_export_gate(row, issues)
+            quarantined.append({
+                "product_text": row.get("product_text") or "",
+                "merchant_name": row.get("merchant_name") or "",
+                "campaign_title": row.get("campaign_title") or "",
+                "source_url": row.get("source_url") or "",
+                "issues": issues,
+            })
+            issue_counts.update(issues)
+        else:
+            current.append(row)
+
+    remaining = []
+    for row in current:
+        issues = export_quality_gate_issues(row)
+        if issues:
+            remaining.append({
+                "product_text": row.get("product_text") or "",
+                "merchant_name": row.get("merchant_name") or "",
+                "source_url": row.get("source_url") or "",
+                "issues": issues,
+            })
+    report = {
+        "status": "passed" if not remaining else "failed",
+        "candidate_active_rows": len(candidates),
+        "accepted_active_rows": len(current),
+        "routed_to_review_rows": len(quarantined),
+        "issue_counts": dict(issue_counts),
+        "routed_rows": quarantined,
+        "blocking_rows_remaining": remaining,
+    }
+    return current, report
+
+
 # Main catalog uses a compact, user-friendly column order; technical fields remain in OUT_FULL.
 CLEAN_COLUMNS = [
     ("Nama Produk", "product_text"),
@@ -1550,6 +1784,7 @@ CLEAN_COLUMNS = [
     ("Merchant", "merchant_name"),
     ("Hemat (Rp)", "discount_savings_rp"),
     ("Status Promo", "display_status"),
+    ("Status Validasi Produk", "product_quality_label"),
     ("Kepastian Periode", "period_certainty"),
     ("Verifikasi Sumber", "source_verification_label"),
     ("Mulai Berlaku", "valid_from"),
@@ -1618,6 +1853,7 @@ def clean_sort_key(row):
 def make_clean_row(row, review=False):
     item = dict(row)
     item["display_status"] = display_status(row)
+    item["product_quality_label"] = product_validation_display(row)
     item["display_deal_type"] = row.get("deal_type") or row.get("campaign_type") or ""
     item["product_category"], item["product_subcategory"] = classify_promo_category(row)
     item["display_notes"] = display_notes(row)
@@ -1842,7 +2078,7 @@ def build_name_variant_rows(rows):
     return output
 
 
-def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_variant_rows, possible_duplicate_rows, rejected_rows=None):
+def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_variant_rows, possible_duplicate_rows, rejected_rows=None, export_gate_report=None):
     """User-facing workbook: clean catalogs plus separate review/duplicate/rejected audit sheets."""
     rejected_rows = rejected_rows or []
     try:
@@ -1870,10 +2106,12 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ["Kelompok variasi nama produk", len(name_variant_rows)],
         ["Kandidat duplikat untuk diperiksa", len(possible_duplicate_rows)],
         ["Kategori utama", len(CATEGORY_TAXONOMY)],
+        ["Gerbang kualitas ekspor", f"{(export_gate_report or {}).get('status', 'not_reported')} — {(export_gate_report or {}).get('routed_to_review_rows', 0)} baris dialihkan ke Perlu Review oleh validasi akhir."],
+        ["Status Validasi Produk", "Kolom ini terpisah dari Status Promo. 'Valid' berarti identitas produk dan pemeriksaan harga/merchant lolos gerbang; 'Perlu review' berarti perlu pemeriksaan, meskipun tanggal promo masih berstatus Aktif."],
         ["Sumber produk", "Hemat.id, Katalogpromosi.com, Scanharga.com, dan katalog lama"],
         ["Catatan", "Kepastian periode dipisahkan dari verifikasi sumber; agregator dan artikel publik bukan verifikasi resmi retailer."],
         ["Petunjuk", f"Buka sheet Aktif untuk katalog sehari-hari. Gunakan filter Kategori Produk dan Subkategori untuk mencari jenis barang. Ringkasan Kategori menunjukkan jumlah promo aktif per kategori; Referensi Kategori berisi daftar {len(CATEGORY_TAXONOMY)} kategori. Daftar Filter Produk mengulang daftar contoh klasifikasi yang disimpan di input/category_review_list.csv."],
-        ["File teknis", "Data mentah dan log tersimpan di folder _internal; tidak perlu dibuka untuk pemakaian harian."],
+        ["File teknis", "Data mentah dan log tersimpan di folder _internal; laporan gerbang ekspor ada di promo_export_quality_gate_report.json."],
     ]
     for row in summary:
         ws.append(row)
@@ -2256,13 +2494,17 @@ def main():
     consolidated, consolidated_groups, consolidated_rows = consolidate_overlapping_offers(merged_raw)
     consolidated, equivalent_offer_groups, equivalent_offer_rows_absorbed = merge_equivalent_cross_source_offers(consolidated)
 
-    # Main catalog excludes unresolved material date conflicts; those remain in Review.
-    current = [
-        r for r in consolidated
-        if r.get("promo_status") in {"active", "active_estimated"}
-        and r.get("product_validation_status") != "review"
-        and not has_material_period_conflict(r)
-    ]
+    # Quality gate: a row can have an active period and still be unfit for the
+    # public-facing catalog. Quarantine identity, merchant, category, source-link,
+    # and unsupported-price problems before any user-facing file is overwritten.
+    current, export_gate_report = apply_export_quality_gate(consolidated)
+    OUT_GATE_REPORT.write_text(json.dumps(export_gate_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if export_gate_report.get("status") != "passed":
+        raise RuntimeError(
+            "Gerbang kualitas ekspor gagal; katalog sebelumnya tidak ditimpa. "
+            f"Lihat {OUT_GATE_REPORT.relative_to(ROOT_DIR)}"
+        )
+
     confirmed = [
         r for r in current
         if r.get("promo_status") == "active"
@@ -2286,7 +2528,7 @@ def main():
     write_audit_rows(OUT_FULL, merged_raw)
     write_audit_rows(OUT_REJECTED_PRODUCTS, rejected_product_rows)
     write_possible_duplicate_csv(OUT_POSSIBLE_DUPES, possible_duplicate_rows)
-    write_excel_catalog(OUT_XLSX, current, confirmed, review, name_variant_rows, possible_duplicate_rows, rejected_product_rows)
+    write_excel_catalog(OUT_XLSX, current, confirmed, review, name_variant_rows, possible_duplicate_rows, rejected_product_rows, export_gate_report)
 
     discount_basis = Counter(r.get("discount_percent_basis") or "not_available" for r in current)
     merchant_counts = Counter(r.get("merchant_name") or "UNKNOWN" for r in current)
@@ -2324,6 +2566,13 @@ def main():
         "equivalent_cross_source_offer_rows_absorbed": equivalent_offer_rows_absorbed,
         "consolidated_row_count": len(consolidated),
         "current_active_including_estimates": len(current),
+        "export_quality_gate": {
+            "status": export_gate_report.get("status"),
+            "candidate_active_rows": export_gate_report.get("candidate_active_rows", 0),
+            "accepted_active_rows": export_gate_report.get("accepted_active_rows", 0),
+            "routed_to_review_rows": export_gate_report.get("routed_to_review_rows", 0),
+            "issue_counts": export_gate_report.get("issue_counts", {}),
+        },
         "active_period_conflicts_routed_to_review": sum(
             r.get("promo_status") in {"active", "active_estimated"} and has_material_period_conflict(r)
             for r in consolidated
@@ -2343,7 +2592,7 @@ def main():
         "discount_basis_counts_current": dict(discount_basis),
         "merchant_counts_current": dict(merchant_counts),
         "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
-        "internal_audit_files": [OUT_CONFIRMED.relative_to(ROOT_DIR).as_posix(), OUT_REVIEW.relative_to(ROOT_DIR).as_posix(), OUT_FULL.relative_to(ROOT_DIR).as_posix(), OUT_REJECTED_PRODUCTS.relative_to(ROOT_DIR).as_posix(), OUT_REPORT.relative_to(ROOT_DIR).as_posix()],
+        "internal_audit_files": [OUT_CONFIRMED.relative_to(ROOT_DIR).as_posix(), OUT_REVIEW.relative_to(ROOT_DIR).as_posix(), OUT_FULL.relative_to(ROOT_DIR).as_posix(), OUT_REJECTED_PRODUCTS.relative_to(ROOT_DIR).as_posix(), OUT_GATE_REPORT.relative_to(ROOT_DIR).as_posix(), OUT_REPORT.relative_to(ROOT_DIR).as_posix()],
         "clean_catalog_columns": [label for label, _ in CLEAN_COLUMNS],
         "full_audit_file": OUT_FULL.name,
         "discount_policy": {
