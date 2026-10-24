@@ -277,24 +277,112 @@ def truthy(value):
     return str(value or "").strip().casefold() in {"1", "true", "yes", "ya", "y"}
 
 
-def canonical_merchant(value, title):
-    value = (value or "").strip()
-    inferred = infer_merchant_dynamic(title or "")
-    if not value or value.casefold() in {"lainnya", "unknown", "null", "none"}:
-        return inferred or (value if value else None)
-    canonical_map = {
-        "superindo": "Super Indo",
-        "super indo": "Super Indo",
-        "mcdonalds": "McDonald's",
-        "mcdonald's": "McDonald's",
-        "jco": "J.CO",
-        "j.co": "J.CO",
-        "lotte mart": "Lotte Mart",
-    }
-    value = canonical_map.get(value.casefold(), value)
-    # If the title explicitly identifies another more specific merchant, use it
-    # for rows whose previous source had only a generic bucket.
-    return value
+GENERIC_MERCHANT_VALUES = {"", "lainnya", "other", "unknown", "null", "none", "n/a", "belum diketahui"}
+
+
+def _merchant_text_normalize(value):
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split())
+
+
+def _known_merchants_in_text(value):
+    """Return canonical known merchant aliases found as whole phrases in one context."""
+    text = _merchant_text_normalize(value)
+    if not text:
+        return set()
+    hits = set()
+    aliases = []
+    for canonical, alias_values in getattr(scraper, "MERCHANT_ALIASES", []):
+        for alias in alias_values:
+            normalized_alias = _merchant_text_normalize(alias)
+            if normalized_alias:
+                aliases.append((len(normalized_alias.split()), len(normalized_alias), canonical, normalized_alias))
+    # Prefer long phrases; the returned set keeps the result conservative when a
+    # title contains both a merchant and a named payment/partner brand.
+    aliases.sort(reverse=True)
+    for _, _, canonical, alias in aliases:
+        if re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", text):
+            hits.add(canonical)
+    return hits
+
+
+def _path_text(url):
+    try:
+        from urllib.parse import urlparse
+        return _merchant_text_normalize(urlparse(str(url or "")).path.replace("-", " ").replace("_", " "))
+    except (TypeError, ValueError):
+        return ""
+
+
+def infer_merchant_from_context(title, source_url=None, source_urls=None, source_titles=None):
+    """Resolve merchant only when title/URL evidence points to one consistent brand.
+
+    A generic stored label such as `Lainnya` is never retained as if it were a
+    verified merchant. Conflicting context stays unresolved for the quality gate.
+    """
+    title_text = str(title or "").strip()
+    url_values = pipe_unique([source_url or "", source_urls or ""])
+    title_values = pipe_unique([title_text, source_titles or ""])
+    # Pipe-delimited merged titles/URLs are checked individually, not as a blob.
+    contexts = []
+    if title_text:
+        contexts.append(("campaign_title", _known_merchants_in_text(title_text)))
+    for candidate_url in url_values:
+        path_text = _path_text(candidate_url)
+        if path_text:
+            contexts.append(("source_url", _known_merchants_in_text(path_text)))
+    for title_blob in title_values:
+        for candidate_title in re.split(r"\s*\|\s*", title_blob):
+            if candidate_title and candidate_title != title_text:
+                contexts.append(("source_campaign_titles", _known_merchants_in_text(candidate_title)))
+    # A single context that names exactly one merchant is strong evidence. All
+    # other single-merchant contexts must agree with it.
+    single_hits = [(kind, next(iter(hits))) for kind, hits in contexts if len(hits) == 1]
+    multiple_hits = [hits for _, hits in contexts if len(hits) > 1]
+    if single_hits:
+        candidates = {name for _, name in single_hits}
+        if len(candidates) == 1 and not multiple_hits:
+            chosen = next(iter(candidates))
+            source_kinds = {kind for kind, name in single_hits if name == chosen}
+            if "source_url" in source_kinds and "campaign_title" in source_kinds:
+                return chosen, "title_url_known_alias"
+            return chosen, "known_alias_from_title_or_url"
+        # The URL slug can disambiguate an article title listing a partner and
+        # merchant only when its own slug identifies exactly one of those names.
+        url_hits = [name for kind, name in single_hits if kind == "source_url"]
+        if len(set(url_hits)) == 1 and all(name in set.union(set(), *multiple_hits) for name in url_hits):
+            non_url = {name for kind, name in single_hits if kind != "source_url"}
+            if not non_url or non_url == set(url_hits):
+                return url_hits[0], "source_url_known_alias"
+        return None, "conflicting_merchant_context"
+    if multiple_hits:
+        return None, "conflicting_merchant_context"
+    # Preserve support for a genuinely new retailer when a campaign title has a
+    # clear promo/catalog prefix but its merchant is not in the alias table.
+    inferred = infer_merchant_dynamic(title_text, source_url or "", "")
+    if inferred and _merchant_text_normalize(inferred) not in {_merchant_text_normalize(v) for v in GENERIC_MERCHANT_VALUES}:
+        return inferred, "campaign_title_inference"
+    return None, "merchant_unresolved"
+
+
+def canonical_merchant(value, title, source_url=None, source_urls=None, source_titles=None):
+    raw_value = (value or "").strip()
+    if raw_value.casefold() not in GENERIC_MERCHANT_VALUES:
+        canonical_map = {
+            "superindo": "Super Indo",
+            "super indo": "Super Indo",
+            "mcdonalds": "McDonald's",
+            "mcdonald's": "McDonald's",
+            "jco": "J.CO",
+            "j.co": "J.CO",
+            "lotte mart": "Lotte Mart",
+        }
+        normalized = _merchant_text_normalize(raw_value)
+        known = _known_merchants_in_text(raw_value)
+        if len(known) == 1 and normalized == _merchant_text_normalize(next(iter(known))):
+            return next(iter(known)), "source_merchant_field"
+        return canonical_map.get(raw_value.casefold(), raw_value), "source_merchant_field"
+    inferred, method = infer_merchant_from_context(title, source_url, source_urls, source_titles)
+    return inferred, method
 
 
 def canonical_campaign_type(value, title):
@@ -450,9 +538,69 @@ UNIT_CONTEXT_PATTERN = re.compile(
 )
 
 
+GIFT_MARKER_RE = re.compile(
+    r"\b(?:gratis|free|bonus|hadiah(?:\s+berupa)?|dapat\s+gratis)\s+([^,;|.]{1,90})",
+    re.IGNORECASE,
+)
+GIFT_STOP_RE = re.compile(
+    r"\b(?:dengan|senilai|seharga|hingga|sampai|diskon|potongan|hemat|harga|rp|periode|"
+    r"berlaku|min(?:imum)?|minimal|ketentuan|cashback|voucher|kupon|cash\s*back|qris)\b",
+    re.IGNORECASE,
+)
+SKU_TOKEN_STOPWORDS = {
+    "beli", "buy", "get", "gratis", "free", "bonus", "hadiah", "berupa", "dapat",
+    "produk", "item", "unit", "pcs", "pc", "buah", "pack", "pak", "box", "dus",
+    "kemasan", "ukuran", "varian", "isi", "dengan", "untuk", "harga", "promo",
+    "normal", "diskon", "potongan", "hemat", "hingga", "sampai", "rp", "idr",
+    "per", "setiap", "ekstra", "tambahan", "dan", "atau", "di", "ke", "dari",
+    "ongkir", "pengiriman", "shipping", "delivery", "voucher", "kupon", "cashback",
+    "reward", "poin", "saldo", "qris", "pembayaran", "transaksi", "minimum", "minimal",
+}
+
+
+def _sku_identity_tokens(value):
+    text = scraper.normalize_text(str(value or ""))
+    tokens = re.findall(r"[a-z]+", text)
+    return {token for token in tokens if token not in SKU_TOKEN_STOPWORDS and len(token) > 1}
+
+
+def cross_sku_gift_description(row):
+    """Return explicit gift-SKU text when it differs from the product on the row.
+
+    Generic mechanics such as `Beli 1 Gratis 1` have no gift SKU name and are not
+    classified as cross-SKU. This is intentionally conservative.
+    """
+    product_tokens = _sku_identity_tokens(row.get("product_text") or row.get("original_product_text"))
+    if not product_tokens:
+        return None
+    text_parts = [row.get(k) or "" for k in ("offer_text", "purchase_condition", "deal_type", "raw_line")]
+    seen = set()
+    for text in text_parts:
+        for match in GIFT_MARKER_RE.finditer(str(text)):
+            description = match.group(1).strip(" :-–—")
+            stop = GIFT_STOP_RE.search(description)
+            if stop:
+                description = description[:stop.start()].strip(" :-–—")
+            gift_tokens = _sku_identity_tokens(description)
+            if not gift_tokens:
+                continue
+            signature = tuple(sorted(gift_tokens))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            union = product_tokens | gift_tokens
+            similarity = len(product_tokens & gift_tokens) / len(union) if union else 1.0
+            # Any named item whose SKU tokens materially differ from the row SKU
+            # is treated as a separate item, even if its category/brand overlaps.
+            if similarity < 0.80:
+                return description
+    return None
+
+
 def safe_discount_fields(offer_text, promo_price, normal_price, price_basis,
-                         purchase_condition=None, deal_type=None, quality_flags=None):
-    """Hitung diskon secara konservatif bila teks menunjukkan harga per satuan/berat."""
+                         purchase_condition=None, deal_type=None, quality_flags=None,
+                         product_text=None, original_product_text=None, raw_line=None):
+    """Hitung diskon konservatif dan pisahkan hadiah lintas-SKU dari diskon produk."""
     flags = quality_flags if quality_flags is not None else []
     result = scraper.discount_fields(
         offer_text=offer_text,
@@ -471,6 +619,24 @@ def safe_discount_fields(offer_text, promo_price, normal_price, price_basis,
         result["discount_percent_basis"] = "unit_context_review"
         result["discount_percent_confidence"] = "unknown"
         flags.append("price_unit_context_requires_review")
+
+    gift_row = {
+        "product_text": product_text,
+        "original_product_text": original_product_text,
+        "offer_text": offer_text,
+        "purchase_condition": purchase_condition,
+        "deal_type": deal_type,
+        "raw_line": raw_line,
+    }
+    gift_description = cross_sku_gift_description(gift_row)
+    if gift_description and result.get("discount_percent_basis") == "bundle_estimate_same_item_value":
+        result["discount_percent"] = None
+        result["discount_percent_calculated"] = None
+        result["discount_savings_rp"] = None
+        result["estimated_bundle_discount_percent"] = None
+        result["discount_percent_basis"] = "cross_sku_bundle_review"
+        result["discount_percent_confidence"] = "unknown"
+        flags.append("cross_sku_gift_not_product_discount")
     return result
 
 
@@ -586,7 +752,13 @@ def load_source(path, source_label):
     for original in rows:
         raw = dict(original)
         title = (raw.get("campaign_title") or "").strip()
-        merchant = canonical_merchant(raw.get("merchant_name") or raw.get("merchant"), title)
+        merchant, merchant_resolution_method = canonical_merchant(
+            raw.get("merchant_name") or raw.get("merchant"),
+            title,
+            raw.get("source_url") or raw.get("source_page_url") or raw.get("source_item_url"),
+            raw.get("source_urls"),
+            raw.get("source_campaign_titles"),
+        )
         original_product = (raw.get("original_product_text") or raw.get("product_text") or "").strip()
         source_product = (raw.get("product_text") or "").strip()
         product = clean_product_name(source_product or original_product)
@@ -658,6 +830,9 @@ def load_source(path, source_label):
             purchase_condition=purchase_condition,
             deal_type=deal_type,
             quality_flags=quality_flags,
+            product_text=product,
+            original_product_text=original_product,
+            raw_line=raw_line,
         )
         campaign_disc, campaign_disc_basis = campaign_discount(title)
         discount_evidence = str(raw.get("discount_evidence_text") or "").strip() or None
@@ -765,7 +940,7 @@ def load_source(path, source_label):
             "source_type": source_type_value,
             "verification_status": verification_status_value,
             "source_verification_label": source_verification_label(verification_status_value),
-            "merchant_resolution_method": (raw.get("merchant_resolution_method") or "").strip() or None,
+            "merchant_resolution_method": (raw.get("merchant_resolution_method") or "").strip() or merchant_resolution_method,
             "source_page_url": (raw.get("source_page_url") or "").strip() or None,
             "source_item_url": (raw.get("source_item_url") or "").strip() or None,
             "region_or_channel": (raw.get("region_or_channel") or "").strip() or None,
@@ -781,6 +956,7 @@ def load_source(path, source_label):
             "data_quality_flags": " | ".join(pipe_unique([
                 period_flags or "",
                 "missing_merchant_name" if not merchant else "",
+                "merchant_inferred_from_title_url" if merchant and merchant_resolution_method in {"title_url_known_alias", "known_alias_from_title_or_url", "source_url_known_alias", "campaign_title_inference"} else "",
                 "missing_product_text" if not product else "",
                 "missing_source_url" if not raw.get("source_url") else "",
                 "retained_from_previous_run" if truthy(raw.get("retained_from_previous_run")) else "",
@@ -960,6 +1136,9 @@ def merge_rows(rows):
             best.get("purchase_condition"),
             best.get("deal_type"),
             flags,
+            product_text=best.get("product_text"),
+            original_product_text=best.get("original_product_text"),
+            raw_line=best.get("raw_line"),
         )
         best.update(discount)
         best["price_quality_flag"] = " | ".join(pipe_unique(flags)) or None
@@ -1234,7 +1413,18 @@ def _purchase_quantity_signature(row):
     return int(match.group(1)) if match else None
 
 
+def _gift_item_signature(row):
+    description = cross_sku_gift_description(row)
+    tokens = _sku_identity_tokens(description)
+    return tuple(sorted(tokens)) if tokens else None
+
+
 def _compatible_offers(a, b):
+    # If one source names a distinct gift SKU and the other does not, or the two
+    # sources name different gift items, keep the offers separate for review.
+    gift_a, gift_b = _gift_item_signature(a), _gift_item_signature(b)
+    if (gift_a is not None or gift_b is not None) and gift_a != gift_b:
+        return False
     fa, fb = _offer_family(a), _offer_family(b)
     if fa[0] == fb[0] == "bundle" and fa[1] != fb[1]:
         return False
@@ -1624,6 +1814,9 @@ def merge_equivalent_cross_source_offers(rows):
                 best.get("purchase_condition"),
                 best.get("deal_type"),
                 flags,
+                product_text=best.get("product_text"),
+                original_product_text=best.get("original_product_text"),
+                raw_line=best.get("raw_line"),
             )
             best.update(discount)
             best["price_quality_flag"] = " | ".join(pipe_unique(flags)) or None
@@ -1817,6 +2010,8 @@ def export_quality_gate_issues(row):
     discount = as_decimal(row.get("discount_percent"))
     if discount is not None and (discount < 0 or discount > 100):
         issues.append("product_discount_out_of_range")
+    if row.get("discount_percent_basis") == "cross_sku_bundle_review" or "cross_sku_gift_not_product_discount" in str(row.get("price_quality_flag") or ""):
+        issues.append("cross_sku_gift_bundle_requires_review")
     if discount is not None and "discount_without_matching_offer_evidence" in price_flags:
         issues.append("product_discount_missing_matching_offer_evidence")
     consistency_issue = discount_price_consistency_issue(row)
@@ -1885,6 +2080,13 @@ def _quarantine_for_export_gate(row, issues):
             row["discount_savings_rp"] = None
             row["discount_evidence_text"] = None
             row["discount_percent_basis"] = "not_available"
+            row["discount_percent_confidence"] = "unknown"
+        if "cross_sku_gift_bundle_requires_review" in issues:
+            row["discount_percent"] = None
+            row["discount_percent_calculated"] = None
+            row["discount_savings_rp"] = None
+            row["estimated_bundle_discount_percent"] = None
+            row["discount_percent_basis"] = "cross_sku_bundle_review"
             row["discount_percent_confidence"] = "unknown"
         if "promo_price_above_normal_price" in issues and row.get("discount_percent_basis") == "calculated_from_unit_prices":
             row["discount_percent"] = None
@@ -2113,7 +2315,7 @@ def write_audit_rows(path, rows):
 
 
 POSSIBLE_DUPLICATE_FIELDS = [
-    "Kemiripan Nama (%)", "Produk A", "Produk B", "Merchant A", "Merchant B",
+    "Prioritas Review", "Kemiripan Nama (%)", "Produk A", "Produk B", "Merchant A", "Merchant B",
     "Harga Promo A (Rp)", "Harga Promo B (Rp)", "Harga Normal A (Rp)", "Harga Normal B (Rp)",
     "Periode A", "Periode B", "Penawaran A", "Penawaran B", "Sumber A", "Sumber B",
     "Alasan", "Tindakan",
@@ -2211,7 +2413,9 @@ def build_possible_duplicate_rows(rows, max_pairs=500):
                 if pair_key in seen_pairs:
                     continue
                 seen_pairs.add(pair_key)
+                priority = "Tinggi" if score >= 0.93 else ("Sedang" if score >= 0.88 else "Rendah")
                 candidates.append({
+                    "Prioritas Review": priority,
                     "Kemiripan Nama (%)": round(score * 100, 1),
                     "Produk A": a.get("product_text"),
                     "Produk B": b.get("product_text"),
@@ -2230,7 +2434,8 @@ def build_possible_duplicate_rows(rows, max_pairs=500):
                     "Alasan": _candidate_reason(a, b, score),
                     "Tindakan": "Jangan gabungkan otomatis; periksa sumber dan syarat promo",
                 })
-    candidates.sort(key=lambda row: (-float(row["Kemiripan Nama (%)"]), str(row.get("Merchant A") or "").casefold(), str(row.get("Produk A") or "").casefold()))
+    priority_rank = {"Tinggi": 0, "Sedang": 1, "Rendah": 2}
+    candidates.sort(key=lambda row: (priority_rank.get(row.get("Prioritas Review"), 9), -float(row["Kemiripan Nama (%)"]), str(row.get("Merchant A") or "").casefold(), str(row.get("Produk A") or "").casefold()))
     return candidates[:max_pairs]
 
 
@@ -2565,7 +2770,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     ws.append(POSSIBLE_DUPLICATE_FIELDS)
     for row in possible_duplicate_rows:
         ws.append([row.get(h) for h in POSSIBLE_DUPLICATE_FIELDS])
-    candidate_widths = [16, 38, 38, 18, 18, 16, 16, 16, 16, 24, 24, 44, 44, 60, 60, 56, 48]
+    candidate_widths = [16, 16, 38, 38, 18, 18, 16, 16, 16, 16, 24, 24, 44, 44, 60, 60, 56, 48]
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="9C6500")
@@ -2574,12 +2779,12 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ws.column_dimensions[get_column_letter(idx)].width = width
         for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
             cell = col_cells[0]
-            cell.alignment = Alignment(vertical="top", wrap_text=idx not in {1, 6, 7, 8, 9})
-            if idx in {1}:
+            cell.alignment = Alignment(vertical="top", wrap_text=idx not in {2, 7, 8, 9, 10})
+            if idx in {2}:
                 cell.number_format = '0.0"%"'
-            elif idx in {6, 7, 8, 9}:
+            elif idx in {7, 8, 9, 10}:
                 cell.number_format = '#,##0'
-    ws.freeze_panes = "B2"
+    ws.freeze_panes = "C2"
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
 
@@ -2881,6 +3086,13 @@ def main():
         "product_name_variant_groups": len(name_variant_rows),
         "possible_duplicate_candidate_pairs": len(possible_duplicate_rows),
         "possible_duplicate_high_similarity_pairs": sum(float(r.get("Kemiripan Nama (%)") or 0) >= 93 for r in possible_duplicate_rows),
+        "possible_duplicate_review_priority_counts": dict(Counter(r.get("Prioritas Review") or "Tidak diketahui" for r in possible_duplicate_rows)),
+        "merchant_resolution_method_counts_current": dict(Counter(r.get("merchant_resolution_method") or "tidak tercatat" for r in current)),
+        "cross_sku_gift_rows_in_review": sum(
+            r.get("discount_percent_basis") == "cross_sku_bundle_review"
+            or "cross_sku_gift_not_product_discount" in str(r.get("price_quality_flag") or "")
+            for r in review
+        ),
         "discount_basis_counts_current": dict(discount_basis),
         "merchant_counts_current": dict(merchant_counts),
         "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
@@ -2895,6 +3107,7 @@ def main():
             "price_provenance": "A price is only retained when the same amount can be traced to visible offer text or raw line; otherwise the row is routed to review",
             "source_verification": "aggregator_only / secondary_public_articles are distinct from retailer_verified; never imply official retailer verification",
             "buy_x_free_y": "separate low-confidence estimate assuming the free item has the same value; not a confirmed discount",
+            "cross_sku_gift": "if named gift item differs from the SKU on the row, bundle estimate is cleared as product discount and row is routed to review",
             "campaign_title_percent": "stored separately and never copied to every product row",
         },
     }

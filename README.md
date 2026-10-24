@@ -8,7 +8,7 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 > **Penting:** data Hemat.id, Katalogpromosi.com, dan Scanharga.com merupakan data agregator/konten. Data tidak otomatis dikonfirmasi oleh retailer resmi. Gunakan kolom sumber dan status verifikasi sebelum menjadikan harga sebagai referensi final.
 
-> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, serta guardrail tambahan untuk judul artikel, syarat minimum belanja, jumlah benefit pembayaran QRIS, pemulihan nama SKU terpotong, serta gerbang kualitas sebelum ekspor. Kolom `Status Validasi Produk` kini terpisah dari `Status Promo`; merchant tidak dikenal, kategori yang belum yakin, dan sinyal harga berisiko dialihkan ke `Perlu Review`. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Quality Gate v2 kini juga membedakan kesegaran per baris dan status katalog yang dipertahankan, menandai diskon tertulis yang berbeda dari hitungan harga, serta melindungi penawaran dengan kuantitas pembelian berbeda agar tidak tergabung. Tes offline build ini: 72 passed.
+> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, serta guardrail tambahan untuk judul artikel, syarat minimum belanja, jumlah benefit pembayaran QRIS, pemulihan nama SKU terpotong, serta gerbang kualitas sebelum ekspor. Kolom `Status Validasi Produk` kini terpisah dari `Status Promo`; merchant tidak dikenal, kategori yang belum yakin, dan sinyal harga berisiko dialihkan ke `Perlu Review`. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Quality Gate v2 membedakan kesegaran per baris dan status katalog yang dipertahankan, serta menandai diskon tertulis yang berbeda dari hitungan harga. Quality Gate v3 menyelesaikan merchant generik hanya saat konteks judul/URL konsisten, memisahkan estimasi hadiah lintas-SKU dari diskon produk, dan memprioritaskan review kandidat duplikat. Tes offline build ini: 79 passed.
 
 ---
 
@@ -53,6 +53,14 @@ Enhancer menjalankan `apply_export_quality_gate()` sebelum menulis katalog final
 - Jika nominal harga tidak bisa dipertanggungjawabkan sebagai harga produk, kolom harga terkait dikosongkan di tampilan katalog; teks penawaran dan sumber tetap dipertahankan untuk audit. Flag bundling yang memang berupa estimasi tetap diberi catatan, bukan disamakan dengan harga satuan.
 - Sebelum workbook/CSV ditimpa, gate melakukan pemeriksaan kedua pada semua baris yang akan masuk katalog aktif. Bila masih ada blocker, pipeline berhenti dan hasil katalog lama tidak ditimpa.
 - Rincian jumlah baris dialihkan dan alasan tiap baris dicatat di `_internal/promo_export_quality_gate_report.json` serta diringkas di `_internal/promo_catalog_multisource_quality_report.json`.
+
+## Quality Gate v3: merchant, hadiah lintas-SKU, dan prioritas duplikat
+
+- **Resolusi merchant dari konteks artikel:** label generik seperti `Lainnya` tidak lagi dipertahankan seolah merchant valid. Alias di judul/URL dapat digunakan bila konteksnya konsisten menunjuk satu merchant; nama yang ambigu tetap tidak ditebak dan akan masuk review. Merchant baru tetap dapat diinferensikan dari judul kampanye yang jelas.
+- **Hadiah lintas-SKU:** estimasi `Beli X Gratis Y` hanya boleh menjadi estimasi kasar untuk barang yang diasumsikan sama nilainya. Bila teks menyebut item hadiah berbeda dari SKU pada baris (misalnya tissue 400 g dengan hadiah travel pack), persentase estimasi dikosongkan, alasan disimpan, dan baris dialihkan ke `Perlu Review`.
+- **Deduplikasi penawaran:** dua penawaran yang menyebut SKU hadiah berbeda tidak digabung otomatis. Perbedaan rasio pembelian tetap dilindungi seperti pada v2.
+- **Prioritas review kandidat duplikat:** sheet `Kemungkinan Duplikat` dan CSV kandidat menambahkan `Prioritas Review` (`Tinggi`, `Sedang`, `Rendah`) yang diurutkan berdasarkan kemiripan nama. Ini adalah antrean review, bukan perintah penggabungan otomatis.
+- **Laporan audit:** laporan kualitas mencatat metode resolusi merchant, jumlah baris hadiah lintas-SKU di review, dan distribusi prioritas kandidat duplikat.
 
 ## 🧭 Quality Gate v2: kesegaran, diskon, dan tier penawaran
 

@@ -120,3 +120,25 @@ Perubahan lanjutan setelah audit log run live pengguna:
 - Uji ekspor lokal menghasilkan kolom `Kesegaran Data`, `Waktu Scrape`, dan `Klaim Diskon Sumber (Review) (%)`.
 
 **Batas verifikasi:** tidak ada scraping live setelah perubahan ini. Pengujian menggunakan kode, tes, dan cache lokal; data live perlu divalidasi setelah pengguna menjalankan paket Quality Gate v2 di Windows. Output runtime lama tidak disertakan dalam ZIP final agar tidak disalahartikan sebagai data live baru.
+
+
+## Quality Gate v3 — merchant, hadiah lintas-SKU, dan review duplikat
+
+Perbaikan diterapkan setelah audit `diagnostic-v2.zip` pengguna.
+
+1. **Merchant generik dibereskan secara konservatif.** Nilai `Lainnya`/`UNKNOWN`/kosong tidak lagi disimpan sebagai merchant seakan-akan sudah teridentifikasi. Enhancer memeriksa alias merchant yang jelas di judul, slug URL, dan judul sumber terkait. Jika satu merchant konsisten disebut, ia direkonstruksi dan `merchant_resolution_method` mencatat metode. Jika konteks menyebut lebih dari satu merchant yang tidak dapat diselesaikan, merchant tetap kosong agar quality gate mengarahkan row ke review. Inferensi nama merchant baru dari judul promo tetap didukung.
+2. **Hadiah lintas-SKU tidak disajikan sebagai diskon produk.** Jika penawaran mengandung nama barang hadiah yang token SKU-nya berbeda material dari nama produk pada row, estimasi matematika `Beli X Gratis Y` ditandai `cross_sku_bundle_review`; kolom diskon produk dan estimasi bundle dikosongkan, bukti penawaran tetap dipertahankan, dan row diarahkan ke review. Mekanisme generik `Beli 1 Gratis 1` tanpa nama SKU hadiah eksplisit masih dapat tercatat sebagai estimasi berkeyakinan rendah. Klaim diskon eksplisit yang berdiri sendiri tidak otomatis dihapus hanya karena hadiah juga disebut.
+3. **Deduplikasi melindungi identitas hadiah.** Jika satu sumber menyebut hadiah SKU berbeda dari sumber lain, atau hanya salah satu sumber menjelaskan SKU hadiah, penawaran tidak di-merge secara otomatis.
+4. **Antrean kandidat duplikat mendapat prioritas.** Kolom `Prioritas Review` ditambahkan ke sheet `Kemungkinan Duplikat` dan CSV kandidat: `Tinggi` untuk kemiripan nama ≥93%, `Sedang` untuk ≥88% dan <93%, dan `Rendah` untuk nilai di bawah 88% sampai ambang kandidat 84%. Urutan tidak mengubah data maupun melakukan merge otomatis.
+5. **Laporan quality gate diperluas** untuk mencatat jumlah per metode resolusi merchant, hitungan hadiah lintas-SKU pada review, dan distribusi prioritas kandidat duplikat.
+
+### Verifikasi v3
+
+- `python -m compileall -q engine`: lulus.
+- `python -m pytest -q engine`: **79 passed**.
+- Self-test normalisasi nama, parser/guardrails, dan deduplikasi: lulus.
+- Ekspor lokal sudah dijalankan dari kode v3: workbook valid dengan 11 sheet; quality gate `passed`; CSV tidak memiliki nama produk kosong atau merchant kosong/`UNKNOWN` dalam katalog aktif.
+
+**Bukti pada data lokal:** baris `Duo Bakso A/B` yang sebelumnya bermerchant `Lainnya` sekarang ter-resolve menjadi `Es Teler 77` dari judul dan URL yang konsisten. Skenario hadiah silang `Indomaret Facial Tissue Non Perfumed 400 g` vs `INDOMARET Travel Pack Tissue 50’s` ditambahkan sebagai regresi dan estimasi diskon bundle tidak lagi diterbitkan sebagai diskon SKU utama. Pada baseline lokal yang diuji, tidak terdapat baris live tersebut yang tersimpan sebagai data terbaru sehingga hitungan baris hadiah lintas-SKU pada report baseline tetap 0; kasusnya diverifikasi melalui tes khusus.
+
+**Batas verifikasi:** perubahan ini belum diuji dengan scraping live baru; pengujian memakai regresi dan data lokal. Merchant yang tidak dapat ditentukan secara eksplisit tetap perlu review—tidak ada allow-list baru yang menolak merchant baru.
