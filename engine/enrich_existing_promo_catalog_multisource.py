@@ -17,7 +17,10 @@ from promo_names import (
     product_name_size_signature, product_name_variant_signature,
     product_name_identity_warnings,
 )
-from promo_product_validation import product_candidate_rejection_reason
+from promo_product_validation import product_candidate_rejection_reason, product_candidate_review_reason
+from promo_multisource_collector import infer_merchant_dynamic
+from promo_evidence import find_amount_evidence, find_discount_evidence, extract_period_evidence, period_certainty, source_verification_label
+from promo_categories import CATEGORY_TAXONOMY, CATEGORY_NAMES, classify_promo_category
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ENGINE_DIR.parent
@@ -63,20 +66,21 @@ if _missing_functions:
 TODAY = scraper.TODAY
 
 FIELDS = [
-    "product_text", "original_product_text", "product_name_variants", "merchant_name", "campaign_title", "campaign_type",
+    "product_text", "original_product_text", "product_name_variants", "product_category", "product_subcategory", "merchant_name", "campaign_title", "campaign_type",
     "promo_status", "valid_from", "valid_until", "period_precision",
-    "period_flags", "matched_period_text", "period_evidence_text", "period_evidence_source", "published_at",
+    "period_flags", "matched_period_text", "period_evidence_text", "period_evidence_source", "period_certainty", "published_at",
     "promo_price", "normal_price", "discount_percent", "discount_percent_basis",
     "discount_percent_confidence", "discount_percent_calculated", "discount_savings_rp",
     "estimated_bundle_discount_percent", "campaign_discount_percent",
-    "campaign_discount_basis", "price_parse_method", "price_basis", "price_evidence_text", "discount_evidence_text",
+    "promo_price_evidence_text", "normal_price_evidence_text", "discount_evidence_text",
+    "campaign_discount_basis", "price_parse_method", "price_basis",
     "purchase_condition", "deal_type", "offer_text", "section",
     "source_url", "source_urls", "source_campaign_titles", "source_dataset",
-    "source_name", "source_names", "source_type", "verification_status", "merchant_resolution_method",
+    "source_name", "source_names", "source_type", "verification_status", "source_verification_label", "merchant_resolution_method",
     "source_page_url", "source_item_url", "region_or_channel", "scraped_at",
     "duplicate_count", "duplicate_group_id", "cross_dataset_duplicate", "overlapping_offer_count",
     "overlap_period_flag", "price_quality_flag", "data_quality_flags", "retained_from_previous_run", "raw_line",
-    "product_validation_status", "product_rejection_reason",
+    "product_validation_status", "product_rejection_reason", "product_review_reason",
 ]
 
 
@@ -192,7 +196,7 @@ def truthy(value):
 
 def canonical_merchant(value, title):
     value = (value or "").strip()
-    inferred = scraper.infer_merchant(title or "")
+    inferred = infer_merchant_dynamic(title or "")
     if not value or value.casefold() in {"lainnya", "unknown", "null", "none"}:
         return inferred or (value if value else None)
     canonical_map = {
@@ -293,22 +297,6 @@ def period_meta(row, title):
     elif precision == "unknown" and (start or end):
         flags = pipe_unique([*flags, "incomplete_period_dates"])
 
-    # An exact-looking pair of dates is not enough by itself: keep it confirmed
-    # only when its evidence phrase can be traced to the article title or source
-    # metadata. This prevents historical CSV dates with missing provenance from
-    # being treated as confirmed current promotions.
-    if precision in exact_precisions and not matched:
-        title_matches_dates = (
-            title_precision in exact_precisions
-            and title_meta.get("valid_from") == start
-            and title_meta.get("valid_until") == end
-        )
-        if title_matches_dates:
-            matched = title_meta.get("matched_period_text")
-        else:
-            precision = "unverified"
-            flags = pipe_unique([*flags, "period_precision_missing_source_evidence"])
-
     # Periode berakhir pada suatu tanggal tanpa awal yang jelas memakai tanggal publikasi
     # hanya sebagai lower bound dan tetap berstatus estimasi.
     if precision == "until" and not start and row.get("published_at"):
@@ -342,6 +330,8 @@ def current_status(start, end, precision, period_flags=None, source_status=None)
             return "active_estimated"
         return "unknown"
     status = scraper.promo_status(start, end, precision)
+    if (precision or "").casefold() == "unverified" and status == "upcoming":
+        status = "upcoming_estimated"
     flags = set(pipe_unique([period_flags or ""]))
     material_conflict = any(
         marker in flags
@@ -349,8 +339,6 @@ def current_status(start, end, precision, period_flags=None, source_status=None)
             "title_lead_period_differs",
             "title_period_mismatch_with_catalog_dates",
             "source_dates_differ_from_title_period",
-            "title_visible_period_differs",
-            "title_context_period_differs",
         )
     )
     if material_conflict and status == "active":
@@ -472,6 +460,42 @@ def momsmoney_fresh_input() -> tuple[Path | None, str]:
     return None, f"tidak ada kandidat Momsmoney segar yang aman dimuat; {output_note}"
 
 
+def _validated_value_evidence(raw, amount, evidence_field, kind, fallback_texts):
+    """Return matching source evidence; reconstruct from visible offer text if possible."""
+    evidence = str(raw.get(evidence_field) or "").strip()
+    if amount in (None, ""):
+        return evidence or None, None
+    matching = find_amount_evidence(evidence, amount, kind) if evidence else None
+    if matching:
+        return matching, None
+    for source_text in fallback_texts:
+        matching = find_amount_evidence(source_text, amount, kind)
+        if matching:
+            return matching, f"{evidence_field}_reconstructed_from_visible_offer_text"
+    return None, f"{evidence_field}_missing_or_mismatched"
+
+
+def _period_provenance(raw, title, offer, raw_line, start, end, precision, flags, matched):
+    evidence = str(raw.get("period_evidence_text") or "").strip() or matched
+    evidence_source = str(raw.get("period_evidence_source") or "").strip() or None
+    if evidence:
+        extracted, extracted_source = extract_period_evidence(title, " ".join([offer, raw_line, evidence]), precision, evidence)
+        if extracted:
+            evidence = extracted
+            evidence_source = evidence_source or extracted_source
+        else:
+            evidence = None
+            evidence_source = None
+    if not evidence:
+        evidence, evidence_source = extract_period_evidence(
+            title, " ".join([offer, raw_line, str(raw.get("published_at") or "")]), precision
+        )
+    if precision in {"range", "single_day"} and not evidence:
+        precision = "unverified"
+        flags = pipe_unique([*flags, "period_evidence_missing_unverified"])
+    return evidence or None, evidence_source, precision, flags
+
+
 def load_source(path, source_label):
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
@@ -482,8 +506,7 @@ def load_source(path, source_label):
         merchant = canonical_merchant(raw.get("merchant_name") or raw.get("merchant"), title)
         original_product = (raw.get("original_product_text") or raw.get("product_text") or "").strip()
         product = clean_product_name(raw.get("product_text") or original_product)
-        raw_offer = (raw.get("offer_text") or raw.get("detail") or "").strip()
-        offer = raw_offer
+        offer = (raw.get("offer_text") or raw.get("detail") or "").strip()
         raw_line = (raw.get("raw_line") or "").strip()
         if not offer:
             offer = raw_line
@@ -494,35 +517,39 @@ def load_source(path, source_label):
         deal_type = derive_deal_type(offer, raw.get("deal_type"))
 
         start, end, precision, period_flags, matched = period_meta(raw, title)
+        period_flags_list = pipe_unique([period_flags or ""])
+        period_evidence, period_evidence_source, precision, period_flags_list = _period_provenance(
+            raw, title, offer, raw_line, start, end, precision, period_flags_list, matched
+        )
+        period_flags = " | ".join(period_flags_list) or None
         status = current_status(start, end, precision, period_flags, raw.get("promo_status"))
 
         # Calculate product-level discount from the SKU's offer text only.
         quality_flags = pipe_unique([raw.get("price_quality_flag") or ""])
-        price_evidence = (raw.get("price_evidence_text") or raw_offer or "").strip()
-        normalized_offer_evidence = norm_key(raw_offer)
-        normalized_price_evidence = norm_key(price_evidence)
-        evidence_belongs_to_offer = bool(raw_offer) and (
-            not raw.get("price_evidence_text")
-            or bool(normalized_price_evidence and normalized_price_evidence == normalized_offer_evidence)
+        provenance_review_reasons = []
+        evidence_fallbacks = [offer, raw_line]
+        promo_evidence, promo_evidence_issue = _validated_value_evidence(
+            raw, promo, "promo_price_evidence_text", "promo", evidence_fallbacks
         )
-        has_price_evidence = evidence_belongs_to_offer and bool(re.search(
-            r"\b(?:rp\.?\s*\d|harga\s+(?:normal|promo|spesial|setelah\s+diskon)\s*[:\-]?\s*\d)",
-            raw_offer,
-            re.IGNORECASE,
-        ))
-        if (promo is not None or normal is not None) and not has_price_evidence:
-            # Do not preserve detached numeric values from legacy/combined rows
-            # when the offer segment itself does not contain price evidence.
-            quality_flags = pipe_unique([*quality_flags, "price_without_offer_evidence_routed_to_review"])
+        normal_evidence, normal_evidence_issue = _validated_value_evidence(
+            raw, normal, "normal_price_evidence_text", "normal", evidence_fallbacks
+        )
+        if promo_evidence_issue == "promo_price_evidence_text_reconstructed_from_visible_offer_text":
+            quality_flags = pipe_unique([*quality_flags, promo_evidence_issue])
+        elif promo_evidence_issue:
             promo = None
+            quality_flags = pipe_unique([*quality_flags, "promo_price_without_matching_offer_evidence"])
+            provenance_review_reasons.append("Harga promo tidak memiliki bukti teks yang cocok")
+        if normal_evidence_issue == "normal_price_evidence_text_reconstructed_from_visible_offer_text":
+            quality_flags = pipe_unique([*quality_flags, normal_evidence_issue])
+        elif normal_evidence_issue:
             normal = None
-            basis = "no_single_price"
+            quality_flags = pipe_unique([*quality_flags, "normal_price_without_matching_offer_evidence"])
+            provenance_review_reasons.append("Harga normal tidak memiliki bukti teks yang cocok")
         if raw.get("promo_price") not in (None, "") and promo is None:
-            if has_price_evidence:
-                quality_flags = pipe_unique([*quality_flags, "promo_price_parse_failed"])
+            quality_flags = pipe_unique([*quality_flags, "promo_price_parse_failed_or_unverified"])
         if raw.get("normal_price") not in (None, "") and normal is None:
-            if has_price_evidence:
-                quality_flags = pipe_unique([*quality_flags, "normal_price_parse_failed"])
+            quality_flags = pipe_unique([*quality_flags, "normal_price_parse_failed_or_unverified"])
         if promo is not None and normal is not None and promo > normal:
             quality_flags = pipe_unique([*quality_flags, "promo_price_above_normal_review"])
         discount = safe_discount_fields(
@@ -535,6 +562,52 @@ def load_source(path, source_label):
             quality_flags=quality_flags,
         )
         campaign_disc, campaign_disc_basis = campaign_discount(title)
+        discount_evidence = str(raw.get("discount_evidence_text") or "").strip() or None
+        if discount["discount_percent"] not in (None, ""):
+            if discount["discount_percent_basis"] in {"explicit_offer", "explicit_max"}:
+                discount_evidence = find_discount_evidence(offer, discount["discount_percent"])
+                if not discount_evidence:
+                    discount["discount_percent"] = None
+                    discount["discount_percent_basis"] = "not_available"
+                    discount["discount_percent_confidence"] = "unknown"
+                    quality_flags = pipe_unique([*quality_flags, "discount_without_matching_offer_evidence"])
+                    provenance_review_reasons.append("Diskon persen tidak memiliki bukti pada teks penawaran produk")
+            elif discount["discount_percent_basis"] == "calculated_from_unit_prices":
+                if promo is not None and normal is not None and promo_evidence and normal_evidence:
+                    discount_evidence = f"Harga normal: {normal_evidence} | Harga promo: {promo_evidence}"
+                else:
+                    discount["discount_percent"] = None
+                    discount["discount_percent_calculated"] = None
+                    discount["discount_savings_rp"] = None
+                    discount["discount_percent_basis"] = "not_available"
+                    discount["discount_percent_confidence"] = "unknown"
+                    quality_flags = pipe_unique([*quality_flags, "calculated_discount_without_two_price_evidence_values"])
+                    provenance_review_reasons.append("Diskon hitungan memerlukan bukti harga normal dan promo")
+            elif discount["discount_percent_basis"] == "bundle_estimate_same_item_value":
+                discount_evidence = offer if re.search(r"\b(?:beli|buy)\s*\d+.*?(?:gratis|get)\s*\d+", offer, re.I) else None
+        if not discount_evidence:
+            discount_evidence = None
+
+        source_name_value = (raw.get("source_name") or "").strip()
+        source_type_value = (raw.get("source_type") or "").strip()
+        if not source_name_value:
+            if "promo_catalog_all_merchants" in source_label.casefold() or "momsmoney" in source_label.casefold() or "momsmoney" in original_product.casefold():
+                source_name_value = "Momsmoney/Kontan"
+        if not source_type_value:
+            if source_name_value.casefold().startswith("momsmoney") or "promo_catalog_all_merchants" in source_label.casefold() or "momsmoney" in source_label.casefold():
+                source_type_value = "secondary_public_articles"
+            elif "promo_multisource" in source_label.casefold() or source_name_value in {"Hemat.id", "Katalogpromosi.com", "Scanharga.com"}:
+                source_type_value = "aggregator"
+        source_name_value = source_name_value or None
+        source_type_value = source_type_value or None
+        verification_status_value = (raw.get("verification_status") or "").strip()
+        if not verification_status_value:
+            if source_type_value == "secondary_public_articles":
+                verification_status_value = "secondary_public_articles"
+            elif source_type_value == "aggregator" or "promo_multisource" in source_label.casefold():
+                verification_status_value = "aggregator_only"
+            else:
+                verification_status_value = "historical_baseline_unknown"
 
         price_method = (raw.get("price_parse_method") or "").strip()
         if not price_method:
@@ -560,21 +633,20 @@ def load_source(path, source_label):
             "period_precision": precision,
             "period_flags": period_flags,
             "matched_period_text": matched,
-            "period_evidence_text": (raw.get("period_evidence_text") or matched or "").strip() or None,
-            "period_evidence_source": (
-                (raw.get("period_evidence_source") or "").strip()
-                or ("campaign_title" if matched and title and matched in title else "source_period_metadata" if matched else "unverified_legacy")
-            ),
+            "period_evidence_text": period_evidence,
+            "period_evidence_source": period_evidence_source,
+            "period_certainty": period_certainty(precision, status, period_flags, period_evidence),
             "published_at": (raw.get("published_at") or "").strip() or None,
             "promo_price": promo,
             "normal_price": normal,
+            "promo_price_evidence_text": promo_evidence,
+            "normal_price_evidence_text": normal_evidence,
+            "discount_evidence_text": discount_evidence,
             **discount,
             "campaign_discount_percent": campaign_disc,
             "campaign_discount_basis": campaign_disc_basis,
             "price_parse_method": price_method,
             "price_basis": basis or None,
-            "price_evidence_text": price_evidence if has_price_evidence and (promo is not None or normal is not None) else None,
-            "discount_evidence_text": offer if discount.get("discount_percent") is not None else None,
             "purchase_condition": purchase_condition,
             "deal_type": deal_type,
             "offer_text": offer or None,
@@ -583,13 +655,11 @@ def load_source(path, source_label):
             "source_urls": (raw.get("source_urls") or "").strip() or None,
             "source_campaign_titles": (raw.get("source_campaign_titles") or "").strip() or None,
             "source_dataset": source_label,
-            "source_name": ((raw.get("source_name") or "").strip()
-                            or ("Momsmoney/Kontan" if "promo_catalog_all_merchants" in source_label.casefold() else None)),
+            "source_name": source_name_value,
             "source_names": (raw.get("source_names") or "").strip() or None,
-            "source_type": ((raw.get("source_type") or "").strip()
-                            or ("secondary_public_articles" if "promo_catalog_all_merchants" in source_label.casefold() else None)),
-            "verification_status": (raw.get("verification_status") or "").strip()
-                                   or ("aggregator_only" if "promo_catalog_all_merchants" in source_label.casefold() else None),
+            "source_type": source_type_value,
+            "verification_status": verification_status_value,
+            "source_verification_label": source_verification_label(verification_status_value),
             "merchant_resolution_method": (raw.get("merchant_resolution_method") or "").strip() or None,
             "source_page_url": (raw.get("source_page_url") or "").strip() or None,
             "source_item_url": (raw.get("source_item_url") or "").strip() or None,
@@ -608,9 +678,11 @@ def load_source(path, source_label):
                 "missing_source_url" if not raw.get("source_url") else "",
                 "retained_from_previous_run" if truthy(raw.get("retained_from_previous_run")) else "",
                 "discount_is_estimated" if discount["discount_percent_basis"] == "bundle_estimate_same_item_value" else "",
+                *provenance_review_reasons,
             ])) or None,
             "raw_line": raw_line or None,
         }
+        row["product_category"], row["product_subcategory"] = classify_promo_category(row)
         validation_context = dict(row)
         validation_context["source_mode"] = " ".join([
             source_label,
@@ -618,12 +690,23 @@ def load_source(path, source_label):
             str(row.get("source_type") or ""),
         ])
         reject_reason = product_candidate_rejection_reason(validation_context, source_mode=validation_context["source_mode"])
-        row["product_validation_status"] = "rejected" if reject_reason else "eligible"
+        review_reason = None if reject_reason else product_candidate_review_reason(
+            validation_context, source_mode=validation_context["source_mode"]
+        )
+        if not reject_reason and provenance_review_reasons:
+            review_reason = " | ".join(pipe_unique([review_reason or "", *provenance_review_reasons]))
+        row["product_validation_status"] = "rejected" if reject_reason else ("review" if review_reason else "eligible")
         row["product_rejection_reason"] = reject_reason
+        row["product_review_reason"] = review_reason
         if reject_reason:
             row["data_quality_flags"] = " | ".join(pipe_unique([
                 row.get("data_quality_flags") or "",
                 "excluded_from_catalog:" + reject_reason,
+            ])) or None
+        elif review_reason:
+            row["data_quality_flags"] = " | ".join(pipe_unique([
+                row.get("data_quality_flags") or "",
+                "product_identity_review:" + review_reason,
             ])) or None
         output.append(row)
     return output
@@ -654,6 +737,14 @@ def merge_rows(rows):
                 "merchant_name", "source_url",
             )) + (2 if r.get("source_dataset") == OLD_CSV.name else 0)
         best = dict(max(group, key=score))
+        validation_statuses = {str(r.get("product_validation_status") or "eligible") for r in group}
+        # Any independent source with stronger product evidence can corroborate an
+        # ambiguous label; otherwise keep it routed to review rather than confirmed.
+        best["product_validation_status"] = "eligible" if "eligible" in validation_statuses else (
+            "review" if "review" in validation_statuses else "rejected"
+        )
+        review_reasons = pipe_unique([r.get("product_review_reason") or "" for r in group])
+        best["product_review_reason"] = " | ".join(review_reasons) or None
         raw_name_variants = []
         for candidate in group:
             raw_name_variants.extend(name_variants(candidate.get("product_name_variants")))
@@ -1366,8 +1457,6 @@ PERIOD_CONFLICT_MARKERS = (
     "title_lead_period_differs",
     "title_period_mismatch_with_catalog_dates",
     "source_dates_differ_from_title_period",
-    "title_visible_period_differs",
-    "title_context_period_differs",
 )
 
 
@@ -1379,12 +1468,16 @@ def has_material_period_conflict(row):
 # Main catalog uses a compact, user-friendly column order; technical fields remain in OUT_FULL.
 CLEAN_COLUMNS = [
     ("Nama Produk", "product_text"),
+    ("Kategori Produk", "product_category"),
+    ("Subkategori", "product_subcategory"),
     ("Harga Asli (Rp)", "normal_price"),
     ("Harga Promo (Rp)", "promo_price"),
     ("Diskon (%)", "discount_percent"),
     ("Merchant", "merchant_name"),
     ("Hemat (Rp)", "discount_savings_rp"),
     ("Status Promo", "display_status"),
+    ("Kepastian Periode", "period_certainty"),
+    ("Verifikasi Sumber", "source_verification_label"),
     ("Mulai Berlaku", "valid_from"),
     ("Berakhir", "valid_until"),
     ("Jenis Promo", "display_deal_type"),
@@ -1452,6 +1545,7 @@ def make_clean_row(row, review=False):
     item = dict(row)
     item["display_status"] = display_status(row)
     item["display_deal_type"] = row.get("deal_type") or row.get("campaign_type") or ""
+    item["product_category"], item["product_subcategory"] = classify_promo_category(row)
     item["display_notes"] = display_notes(row)
     out = {label: item.get(key) for label, key in CLEAN_COLUMNS}
     if review:
@@ -1460,6 +1554,8 @@ def make_clean_row(row, review=False):
         if has_material_period_conflict(row): reasons.append("Konflik tanggal judul/sumber")
         elif "period_taken_from_lead" in str(row.get("period_flags") or ""): reasons.append("Tanggal diambil dari paragraf pembuka")
         if row.get("price_quality_flag"): reasons.append("Harga perlu diperiksa")
+        if row.get("product_validation_status") == "review" and row.get("product_review_reason"):
+            reasons.append("Identitas produk perlu diverifikasi: " + str(row.get("product_review_reason")))
         if row.get("discount_percent_confidence") == "low": reasons.append("Persentase diskon estimasi")
         if row.get("overlap_period_flag"): reasons.append("Penawaran serupa muncul pada beberapa artikel")
         if not row.get("merchant_name"): reasons.append("Merchant belum diketahui")
@@ -1690,14 +1786,15 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ["KATALOG PROMO MULTI-SUMBER", ""],
         ["Tanggal acuan", TODAY.isoformat()],
         ["Promo aktif (estimasi boleh)", len(current_rows)],
-        ["Promo aktif terkonfirmasi", len(confirmed_rows)],
+        ["Promo aktif dengan periode pasti (bukan verifikasi retailer)", len(confirmed_rows)],
         ["Baris perlu review", len(review_rows)],
         ["Kandidat non-produk ditolak", len(rejected_rows)],
         ["Kelompok variasi nama produk", len(name_variant_rows)],
         ["Kandidat duplikat untuk diperiksa", len(possible_duplicate_rows)],
+        ["Kategori utama", len(CATEGORY_TAXONOMY)],
         ["Sumber produk", "Hemat.id, Katalogpromosi.com, Scanharga.com, dan katalog lama"],
-        ["Catatan", "Promo agregator belum tentu diverifikasi retailer resmi."],
-        ["Petunjuk", "Buka sheet Aktif untuk katalog sehari-hari. Sheet Kemungkinan Duplikat membantu memeriksa produk mirip yang belum aman digabung."],
+        ["Catatan", "Kepastian periode dipisahkan dari verifikasi sumber; agregator dan artikel publik bukan verifikasi resmi retailer."],
+        ["Petunjuk", "Buka sheet Aktif untuk katalog sehari-hari. Gunakan filter Kategori Produk dan Subkategori untuk mencari jenis barang. Sheet Ringkasan Kategori menunjukkan jumlah promo aktif per kategori; Referensi Kategori berisi daftar 29 kategori yang digunakan."],
         ["File teknis", "Data mentah dan log tersimpan di folder _internal; tidak perlu dibuka untuk pemakaian harian."],
     ]
     for row in summary:
@@ -1715,9 +1812,59 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     ws.column_dimensions["B"].width = 90
     ws.sheet_view.showGridLines = False
 
+    # Summary counts make the taxonomy useful immediately, without changing any
+    # promo eligibility/status rules. Counts are from the current user-facing sheet.
+    category_totals = {name: 0 for name in CATEGORY_NAMES}
+    subcategory_totals = Counter()
+    for category_row in current_rows:
+        category_name, subcategory_name = classify_promo_category(category_row)
+        category_totals[category_name] = category_totals.get(category_name, 0) + 1
+        subcategory_totals[(category_name, subcategory_name)] += 1
+    total_current = len(current_rows)
+    ws = wb.create_sheet("Ringkasan Kategori")
+    ws.append(["Kategori Produk", "Jumlah Promo Aktif", "Proporsi"] )
+    for category_name in CATEGORY_NAMES:
+        count = category_totals.get(category_name, 0)
+        ws.append([category_name, count, (count / total_current) if total_current else 0])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 14
+    for row_idx in range(2, ws.max_row + 1):
+        ws.cell(row_idx, 3).number_format = '0.0%'
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
+
+    ws = wb.create_sheet("Referensi Kategori")
+    ws.append(["No.", "Kategori Utama", "Contoh Subkategori", "Panduan"] )
+    for idx, (category_name, examples) in enumerate(CATEGORY_TAXONOMY, start=1):
+        if category_name == "Lainnya / Perlu Review":
+            guidance = "Pakai hanya jika identitas barang/layanan tidak cukup jelas untuk kategori lain."
+        elif category_name == "Promo Umum / Multi-Kategori":
+            guidance = "Untuk rangkuman promo, kampanye umum atau promo lintas merchant yang bukan SKU individual."
+        else:
+            guidance = "Klasifikasikan dari nama barang/layanan; detail penawaran dan kampanye hanya menjadi konteks pendukung."
+        ws.append([idx, category_name, examples, guidance])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for column, width in {"A": 8, "B": 34, "C": 64, "D": 78}.items():
+        ws.column_dimensions[column].width = width
+    for row_cells in ws.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
+
     sheets = [
         ("Aktif", current_rows, False),
-        ("Terkonfirmasi", confirmed_rows, False),
+        ("Periode Pasti", confirmed_rows, False),
         ("Perlu Review", review_rows, True),
     ]
     for sheet_name, rows, is_review in sheets:
@@ -1728,7 +1875,15 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         clean_rows.sort(key=clean_sort_key)
         for row in clean_rows:
             ws.append([row.get(h) for h in headers])
-        widths = [38, 15, 15, 12, 18, 15, 22, 17, 17, 22, 52, 48, 56, 52] + ([50] if is_review else [])
+        width_by_header = {
+            "Nama Produk": 38, "Kategori Produk": 31, "Subkategori": 28, "Harga Asli (Rp)": 15, "Harga Promo (Rp)": 15,
+            "Diskon (%)": 12, "Merchant": 22, "Hemat (Rp)": 15, "Status Promo": 22,
+            "Kepastian Periode": 20, "Verifikasi Sumber": 34,
+            "Mulai Berlaku": 17, "Berakhir": 17, "Jenis Promo": 22,
+            "Detail Penawaran": 52, "Kampanye": 48, "Catatan": 56, "Sumber URL": 52,
+            "Alasan Review": 50,
+        }
+        widths = [width_by_header.get(header, 24) for header in headers]
         for cell in ws[1]:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = header_fill
@@ -1738,7 +1893,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
             field = headers[idx - 1]
             for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
                 cell = col_cells[0]
-                cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Review"})
+                cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Review"})
                 if field in {"Harga Asli (Rp)", "Harga Promo (Rp)", "Hemat (Rp)"}:
                     cell.number_format = '#,##0'
                 elif field == "Diskon (%)":
@@ -1760,7 +1915,15 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     rejected_clean_rows.sort(key=lambda r: ((r.get("Merchant") or "").casefold(), (r.get("Nama Produk") or "").casefold()))
     for row in rejected_clean_rows:
         ws.append([row.get(h) for h in rejected_headers])
-    rejected_widths = [38, 15, 15, 12, 18, 15, 22, 17, 17, 22, 52, 48, 56, 52, 48]
+    rejected_width_by_header = {
+        "Nama Produk": 38, "Kategori Produk": 31, "Subkategori": 28, "Harga Asli (Rp)": 15, "Harga Promo (Rp)": 15,
+        "Diskon (%)": 12, "Merchant": 22, "Hemat (Rp)": 15, "Status Promo": 22,
+        "Kepastian Periode": 20, "Verifikasi Sumber": 34,
+        "Mulai Berlaku": 17, "Berakhir": 17, "Jenis Promo": 22,
+        "Detail Penawaran": 52, "Kampanye": 48, "Catatan": 56,
+        "Sumber URL": 52, "Alasan Penolakan": 48,
+    }
+    rejected_widths = [rejected_width_by_header.get(header, 24) for header in rejected_headers]
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="7F6000")
@@ -1770,7 +1933,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         field = rejected_headers[idx - 1]
         for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
             cell = col_cells[0]
-            cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Penolakan"})
+            cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Penolakan"})
             if field in {"Harga Asli (Rp)", "Harga Promo (Rp)", "Hemat (Rp)"}:
                 cell.number_format = '#,##0'
             elif field == "Diskon (%)":
@@ -1824,6 +1987,85 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     return True
 
 
+def build_source_freshness_report(all_loaded_rows, now_dt=None):
+    """Summarize source freshness without treating missing timestamps as fresh."""
+    from collections import defaultdict
+    now_dt = now_dt or datetime.now().astimezone()
+    freshness_days = 7
+    per_source = defaultdict(list)
+
+    def split_values(*values):
+        result = []
+        for value in values:
+            for part in str(value or "").split(" | "):
+                part = part.strip()
+                if part and part not in result:
+                    result.append(part)
+        return result
+
+    for row in all_loaded_rows:
+        names = split_values(row.get("source_names"), row.get("source_name"))
+        if not names:
+            dataset = str(row.get("source_dataset") or "").strip()
+            if "momsmoney" in dataset.casefold():
+                names = ["Momsmoney/Kontan"]
+            elif "multi" in dataset.casefold():
+                names = ["Multi-source aggregator"]
+            else:
+                names = ["Historical baseline; source unknown"]
+        for name in names:
+            per_source[name].append(row)
+
+    output = {}
+    for name, rows in sorted(per_source.items(), key=lambda item: item[0].casefold()):
+        fresh = preserved = stale = unknown = 0
+        timestamped = 0
+        for row in rows:
+            retained = str(row.get("retained_from_previous_run", "")).strip().casefold() in {"true", "1", "yes"}
+            stamp = str(row.get("scraped_at") or "").strip()
+            if retained:
+                preserved += 1
+                continue
+            if not stamp:
+                unknown += 1
+                continue
+            try:
+                parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.astimezone()
+                age = now_dt - parsed.astimezone(now_dt.tzinfo)
+                timestamped += 1
+                if age.total_seconds() < 0:
+                    # Future timestamps are clock/config anomalies, not fresh evidence.
+                    unknown += 1
+                elif age.days <= freshness_days:
+                    fresh += 1
+                else:
+                    stale += 1
+            except (TypeError, ValueError, OverflowError):
+                unknown += 1
+        if fresh:
+            status = "fresh"
+        elif preserved:
+            status = "preserved_previous"
+        elif stale:
+            status = "stale"
+        elif unknown:
+            status = "historical_or_unverified"
+        else:
+            status = "no_rows"
+        output[name] = {
+            "status": status,
+            "row_count": len(rows),
+            "fresh_rows": fresh,
+            "preserved_previous_rows": preserved,
+            "stale_rows_over_7_days": stale,
+            "rows_missing_or_invalid_timestamp": unknown,
+            "rows_with_parseable_timestamp": timestamped,
+        }
+    return output
+
+
 def main():
     INTERNAL_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1855,15 +2097,18 @@ def main():
     current = [
         r for r in consolidated
         if r.get("promo_status") in {"active", "active_estimated"}
+        and r.get("product_validation_status") != "review"
         and not has_material_period_conflict(r)
     ]
     confirmed = [
         r for r in current
         if r.get("promo_status") == "active"
-        and r.get("period_precision") in {"range", "single_day"}
+        and r.get("period_certainty") == "confirmed"
+        and not has_material_period_conflict(r)
     ]
     review = [r for r in consolidated if (
-        r.get("promo_status") in {"active_estimated", "upcoming_estimated", "unknown"}
+        r.get("product_validation_status") == "review"
+        or r.get("promo_status") in {"active_estimated", "upcoming_estimated", "unknown"}
         or r.get("period_flags")
         or r.get("overlap_period_flag")
         or r.get("price_quality_flag")
@@ -1882,6 +2127,7 @@ def main():
 
     discount_basis = Counter(r.get("discount_percent_basis") or "not_available" for r in current)
     merchant_counts = Counter(r.get("merchant_name") or "UNKNOWN" for r in current)
+    source_freshness = build_source_freshness_report(all_loaded_rows)
     report = {
         "built_at": scraper.timestamp(),
         "reference_date": TODAY.isoformat(),
@@ -1898,6 +2144,15 @@ def main():
         "eligible_product_input_rows": len(input_rows),
         "rejected_non_product_rows": len(rejected_product_rows),
         "rejected_non_product_reasons": dict(Counter(r.get("product_rejection_reason") or "unknown" for r in rejected_product_rows)),
+        "product_identity_review_input_rows": sum(r.get("product_validation_status") == "review" for r in all_loaded_rows),
+        "product_identity_review_reasons": dict(Counter(r.get("product_review_reason") or "unknown" for r in all_loaded_rows if r.get("product_validation_status") == "review")),
+        "price_provenance_review_rows": sum("price_without_matching_offer_evidence" in str(r.get("price_quality_flag") or "") or "without_matching_offer" in str(r.get("price_quality_flag") or "") for r in all_loaded_rows),
+        "rows_missing_period_evidence": sum("period_evidence_missing_unverified" in str(r.get("period_flags") or "") for r in all_loaded_rows),
+        "period_certainty_counts_current": dict(Counter(r.get("period_certainty") or "unknown" for r in current)),
+        "source_verification_counts_current": dict(Counter(r.get("source_verification_label") or "Belum diverifikasi" for r in current)),
+        "category_counts_current": dict(Counter(classify_promo_category(r)[0] for r in current)),
+        "subcategory_counts_current": dict(Counter(f"{classify_promo_category(r)[0]} > {classify_promo_category(r)[1]}" for r in current)),
+        "source_freshness": source_freshness,
         "exact_deduplicated_row_count": len(merged_raw),
         "exact_duplicate_rows_collapsed": len(input_rows) - len(merged_raw),
         "overlapping_offer_groups_consolidated": consolidated_groups,
@@ -1923,9 +2178,6 @@ def main():
         "possible_duplicate_candidate_pairs": len(possible_duplicate_rows),
         "possible_duplicate_high_similarity_pairs": sum(float(r.get("Kemiripan Nama (%)") or 0) >= 93 for r in possible_duplicate_rows),
         "discount_basis_counts_current": dict(discount_basis),
-        "rows_with_price_evidence": sum(bool(r.get("price_evidence_text")) for r in current),
-        "rows_with_discount_evidence": sum(bool(r.get("discount_evidence_text")) for r in current),
-        "rows_with_period_evidence": sum(bool(r.get("period_evidence_text")) for r in current),
         "merchant_counts_current": dict(merchant_counts),
         "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
         "internal_audit_files": [OUT_CONFIRMED.relative_to(ROOT_DIR).as_posix(), OUT_REVIEW.relative_to(ROOT_DIR).as_posix(), OUT_FULL.relative_to(ROOT_DIR).as_posix(), OUT_REJECTED_PRODUCTS.relative_to(ROOT_DIR).as_posix(), OUT_REPORT.relative_to(ROOT_DIR).as_posix()],
@@ -1934,7 +2186,9 @@ def main():
         "discount_policy": {
             "explicit_product_offer_percent": "used as the displayed discount; explicit 'hingga' is marked as a maximum claim",
             "price_based_percent": "calculated only when normal and promo prices are positive, unit-comparable, and price_basis is offer_price; Indonesian thousands separators are parsed safely",
-            "period_confirmation": "confirmed catalog only includes exact range/single_day periods without unresolved material title/source conflicts; incomplete provenance is estimated or review",
+            "period_confirmation": "Periode Pasti requires exact range/single_day plus visible text evidence and no unresolved material conflict; it is not retailer verification",
+            "price_provenance": "A price is only retained when the same amount can be traced to visible offer text or raw line; otherwise the row is routed to review",
+            "source_verification": "aggregator_only / secondary_public_articles are distinct from retailer_verified; never imply official retailer verification",
             "buy_x_free_y": "separate low-confidence estimate assuming the free item has the same value; not a confirmed discount",
             "campaign_title_percent": "stored separately and never copied to every product row",
         },

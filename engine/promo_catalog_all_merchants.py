@@ -11,6 +11,10 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse, urldefrag
 from zoneinfo import ZoneInfo
 
+from promo_merchant_utils import infer_merchant_candidate_from_title
+from promo_evidence import find_amount_evidence, find_discount_evidence
+from promo_categories import classify_promo_category
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -85,8 +89,9 @@ NOISE_PREFIX = re.compile(
     re.IGNORECASE,
 )
 
-# Daftar ini hanya untuk mengisi metadata merchant. Merchant yang tidak ada
-# di sini tetap discan; field merchant_name-nya akan bernilai null.
+# Alias ini hanya untuk kanonisasi/normalisasi nama merchant yang sudah dikenal.
+# Merchant baru tetap dicoba diekstrak dari judul promo melalui promo_merchant_utils;
+# bila judulnya ambigu, nama boleh tetap kosong untuk pemeriksaan, bukan dibuang.
 MERCHANT_ALIASES = [
     ("McDonald's", ("mcdonald's", "mcdonalds", "mcd")),
     ("Richeese Factory", ("richeese factory", "richeese")),
@@ -191,8 +196,14 @@ def is_relevant_title(title: str) -> bool:
 
 
 def infer_merchant(title: str) -> str | None:
-    """Deteksi merchant dengan batas kata agar alias pendek tidak false-positive."""
+    """Canonicalize known merchant aliases, with a generic fallback for new names.
+
+    The alias table is for spelling normalization, not an allow-list. A new merchant
+    can still be represented by a short candidate derived from its promo title.
+    """
     text = normalize_text(title)
+    candidate = infer_merchant_candidate_from_title(title)
+    search_text = normalize_text(candidate) if candidate else text
     checks = []
     for canonical, aliases in MERCHANT_ALIASES:
         for alias in aliases:
@@ -201,9 +212,9 @@ def infer_merchant(title: str) -> str | None:
 
     for _, canonical, alias in checks:
         escaped = re.escape(normalize_text(alias)).replace(r"\ ", r"\s+")
-        if re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", text):
+        if re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", search_text):
             return canonical
-    return None
+    return candidate
 
 
 def campaign_type(title: str) -> str:
@@ -350,7 +361,6 @@ def extract_period_details(title: str, lead_text: str, published_at: str | None 
     title_period = parse_period_details(title)
     lead_period = parse_period_details(lead_text)
     flags = []
-    evidence_source = "unknown"
 
     title_known = title_period["period_precision"] != "unknown"
     lead_known = lead_period["period_precision"] != "unknown"
@@ -365,20 +375,21 @@ def extract_period_details(title: str, lead_text: str, published_at: str | None 
         # prefer the more precise lead range and retain a diagnostic flag.
         if title_period["period_precision"] == "month" and lead_period["period_precision"] in exact:
             chosen = lead_period
-            evidence_source = "article_lead"
+            chosen_source = "lead"
             flags.append("used_more_precise_lead_period")
         else:
             chosen = title_period
-            evidence_source = "campaign_title"
+            chosen_source = "title"
     elif title_known:
         chosen = title_period
-        evidence_source = "campaign_title"
+        chosen_source = "title"
     elif lead_known:
         chosen = lead_period
-        evidence_source = "article_lead"
+        chosen_source = "lead"
         flags.append("period_taken_from_lead")
     else:
         chosen = title_period
+        chosen_source = None
 
     start = chosen["valid_from"]
     end = chosen["valid_until"]
@@ -394,7 +405,6 @@ def extract_period_details(title: str, lead_text: str, published_at: str | None 
                 end_date = date.fromisoformat(end) if end else None
                 if end_date and published_date <= end_date:
                     start = published_date.isoformat()
-                    evidence_source = "publication_date_estimate"
                     flags.append("start_inferred_from_published_at")
             except ValueError:
                 pass
@@ -406,7 +416,7 @@ def extract_period_details(title: str, lead_text: str, published_at: str | None 
         "period_flags": " | ".join(flags) if flags else None,
         "matched_period_text": chosen.get("matched_period_text"),
         "period_evidence_text": chosen.get("matched_period_text"),
-        "period_evidence_source": evidence_source,
+        "period_evidence_source": chosen_source if chosen.get("period_precision") != "unknown" else None,
     }
 
 
@@ -672,6 +682,14 @@ def discover_articles(session: requests.Session) -> tuple[list[dict], list[dict]
                 listing_log.append(record)
                 say(f"  ! {record['error']}")
                 break
+            if 500 <= response.status_code < 600:
+                record["status"] = "server_error"
+                record["error"] = (
+                    f"HTTP {response.status_code}; penelusuran listing dihentikan."
+                )
+                listing_log.append(record)
+                say(f"  ! {record['error']}")
+                break
 
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
@@ -719,7 +737,8 @@ def discover_articles(session: requests.Session) -> tuple[list[dict], list[dict]
             record["status"] = "error"
             record["error"] = f"{type(exc).__name__}: {exc}"
             listing_log.append(record)
-            say(f"  ! Gagal membaca daftar: {exc}")
+            say(f"  ! Gagal membaca daftar: {exc}; penelusuran dihentikan untuk run ini.")
+            break
 
         time.sleep(DELAY)
 
@@ -916,23 +935,37 @@ def parse_product_line(
         quality_flags=quality_flags,
     )
 
-    return {
+    promo_evidence = find_amount_evidence(offer_text, promo_price, "promo")
+    normal_evidence = find_amount_evidence(offer_text, normal_price, "normal")
+    if discount_info.get("discount_percent_basis") in {"explicit_offer", "explicit_max"}:
+        discount_evidence = find_discount_evidence(offer_text, discount_info.get("discount_percent"))
+    elif discount_info.get("discount_percent_basis") == "calculated_from_unit_prices" and promo_evidence and normal_evidence:
+        discount_evidence = f"Harga normal: {normal_evidence} | Harga promo: {promo_evidence}"
+    elif discount_info.get("discount_percent_basis") == "bundle_estimate_same_item_value":
+        discount_evidence = offer_text
+    else:
+        discount_evidence = None
+
+    row = {
         "product_text": product_name,
         "promo_price": promo_price,
         "normal_price": normal_price,
         "price_parse_method": price_method,
         "price_basis": price_basis,
-        "price_evidence_text": offer_text if prices or normal_price is not None or promo_price is not None else None,
-        "discount_evidence_text": offer_text if discount_info.get("discount_percent") is not None else None,
         "purchase_condition": purchase_condition,
         "price_quality_flag": " | ".join(dict.fromkeys(quality_flags)) if quality_flags else None,
         **discount_info,
+        "promo_price_evidence_text": promo_evidence,
+        "normal_price_evidence_text": normal_evidence,
+        "discount_evidence_text": discount_evidence,
         "offer_text": offer_text,
         "deal_type": deal_type,
         "section": section,
         "source_url": source_url,
         "raw_line": line,
     }
+    row["product_category"], row["product_subcategory"] = classify_promo_category(row)
+    return row
 
 
 def article_container(soup: BeautifulSoup):
@@ -1033,6 +1066,10 @@ def fetch_article(session: requests.Session, candidate: dict) -> dict:
             result["status"] = "blocked_or_limited"
             result["note"] = "Akses ditolak/dibatasi; proteksi tidak dicoba dilewati."
             return result
+        if 500 <= response.status_code < 600:
+            result["status"] = "server_error"
+            result["note"] = f"HTTP {response.status_code}; pengambilan dihentikan untuk run ini."
+            return result
         response.raise_for_status()
 
         final_url = clean_article_url(response.url)
@@ -1087,14 +1124,7 @@ def fetch_article(session: requests.Session, candidate: dict) -> dict:
         result["period_precision"] = period_info["period_precision"]
         result["period_flags"] = period_info["period_flags"]
         result["matched_period_text"] = period_info["matched_period_text"]
-        result["period_evidence_text"] = period_info["period_evidence_text"]
-        result["period_evidence_source"] = period_info["period_evidence_source"]
         result["promo_status"] = promo_status(start, end, period_info["period_precision"])
-        if "title_lead_period_differs" in (period_info.get("period_flags") or ""):
-            if result["promo_status"] == "active":
-                result["promo_status"] = "active_estimated"
-            elif result["promo_status"] == "upcoming":
-                result["promo_status"] = "upcoming_estimated"
         campaign_discount, campaign_discount_type = parse_explicit_discount(title)
         result["campaign_discount_max_percent"] = campaign_discount if campaign_discount_type == "explicit_max" else None
 
@@ -1107,13 +1137,16 @@ def fetch_article(session: requests.Session, candidate: dict) -> dict:
             product["valid_until"] = end
             product["period_precision"] = period_info["period_precision"]
             product["period_flags"] = period_info["period_flags"]
-            product["matched_period_text"] = period_info["matched_period_text"]
-            product["period_evidence_text"] = period_info["period_evidence_text"]
-            product["period_evidence_source"] = period_info["period_evidence_source"]
-            product["promo_status"] = result["promo_status"]
+            product["period_evidence_text"] = period_info.get("period_evidence_text")
+            product["period_evidence_source"] = period_info.get("period_evidence_source")
             product["published_at"] = result.get("published_at")
+            product["source_name"] = "Momsmoney/Kontan"
+            product["source_type"] = "secondary_public_articles"
+            product["verification_status"] = "secondary_public_articles"
+            product["scraped_at"] = timestamp()
             product["campaign_discount_max_percent"] = result["campaign_discount_max_percent"]
             product["promo_status"] = result["promo_status"]
+            product["product_category"], product["product_subcategory"] = classify_promo_category(product)
 
         result["products"] = products
         result["product_count"] = len(products)
@@ -1308,14 +1341,15 @@ def save_json(path: Path, data: dict) -> None:
 
 def write_csv(path: Path, rows: list[dict]) -> None:
     fields = [
-        "product_text", "merchant_name", "campaign_title", "campaign_type",
+        "product_text", "product_category", "product_subcategory", "merchant_name", "campaign_title", "campaign_type",
         "promo_status", "valid_from", "valid_until", "period_precision", "period_flags",
-        "matched_period_text", "period_evidence_text", "period_evidence_source",
         "promo_price", "normal_price", "discount_percent", "discount_percent_basis",
         "discount_percent_confidence", "discount_percent_calculated", "discount_savings_rp",
         "estimated_bundle_discount_percent", "campaign_discount_max_percent",
-        "price_parse_method", "price_basis", "price_evidence_text", "discount_evidence_text",
-        "purchase_condition", "price_quality_flag",
+        "price_parse_method", "price_basis", "purchase_condition", "price_quality_flag",
+        "promo_price_evidence_text", "normal_price_evidence_text", "discount_evidence_text",
+        "period_evidence_text", "period_evidence_source", "source_name", "source_type",
+        "verification_status", "scraped_at",
         "deal_type", "offer_text", "section", "published_at", "source_url",
         "source_urls", "source_campaign_titles", "duplicate_count", "raw_line",
     ]
@@ -1356,6 +1390,76 @@ def validate_run(active_articles: list[dict], active_products: list[dict]) -> di
     }
 
 
+def listing_had_terminal_failure(listing_log: list[dict]) -> bool:
+    """True when listing discovery was incomplete for any request failure."""
+    return any(item.get("status") != "ok" for item in listing_log)
+
+
+def should_refresh_review_output(
+    listing_log: list[dict],
+    articles_checked: list[dict],
+    fetch_stopped_early: bool,
+) -> bool:
+    """Do not erase a last-good review file when a scrape was incomplete."""
+    if fetch_stopped_early or listing_had_terminal_failure(listing_log):
+        return False
+
+    terminal_article_errors = {
+        "blocked_or_limited",
+        "server_error",
+        "request_error",
+    }
+    if any(item.get("status") in terminal_article_errors for item in articles_checked):
+        return False
+
+    # An empty/all-failed article run has no reliable new review candidates.
+    return any(item.get("status") == "ok" for item in articles_checked)
+
+
+def fetch_selected_articles(
+    session: requests.Session,
+    selected: list[dict],
+    listing_log: list[dict] | None = None,
+) -> tuple[list[dict], bool]:
+    """Fetch selected article pages and stop after a block/server failure.
+
+    If listing discovery was blocked, do not request article URLs from the
+    same source in this run. A partial source scan must not be treated as a
+    complete refresh.
+    """
+    if listing_log and listing_had_terminal_failure(listing_log):
+        say("  ! Listing terkena pembatasan/server error; tidak membuka URL artikel.")
+        return [], True
+
+    articles_checked: list[dict] = []
+    stopped_early = False
+
+    for index, candidate in enumerate(selected, start=1):
+        say(f"\n[ARTIKEL {index}/{len(selected)}] {candidate['url']}")
+        item = fetch_article(session, candidate)
+        articles_checked.append(item)
+        say(
+            f"  -> {item['status']} | merchant={item.get('merchant_name') or 'unknown'} | "
+            f"produk={item.get('product_count', 0)} | "
+            f"periode={item.get('valid_from') or '?'} s.d. "
+            f"{item.get('valid_until') or '?'} | {item.get('promo_status')}"
+        )
+        if item.get("note"):
+            say(f"  Catatan: {item['note']}")
+
+        if item.get("status") in {"blocked_or_limited", "server_error", "request_error"}:
+            stopped_early = True
+            say(
+                "  ! Menghentikan pengambilan artikel berikutnya setelah "
+                + item["status"] + "."
+            )
+            break
+
+        time.sleep(DELAY)
+
+    return articles_checked, stopped_early
+
+
 # =========================================================
 # MAIN
 # =========================================================
@@ -1389,21 +1493,9 @@ def main() -> None:
 
         selected = candidates[:MAX_ARTICLES_TO_FETCH]
         say(f"\nArtikel promo dipilih untuk diperiksa: {len(selected)}")
-        articles_checked = []
-
-        for index, candidate in enumerate(selected, start=1):
-            say(f"\n[ARTIKEL {index}/{len(selected)}] {candidate['url']}")
-            item = fetch_article(session, candidate)
-            articles_checked.append(item)
-            say(
-                f"  -> {item['status']} | merchant={item.get('merchant_name') or 'unknown'} | "
-                f"produk={item.get('product_count', 0)} | "
-                f"periode={item.get('valid_from') or '?'} s.d. "
-                f"{item.get('valid_until') or '?'} | {item.get('promo_status')}"
-            )
-            if item.get("note"):
-                say(f"  Catatan: {item['note']}")
-            time.sleep(DELAY)
+        articles_checked, fetch_stopped_early = fetch_selected_articles(
+            session, selected, listing_log=listing_log
+        )
 
         # Katalog final sangat ketat: hanya artikel yang berhasil dibaca dan
         # mempunyai tanggal promo yang secara eksplisit aktif hari ini.
@@ -1436,6 +1528,8 @@ def main() -> None:
             "listing_pages_checked": len(listing_log),
             "candidate_articles_found": len(candidates),
             "articles_checked": len(articles_checked),
+            "fetch_stopped_early": fetch_stopped_early,
+            "listing_fetch_stopped_early": listing_had_terminal_failure(listing_log),
             "successful_articles": sum(a.get("status") == "ok" for a in articles_checked),
             "active_articles": len(active_articles),
             "active_estimated_articles": len(estimated_articles),
@@ -1451,19 +1545,22 @@ def main() -> None:
             "rows_with_price_quality_flags": sum(
                 bool(row.get("price_quality_flag")) for row in active_products
             ),
+            "price_evidence_coverage": round(
+                sum(bool(row.get("promo_price_evidence_text")) for row in all_products_seen if row.get("promo_price") not in (None, "")) /
+                max(1, sum(row.get("promo_price") not in (None, "") for row in all_products_seen)), 3
+            ) if any(row.get("promo_price") not in (None, "") for row in all_products_seen) else None,
+            "discount_evidence_coverage": round(
+                sum(bool(row.get("discount_evidence_text")) for row in all_products_seen if row.get("discount_percent") not in (None, "")) /
+                max(1, sum(row.get("discount_percent") not in (None, "") for row in all_products_seen)), 3
+            ) if any(row.get("discount_percent") not in (None, "") for row in all_products_seen) else None,
+            "period_evidence_coverage": round(
+                sum(bool(row.get("period_evidence_text")) for row in all_products_seen if row.get("promo_status") in {"active", "active_estimated", "upcoming", "upcoming_estimated"}) /
+                max(1, sum(row.get("promo_status") in {"active", "active_estimated", "upcoming", "upcoming_estimated"} for row in all_products_seen)), 3
+            ) if any(row.get("promo_status") in {"active", "active_estimated", "upcoming", "upcoming_estimated"} for row in all_products_seen) else None,
         }
 
         # File attempt menyimpan audit lengkap, termasuk artikel expired/unknown.
         latest_attempt_products = deduplicate_products(active_products + estimated_products)
-        summary["latest_attempt_price_evidence_rows"] = sum(
-            bool(row.get("price_evidence_text")) for row in latest_attempt_products
-        )
-        summary["latest_attempt_discount_evidence_rows"] = sum(
-            bool(row.get("discount_evidence_text")) for row in latest_attempt_products
-        )
-        summary["latest_attempt_period_evidence_rows"] = sum(
-            bool(row.get("period_evidence_text")) for row in latest_attempt_products
-        )
         attempt_payload = {
             **summary,
             "validation": validation,
@@ -1481,10 +1578,17 @@ def main() -> None:
         # enhancer review fresh candidates without treating a rejected run as
         # a successful replacement of the last-good catalog.
         write_csv(ATTEMPT_PRODUCTS_CSV, latest_attempt_products)
-        # Refresh the review output on every run, including a failed catalog
-        # validation, so the review file never silently stays stale.
+        # Refresh review output after a complete enough scan. On a rate limit,
+        # server failure, or all-failed article attempt, preserve the previous
+        # review file instead of replacing it with an empty/partial list.
         review_csv = INTERNAL_DIR / "promo_catalog_all_merchants_review.csv"
-        write_review_csv(review_csv, review_products)
+        refresh_review = should_refresh_review_output(
+            listing_log, articles_checked, fetch_stopped_early
+        )
+        if refresh_review:
+            write_review_csv(review_csv, review_products)
+        else:
+            say("Daftar review sebelumnya dipertahankan karena pemindaian tidak lengkap.")
         save_json(ATTEMPT_JSON, attempt_payload)
 
         if validation["valid"]:
@@ -1526,9 +1630,6 @@ def main() -> None:
                     "valid_until": item.get("valid_until"),
                     "period_precision": item.get("period_precision"),
                     "period_flags": item.get("period_flags"),
-                    "matched_period_text": item.get("matched_period_text"),
-                    "period_evidence_text": item.get("period_evidence_text"),
-                    "period_evidence_source": item.get("period_evidence_source"),
                     "product_count": item.get("product_count"),
                     "note": item.get("note"),
                 }

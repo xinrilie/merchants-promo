@@ -256,3 +256,101 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
             return "no_product_level_offer_evidence"
 
     return None
+
+
+# Product identity is assessed from evidence and row structure, not a list of
+# retailer/brand names. Ambiguous names are routed to review instead of rejected.
+PRODUCT_SPEC_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:ml|l|g|kg|mg|mcg|pcs?|pack|sachet|tablet|kaplet|botol|kaleng|gr|gram|liter|meter|cm|mm|inch|inci)\b|"
+    r"\b\d+\s*[x×]\s*\d+\b|\b(?:model|sku|kode)\s*[:#-]?\s*[a-z0-9-]+",
+    re.I,
+)
+PRODUCT_CODE_RE = re.compile(r"\b(?=[a-z0-9./-]{4,}\b)(?=[a-z0-9./-]*[a-z])(?=[a-z0-9./-]*\d)[a-z0-9./-]+\b", re.I)
+
+
+def product_candidate_review_reason(row: dict, source_mode: str = "") -> str | None:
+    """Return a review reason for plausible but weakly identified candidates.
+
+    This is deliberately not a merchant/product-name deny-list. Generic-looking
+    names are preserved for review unless strong editorial syntax already rejects
+    them. Item-level specs, source links, direct price lines, and cross-source
+    corroboration help establish product identity dynamically.
+    """
+    if product_candidate_rejection_reason(row, source_mode=source_mode):
+        return None  # high-confidence non-products already go to rejected audit
+
+    name = _text(row.get("original_product_text") or row.get("product_text") or row.get("Nama Produk"))
+    merchant = _text(row.get("merchant_name") or row.get("merchant"))
+    offer = _text(row.get("offer_text") or row.get("detail") or row.get("raw_line"))
+    raw_line = _text(row.get("raw_line"))
+    source_url = _text(row.get("source_url") or row.get("source_page_url"))
+    item_url = _text(row.get("source_item_url"))
+    mode = (source_mode or row.get("source_mode") or row.get("source_name") or "").casefold()
+    tokens = _tokens(name)
+    if not name or not tokens:
+        return "product_identity_missing"
+
+    has_spec = bool(PRODUCT_SPEC_RE.search(name) or PRODUCT_CODE_RE.search(name))
+    normalized_name = " ".join(tokens)
+    normalized_merchant = " ".join(_tokens(merchant))
+    same_as_merchant = bool(normalized_merchant and normalized_name == normalized_merchant)
+    has_cross_source_support = len(pipe_sources_for_validation(row)) >= 2
+    has_item_link = bool(item_url and source_url and item_url.rstrip("/") != source_url.rstrip("/"))
+    has_direct_price_line = bool(
+        raw_line
+        and normalized_name
+        and normalized_name in " ".join(_tokens(raw_line))
+        and PRICE_RE.search(raw_line)
+        and _has_numeric_price(row, offer)
+    )
+    has_price = _has_numeric_price(row, offer)
+    has_bundle = _has_bundle(offer, row)
+    has_discount = bool(DISCOUNT_RE.search(offer))
+    has_item_offer = has_price or has_bundle or has_discount
+
+    # An item name with size/model/variant-like evidence is specific enough even
+    # when the merchant is new and absent from any canonical alias table.
+    if has_spec:
+        return None
+    if has_cross_source_support:
+        return None
+    if has_direct_price_line:
+        return None
+    if has_item_link and has_price:
+        return None
+
+    # A row that is literally just the merchant label is not automatically
+    # discarded: it remains visible in review while product-level evidence is
+    # collected. Thus a future merchant such as 'All Fruit' is not hard-blocked.
+    if same_as_merchant:
+        return "ambiguous_candidate_matches_merchant_label"
+
+    # Very short names are inherently ambiguous without SKU attributes or item-
+    # specific provenance. Keep them for review rather than hard-rejecting them.
+    # This intentionally applies to unknown/new names too, without special cases.
+    if len(tokens) <= 2 and not (has_item_link and has_item_offer):
+        if has_item_offer:
+            return "ambiguous_short_name_needs_item_level_evidence"
+        return "short_name_without_item_level_evidence"
+
+    # If a row has only a campaign-level percentage/bundle claim and no item-level
+    # link/price evidence, keep it out of confirmed products until reviewed.
+    if has_item_offer and not has_price and not has_bundle and not has_direct_price_line:
+        return "offer_evidence_may_be_campaign_level"
+
+    return None
+
+
+def pipe_sources_for_validation(row: dict) -> list[str]:
+    """Count distinct publisher/source labels, never count a CSV filename as a source."""
+    # source_names is populated with multiple publishers after cross-source merge;
+    # source_dataset is a file name and must not count as corroboration.
+    # Only explicit publisher labels count as corroboration. A dataset/file
+    # name is provenance of storage, not an independent publication.
+    raw = _text(row.get("source_names") or row.get("source_name"))
+    values = []
+    for value in re.split(r"\s*[|;,]\s*", raw):
+        value = value.strip()
+        if value and value not in values:
+            values.append(value)
+    return values

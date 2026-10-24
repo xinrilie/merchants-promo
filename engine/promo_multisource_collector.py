@@ -27,7 +27,10 @@ import requests
 from bs4 import BeautifulSoup
 
 from promo_names import clean_product_name, name_variants
-from promo_product_validation import product_candidate_rejection_reason
+from promo_merchant_utils import infer_merchant_candidate_from_title, infer_merchant_candidate_from_url, is_dynamic_merchant_label
+from promo_product_validation import product_candidate_rejection_reason, product_candidate_review_reason
+from promo_evidence import find_amount_evidence, find_discount_evidence, extract_period_evidence
+from promo_categories import classify_promo_category
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ENGINE_DIR.parent
@@ -145,23 +148,22 @@ NOISE_START = re.compile(
 )
 
 PRODUCT_FIELDS = [
-    "product_text", "original_product_text", "product_name_variants", "normal_price", "promo_price", "discount_percent",
+    "product_text", "original_product_text", "product_name_variants", "product_category", "product_subcategory", "normal_price", "promo_price", "discount_percent",
     "merchant_name", "discount_savings_rp", "discount_note", "deal_type",
     "purchase_condition", "offer_text", "valid_from", "valid_until",
-    "period_precision", "promo_status", "period_flags", "matched_period_text", "period_evidence_text",
-    "period_evidence_source", "campaign_title", "campaign_type", "published_at",
+    "period_precision", "promo_status", "campaign_title", "campaign_type", "published_at",
     "source_name", "source_type", "verification_status", "source_url",
     "source_page_url", "source_item_url", "region_or_channel", "scraped_at",
-    "price_parse_method", "price_basis", "price_evidence_text", "discount_evidence_text",
-    "discount_basis", "price_quality_flag",
-    "raw_line", "retained_from_previous_run",
+    "price_parse_method", "price_basis", "discount_basis", "price_quality_flag",
+    "promo_price_evidence_text", "normal_price_evidence_text", "discount_evidence_text",
+    "period_evidence_text", "period_evidence_source",
+    "raw_line", "retained_from_previous_run", "product_validation_status", "product_review_reason",
 ]
 ACTIVE_FIELDS = PRODUCT_FIELDS
 REVIEW_FIELDS = PRODUCT_FIELDS + ["review_reason"]
 ARTICLE_FIELDS = [
     "source_name", "title", "source_url", "published_at", "merchant_name",
     "valid_from", "valid_until", "period_precision", "promo_status",
-    "matched_period_text", "period_evidence_text", "period_evidence_source", "period_flags",
     "product_rows_extracted", "image_count", "scrape_status", "note", "scraped_at",
 ]
 IMAGE_FIELDS = [
@@ -277,6 +279,38 @@ def infer_merchant(*texts: object) -> str | None:
                     continue
             return canonical
     return None
+
+
+def _dynamic_merchant_candidate_from_title(title: object) -> str | None:
+    """Compatibility wrapper around shared, allow-list-free title parsing."""
+    return infer_merchant_candidate_from_title(title)
+
+
+def infer_merchant_dynamic(title: object = "", page_url: object = "", context_label: object = "") -> str | None:
+    """Resolve a known alias or infer an unknown merchant from title/context/slug.
+
+    Known aliases are preferred only when they appear in the focal title prefix or
+    when no clear unknown focal label is available. This avoids mistaking a bank or
+    payment partner mentioned later in an article for the retailer running the promo.
+    """
+    candidate = infer_merchant_candidate_from_title(title)
+    if candidate:
+        known_candidate = infer_merchant(candidate)
+        if known_candidate:
+            return known_candidate
+        return candidate
+
+    # For titles without a parseable campaign prefix, preserve the established alias
+    # inference behavior for compatibility with current sources.
+    known = infer_merchant(title, page_url, context_label)
+    if known:
+        return known
+
+    label = clean_text(context_label)
+    if is_dynamic_merchant_label(label):
+        return label.strip(" :|–—-")
+
+    return infer_merchant_candidate_from_url(page_url)
 
 
 def canonical_source_type(source_name: str) -> str:
@@ -418,11 +452,9 @@ def derive_campaign_type(title: str) -> str:
 
 def parse_offer_text(product_text: str, offer_text: str, source_mode: str) -> dict:
     offer = clean_text(offer_text)
-    # Price evidence must be contained in the product's own offer segment.
-    # Do not search product_text: a malformed card can contain campaign prose
-    # and a number, then accidentally lend that number to the parsed offer.
-    normal = parse_rupiah_label(offer, r"harga\s+normal")
-    promo = parse_rupiah_label(offer, r"harga\s+promo")
+    whole = f"{product_text} {offer}".strip()
+    normal = parse_rupiah_label(whole, r"harga\s+normal")
+    promo = parse_rupiah_label(whole, r"harga\s+promo")
     method = "not_extracted"
     basis = "no_single_price"
     purchase_condition = None
@@ -451,7 +483,7 @@ def parse_offer_text(product_text: str, offer_text: str, source_mode: str) -> di
         basis = "offer_price"
     elif source_mode == "hemat" and re.match(r".*\bRp\.?\s*\d", offer, re.IGNORECASE):
         # Hemat card text may contain explicit price labels outside offer_text.
-        promo_match = re.search(r"Harga Promo\s*Rp\.?\s*([0-9][0-9.,]*)", offer, re.IGNORECASE)
+        promo_match = re.search(r"Harga Promo\s*Rp\.?\s*([0-9][0-9.,]*)", whole, re.IGNORECASE)
         if promo_match:
             promo = parse_idr(promo_match.group(1))
             method, basis = "explicit_promo_label", "offer_price"
@@ -549,78 +581,25 @@ def strip_product_name(text: str) -> tuple[str | None, str | None]:
     return name, offer
 
 
-def _period_evidence_span(text: str, precision: str) -> str | None:
-    """Return the date phrase actually used as period evidence."""
-    text = clean_text(text)
-    if not text:
-        return None
-    patterns = {
-        "range": [
-            rf"\b\d{{1,2}}\s+(?:{MONTH_PATTERN})\s*{DATE_SEP}\s*\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b",
-            rf"\b\d{{1,2}}\s*{DATE_SEP}\s*\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b",
-            rf"\b\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\s*{DATE_SEP}\s*\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b",
-        ],
-        "single_day": [rf"\b(?:tanggal|berlaku tanggal|promo tanggal)\s+\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b"],
-        "until": [rf"\b(?:sampai|hingga|s\.d\.|s/d)\s*\d{{1,2}}\s+(?:{MONTH_PATTERN})\s+\d{{4}}\b"],
-        "month": [rf"\b(?:{MONTH_PATTERN})\s+\d{{4}}\b"],
-    }
-    for pattern in patterns.get(precision, []):
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(0)
-    return None
-
-
 def parse_promo_metadata(title: str, visible_text: str, card_context: str = "") -> dict:
     start, end, precision = parse_period_range(title)
-    title_start, title_end, title_precision = start, end, precision
-    period_flags: list[str] = []
-    period_evidence_source = "campaign_title" if precision != "unknown" else "unknown"
-    period_evidence_text = _period_evidence_span(title, precision) if precision != "unknown" else None
-    body = visible_text[:5000]
-    body_start, body_end, body_precision = parse_period_range(body)
-    context_start, context_end, context_precision = parse_period_range(card_context)
-    if title_precision in {"range", "single_day"} and context_precision in {"range", "single_day"}:
-        if (title_start, title_end) != (context_start, context_end):
-            period_flags.append("title_context_period_differs")
-    if title_precision in {"range", "single_day"} and body_precision in {"range", "single_day"}:
-        if (title_start, title_end) != (body_start, body_end):
-            period_flags.append("title_visible_period_differs")
     if precision == "unknown":
-        # In listing cards, the nearest card is the strongest context. Article
-        # pages use the visible body only when no card-specific period is present.
-        start2, end2, precision2 = context_start, context_end, context_precision
-        chosen_context = card_context
-        chosen_source = "card_context"
-        if not (start2 and end2):
-            start2, end2, precision2 = body_start, body_end, body_precision
-            chosen_context = body
-            chosen_source = "article_body"
+        # The lead text can contain a dedicated 'Periode Promo' line. Only use a
+        # day-range expression from this context; never guess a full month as a date.
+        start2, end2, precision2 = parse_period_range(visible_text[:5000])
         if start2 and end2:
             start, end, precision = start2, end2, precision2
-            period_evidence_source = chosen_source
-            period_evidence_text = _period_evidence_span(chosen_context, precision)
     if not end:
-        context_end = parse_end_only(card_context)
-        body_end = parse_end_only(visible_text[:1500])
-        end = context_end or body_end
+        end = parse_end_only(card_context) or parse_end_only(visible_text[:1500])
         if end:
             precision = "until"
-            if context_end:
-                period_evidence_source = "card_context"
-                period_evidence_text = _period_evidence_span(card_context, "until")
-            else:
-                period_evidence_source = "article_body"
-                period_evidence_text = _period_evidence_span(visible_text[:1500], "until")
     if precision == "unknown":
         # Month/year in an article title is a reviewable period estimate, not
         # a confirmed full-range promo. Keep it visible as active_estimated or
         # upcoming_estimated instead of incorrectly leaving it unknown.
         month_match = re.search(rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<year>\d{{4}})\b", clean_text(title).casefold(), re.I)
-        month_source = "campaign_title"
         if not month_match:
             month_match = re.search(rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<year>\d{{4}})\b", clean_text(visible_text[:1500]).casefold(), re.I)
-            month_source = "article_body"
         if month_match:
             month = parse_month(month_match.group("month"))
             year = int(month_match.group("year"))
@@ -628,24 +607,17 @@ def parse_promo_metadata(title: str, visible_text: str, card_context: str = "") 
                 month_start = date(year, month, 1)
                 next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
                 start, end, precision = month_start.isoformat(), (next_month - date.resolution).isoformat(), "month"
-                period_evidence_source = month_source
-                evidence_text = title if month_source == "campaign_title" else visible_text[:1500]
-                period_evidence_text = _period_evidence_span(evidence_text, "month")
-    status = determine_status(start, end, precision)
-    if any(flag in period_flags for flag in ("title_visible_period_differs", "title_context_period_differs")):
-        if status == "active":
-            status = "active_estimated"
-        elif status == "upcoming":
-            status = "upcoming_estimated"
+    evidence_body = clean_text(" ".join(part for part in (visible_text[:5000], card_context) if part))
+    period_evidence_text, period_evidence_source = extract_period_evidence(
+        title, evidence_body, precision
+    )
     return {
         "valid_from": start,
         "valid_until": end,
         "period_precision": precision,
-        "promo_status": status,
-        "period_flags": " | ".join(period_flags) or None,
-        "matched_period_text": period_evidence_text,
         "period_evidence_text": period_evidence_text,
         "period_evidence_source": period_evidence_source,
+        "promo_status": determine_status(start, end, precision),
     }
 
 
@@ -742,6 +714,22 @@ def nearest_context(anchor) -> tuple[str, str | None]:
         merchant = link_merchants[0] if len(link_merchants) == 1 else None
         if merchant and not best_merchant:
             best_merchant = merchant
+        elif not merchant:
+            # Do not require a hard-coded alias for a new retailer. A single short
+            # sibling link label in the card context can provide a dynamic candidate.
+            dynamic_labels = []
+            for link in parent.find_all("a")[:20]:
+                if link is anchor:
+                    continue
+                label = clean_text(link.get_text(" ", strip=True))
+                if not label or len(label) > 55 or not is_dynamic_merchant_label(label):
+                    continue
+                if PRICE_SIGNAL.search(label) or PROMO_WORDS.search(label):
+                    continue
+                if label.casefold() not in {x.casefold() for x in dynamic_labels}:
+                    dynamic_labels.append(label)
+            if len(dynamic_labels) == 1 and not best_merchant:
+                best_merchant = dynamic_labels[0]
         if len(text) <= max(700, len(best_text) + 180):
             best_text = text
         if parse_end_only(text) and (merchant or len(text) <= max(700, len(best_text) + 180)):
@@ -768,7 +756,7 @@ def make_product_row(
             # first one by substring; preserve unknown merchant for review instead.
             merchant = unambiguous_merchant(title) or unambiguous_merchant(source_item_url or "")
         else:
-            merchant = infer_merchant(title, source_page_url)
+            merchant = infer_merchant_dynamic(title, source_page_url)
     discount_note = None
     if pricing.get("discount_basis") == "source_explicit_product_claim":
         discount_note = "Persentase dari sumber"
@@ -776,7 +764,18 @@ def make_product_row(
         discount_note = "Dihitung dari harga"
     if pricing.get("price_quality_flag"):
         discount_note = (discount_note + " | " if discount_note else "") + "Perlu cek"
-    return {
+    promo_price_evidence = find_amount_evidence(offer_text, pricing.get("promo_price"), "promo")
+    normal_price_evidence = find_amount_evidence(offer_text, pricing.get("normal_price"), "normal")
+    if pricing.get("discount_basis") == "source_explicit_product_claim":
+        discount_evidence = find_discount_evidence(offer_text, pricing.get("discount_percent"))
+    elif pricing.get("discount_basis") == "calculated_from_prices" and promo_price_evidence and normal_price_evidence:
+        discount_evidence = f"Harga normal: {normal_price_evidence} | Harga promo: {promo_price_evidence}"
+    elif pricing.get("discount_basis") == "bundle_estimate_same_item_value":
+        discount_evidence = clean_text(offer_text) or None
+    else:
+        discount_evidence = None
+
+    row = {
         "product_text": normalized_product_text or original_product_text,
         "original_product_text": original_product_text,
         "product_name_variants": original_product_text,
@@ -803,12 +802,17 @@ def make_product_row(
         "scraped_at": now_iso(),
         "price_parse_method": pricing.get("price_parse_method"),
         "price_basis": pricing.get("price_basis"),
-        "price_evidence_text": offer_text if pricing.get("normal_price") is not None or pricing.get("promo_price") is not None else None,
-        "discount_evidence_text": offer_text if pricing.get("discount_percent") is not None else None,
         "discount_basis": pricing.get("discount_basis"),
         "price_quality_flag": pricing.get("price_quality_flag"),
+        "promo_price_evidence_text": promo_price_evidence,
+        "normal_price_evidence_text": normal_price_evidence,
+        "discount_evidence_text": discount_evidence,
+        "period_evidence_text": meta.get("period_evidence_text"),
+        "period_evidence_source": meta.get("period_evidence_source"),
         "raw_line": raw_line or None,
     }
+    row["product_category"], row["product_subcategory"] = classify_promo_category(row)
+    return row
 
 
 def extract_hemat_cards(soup: BeautifulSoup, page_url: str) -> list[dict]:
@@ -835,6 +839,8 @@ def extract_hemat_cards(soup: BeautifulSoup, page_url: str) -> list[dict]:
             # A single-chain page is a usable fallback; never infer a single chain
             # from a combined listing URL such as /katalog-alfamart,hypermart/.
             card_merchant = unambiguous_merchant(urlparse(page_url).path)
+        if not card_merchant:
+            card_merchant = infer_merchant_dynamic(title, page_url, context_label=context)
         row = make_product_row(
             source_name="Hemat.id", product_text=product_name, offer_text=offer_text,
             title=title, merchant=card_merchant,
@@ -850,6 +856,9 @@ def extract_hemat_cards(soup: BeautifulSoup, page_url: str) -> list[dict]:
                 "rejection_reason": rejection_reason, "scraped_at": now_iso(),
             })
             continue
+        review_reason = product_candidate_review_reason(row, source_mode="hemat_card")
+        row["product_validation_status"] = "review" if review_reason else "eligible"
+        row["product_review_reason"] = review_reason
         if not row.get("promo_price") and not row.get("discount_percent") and not row.get("purchase_condition"):
             continue
         key = (normalize(row["product_text"]), normalize(row.get("offer_text")), row.get("promo_price"), row.get("merchant_name"), row.get("valid_until"))
@@ -898,7 +907,7 @@ def iter_article_lines(container) -> list[str]:
 
 def extract_article_rows(container, source_name: str, title: str, article_url: str, meta: dict, published_at: str | None = None) -> list[dict]:
     rows: list[dict] = []
-    merchant = infer_merchant(title, article_url)
+    merchant = infer_merchant_dynamic(title, article_url)
     seen = set()
     for line in iter_article_lines(container):
         product_name, offer = strip_product_name(line)
@@ -921,6 +930,9 @@ def extract_article_rows(container, source_name: str, title: str, article_url: s
                 "offer_text": offer, "rejection_reason": rejection_reason, "scraped_at": now_iso(),
             })
             continue
+        review_reason = product_candidate_review_reason(row, source_mode="article")
+        row["product_validation_status"] = "review" if review_reason else "eligible"
+        row["product_review_reason"] = review_reason
         if not (row.get("promo_price") is not None or row.get("discount_percent") is not None or row.get("purchase_condition")):
             continue
         key = (normalize(product_name), normalize(offer), row.get("promo_price"), row.get("normal_price"))
@@ -1022,19 +1034,47 @@ def is_listing_link(source_name: str, url: str, text: str) -> bool:
     return False
 
 
-def fetch_page(session: requests.Session, url: str) -> tuple[BeautifulSoup | None, dict]:
-    info = {"url": url, "status": "unknown", "http_status": None, "error": None, "final_url": None}
+def fetch_page(
+    session: requests.Session,
+    url: str,
+    source_name: str | None = None,
+) -> tuple[BeautifulSoup | None, dict]:
+    info = {
+        "url": url,
+        "status": "unknown",
+        "http_status": None,
+        "error": None,
+        "final_url": None,
+    }
     try:
         response = session.get(url, timeout=TIMEOUT, allow_redirects=True)
         info["http_status"] = response.status_code
-        info["final_url"] = response.url
+        final_url = getattr(response, "url", None) or url
+        info["final_url"] = final_url
         if response.status_code in {401, 403, 429}:
             info["status"] = "blocked_or_limited"
             info["error"] = f"HTTP {response.status_code}; tidak mencoba melewati pembatasan."
             return None, info
+        if 500 <= response.status_code < 600:
+            info["status"] = "server_error"
+            info["error"] = f"HTTP {response.status_code}; sumber dihentikan untuk run ini."
+            return None, info
         response.raise_for_status()
+
+        # Do not attribute a redirected page on an unrelated host to the
+        # aggregator that linked to it. Only the same configured source host
+        # (including its www alias) may be parsed as source content.
+        if source_name and not same_site(final_url, source_name):
+            info["status"] = "redirected_offsite"
+            info["error"] = (
+                "Redirect keluar dari domain sumber; halaman tidak diproses."
+            )
+            return None, info
+
         content_type = response.headers.get("Content-Type", "")
-        if "html" not in content_type.casefold() and not response.text.lstrip().startswith("<!DOCTYPE html"):
+        body_start = response.text.lstrip().casefold()
+        looks_like_html = body_start.startswith(("<!doctype html", "<html"))
+        if "html" not in content_type.casefold() and not looks_like_html:
             info["status"] = "not_html"
             return None, info
         info["status"] = "ok"
@@ -1058,6 +1098,7 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
     images: list[dict] = []
     article_records: list[dict] = []
     page_index = 0
+    source_access_blocked = False
 
     while queue and page_index < MAX_LISTING_PAGES_PER_SOURCE:
         url = safe_url(queue.pop(0))
@@ -1066,9 +1107,16 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
         seen_pages.add(url)
         page_index += 1
         say(f"[{source_name} listing {page_index}/{MAX_LISTING_PAGES_PER_SOURCE}] {url}")
-        soup, fetch_log = fetch_page(session, url)
+        soup, fetch_log = fetch_page(session, url, source_name)
         listing_log.append({"source_name": source_name, "phase": "listing", **fetch_log})
         if soup is None:
+            if fetch_log.get("status") in {"blocked_or_limited", "server_error", "request_error", "redirected_offsite"}:
+                source_access_blocked = True
+                say(
+                    f"[{source_name}] menghentikan penelusuran setelah "
+                    f"{fetch_log.get('status')} pada halaman listing."
+                )
+                break
             time.sleep(DELAY_SECONDS)
             continue
         final_url = fetch_log.get("final_url") or url
@@ -1089,6 +1137,12 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
                 queue.append(target)
         time.sleep(DELAY_SECONDS)
 
+    # A blocked listing makes the source run incomplete. Discard any partial
+    # product extraction so main() can preserve the source's last-good rows.
+    # Do not continue to article URLs on the same source after a limit/server error.
+    if source_access_blocked:
+        return [], article_records, [], listing_log
+
     # Prefer article candidates whose visible title says that the offer is
     # current/upcoming. The stable sort keeps discovery order for ties.
     ranked_articles = sorted(articles.values(), key=article_candidate_priority, reverse=True)
@@ -1096,7 +1150,7 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
     for i, candidate in enumerate(selected_articles, start=1):
         article_url = candidate["url"]
         say(f"[{source_name} article {i}/{len(selected_articles)}] {article_url}")
-        soup, fetch_log = fetch_page(session, article_url)
+        soup, fetch_log = fetch_page(session, article_url, source_name)
         record = {
             "source_name": source_name,
             "title": candidate.get("title_hint") or "",
@@ -1108,6 +1162,8 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
             "period_precision": "unknown",
             "promo_status": "unknown",
             "product_rows_extracted": 0,
+            "period_evidence_text": None,
+            "period_evidence_source": None,
             "image_count": 0,
             "scrape_status": fetch_log["status"],
             "note": fetch_log.get("error"),
@@ -1116,6 +1172,13 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
         if soup is None:
             listing_log.append({"source_name": source_name, "phase": "article", **fetch_log})
             article_records.append(record)
+            if fetch_log.get("status") in {"blocked_or_limited", "server_error", "request_error", "redirected_offsite"}:
+                source_access_blocked = True
+                say(
+                    f"[{source_name}] menghentikan pengambilan artikel "
+                    f"setelah {fetch_log.get('status')}."
+                )
+                break
             continue
         final_url = fetch_log.get("final_url") or article_url
         title = title_from_page(soup, candidate.get("title_hint", ""))
@@ -1123,7 +1186,7 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
         body_text = clean_text(container.get_text(" ", strip=True))
         period = parse_promo_metadata(title, body_text)
         published = published_from_page(soup)
-        merchant = infer_merchant(title, final_url)
+        merchant = infer_merchant_dynamic(title, final_url)
         article_rows = extract_article_rows(container, source_name, title, final_url, period, published_at=published)
         article_images = image_rows_from_article(container, source_name, title, final_url, period["promo_status"])
         products.extend(article_rows)
@@ -1134,6 +1197,8 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
             "merchant_name": merchant,
             **period,
             "product_rows_extracted": len(article_rows),
+            "period_evidence_text": period.get("period_evidence_text"),
+            "period_evidence_source": period.get("period_evidence_source"),
             "image_count": len(article_images),
             "scrape_status": "ok",
             "note": None if article_rows else "Tidak ada baris produk tekstual yang cukup jelas; cek file katalog gambar bila tersedia.",
@@ -1142,6 +1207,11 @@ def run_source(session: requests.Session, source_name: str) -> tuple[list[dict],
         article_records.append(record)
         listing_log.append({"source_name": source_name, "phase": "article", **fetch_log, "title": title, "product_rows": len(article_rows), "image_count": len(article_images)})
         time.sleep(DELAY_SECONDS)
+
+    # If blocked partway through article fetches, do not publish partial rows as
+    # a complete source refresh. main() then falls back to last-good rows.
+    if source_access_blocked:
+        return [], article_records, [], listing_log
 
     return products, article_records, images, listing_log
 
@@ -1166,6 +1236,10 @@ def dedupe_rows(rows: list[dict]) -> list[dict]:
             "merchant_name", "normal_price", "promo_price", "discount_percent",
             "valid_from", "valid_until", "source_url", "offer_text",
         ))))
+        statuses = {str(r.get("product_validation_status") or "eligible") for r in group}
+        best["product_validation_status"] = "eligible" if "eligible" in statuses else ("review" if "review" in statuses else "rejected")
+        review_reasons = list(OrderedDict.fromkeys(r.get("product_review_reason") for r in group if r.get("product_review_reason")))
+        best["product_review_reason"] = " | ".join(review_reasons) or None
         all_urls = list(OrderedDict.fromkeys(r.get("source_url") for r in group if r.get("source_url")))
         all_names = list(OrderedDict.fromkeys(r.get("source_name") for r in group if r.get("source_name")))
         best["source_url"] = all_urls[0] if all_urls else best.get("source_url")
@@ -1204,6 +1278,8 @@ def write_csv(path: Path, rows: list[dict], fields: list[str]) -> None:
 
 def row_review_reason(row: dict) -> str | None:
     issues = []
+    if row.get("product_validation_status") == "review" and row.get("product_review_reason"):
+        issues.append("product_identity:" + str(row.get("product_review_reason")))
     if row.get("promo_status") in {"unknown", "active_estimated"}:
         issues.append(f"period:{row.get('promo_status')}")
     if not row.get("merchant_name"):
@@ -1239,6 +1315,51 @@ def read_previous_product_rows(path: Path) -> list[dict]:
 def sources_in_row(row: dict) -> set[str]:
     values = [row.get("source_name", ""), row.get("source_names", "")]
     return {piece.strip() for value in values for piece in str(value or "").split(" | ") if piece.strip()}
+
+
+def build_source_health_report(source_names, products, request_log) -> dict:
+    """Summarize per-source request, freshness, and evidence coverage without web access."""
+    report = {}
+    for source_name in source_names:
+        source_requests = [item for item in request_log if item.get("source_name") == source_name]
+        source_products = [item for item in products if source_name in sources_in_row(item)]
+        fresh_source_products = [
+            item for item in source_products
+            if str(item.get("retained_from_previous_run", "")).casefold() not in {"true", "1", "yes"}
+        ]
+        price_rows = [item for item in source_products if item.get("promo_price") not in (None, "")]
+        discount_rows = [item for item in source_products if item.get("discount_percent") not in (None, "")]
+        period_rows = [item for item in source_products if item.get("promo_status") in {"active", "active_estimated", "upcoming", "upcoming_estimated"}]
+        ok_requests = sum(item.get("status") == "ok" for item in source_requests)
+        retained = len(source_products) - len(fresh_source_products)
+        if fresh_source_products and ok_requests:
+            status = "fresh"
+        elif source_products and not fresh_source_products:
+            status = "preserved_previous"
+        elif ok_requests:
+            status = "reachable_no_products"
+        elif source_requests:
+            status = "request_failed"
+        else:
+            status = "no_request"
+        report[source_name] = {
+            "request_count": len(source_requests),
+            "successful_requests": ok_requests,
+            "failed_requests": sum(item.get("status") in {"request_error", "error", "not_html"} for item in source_requests),
+            "blocked_or_limited_requests": sum(item.get("status") == "blocked_or_limited" for item in source_requests),
+            "product_rows_in_output": len(source_products),
+            "fresh_product_rows": len(fresh_source_products),
+            "preserved_previous_rows": retained,
+            "rows_with_promo_price": len(price_rows),
+            "promo_price_evidence_coverage": round(sum(bool(item.get("promo_price_evidence_text")) for item in price_rows) / len(price_rows), 3) if price_rows else None,
+            "rows_with_normal_price": sum(item.get("normal_price") not in (None, "") for item in source_products),
+            "rows_with_discount": len(discount_rows),
+            "discount_evidence_coverage": round(sum(bool(item.get("discount_evidence_text")) for item in discount_rows) / len(discount_rows), 3) if discount_rows else None,
+            "rows_with_period": len(period_rows),
+            "period_evidence_coverage": round(sum(bool(item.get("period_evidence_text")) for item in period_rows) / len(period_rows), 3) if period_rows else None,
+            "status": status,
+        }
+    return report
 
 
 def run_self_tests() -> None:
@@ -1382,8 +1503,8 @@ def main() -> None:
             row.setdefault("retained_from_previous_run", False)
             row["review_reason"] = row_review_reason(row)
 
-        active = [r for r in products if r.get("promo_status") in {"active", "active_estimated"}]
-        review = [r for r in products if r.get("review_reason")]
+        active = [r for r in products if r.get("promo_status") in {"active", "active_estimated"} and r.get("product_validation_status") != "review"]
+        review = [r for r in products if r.get("review_reason") or r.get("product_validation_status") == "review"]
 
         write_csv(OUT_ALL, products, PRODUCT_FIELDS + ["source_urls", "source_names", "duplicate_count", "cross_source_duplicate", "duplicate_group_id", "review_reason"])
         write_csv(OUT_ACTIVE, active, ACTIVE_FIELDS + ["source_urls", "source_names", "duplicate_count", "cross_source_duplicate", "duplicate_group_id"])
@@ -1395,10 +1516,13 @@ def main() -> None:
             "raw_line", "product_text", "offer_text", "rejection_reason", "scraped_at",
         ])
 
+        source_health = build_source_health_report(SOURCE_SEEDS, all_products, request_log)
+
         report = {
             "built_at": now_iso(),
             "reference_date": TODAY.isoformat(),
             "sources": list(SOURCE_SEEDS),
+            "source_health": source_health,
             "article_selection_policy": (
                 "Prioritize active/current and upcoming periods parsed from visible article titles; "
                 "month-only periods are estimates; permalink year is not treated as freshness evidence."

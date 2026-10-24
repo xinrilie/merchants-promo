@@ -584,7 +584,7 @@ def test_momsmoney_rows_get_source_metadata():
         rows = enhancer.load_source(path, "promo_catalog_all_merchants.csv")
         assert len(rows) == 1
         assert rows[0]["source_name"] == "Momsmoney/Kontan"
-        assert rows[0]["verification_status"] == "aggregator_only"
+        assert rows[0]["verification_status"] == "secondary_public_articles"
 
 
 def main():

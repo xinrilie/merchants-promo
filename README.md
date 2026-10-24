@@ -8,6 +8,8 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 > **Penting:** data Hemat.id, Katalogpromosi.com, dan Scanharga.com merupakan data agregator/konten. Data tidak otomatis dikonfirmasi oleh retailer resmi. Gunakan kolom sumber dan status verifikasi sebelum menjadikan harga sebagai referensi final.
 
+> **Paket build diperbarui (24 Oktober 2026):** klasifikasi kategori dan cache regex diperbarui; validasi sumber independen diperketat; collector menghentikan permintaan setelah rate limit, timeout, server error, atau redirect lintas domain; serta ditambahkan `engine/test_access_limits.py`. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 44 passed.
+
 ---
 
 ## 🛰️ Sumber Aktif
@@ -18,13 +20,12 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 Pipeline memisahkan pengumpulan data dan pemrosesan lintas sumber agar produk dari beberapa situs bisa dibandingkan setelah semua data terkumpul.
 
-1. **Collector — pencari data:** `promo_catalog_all_merchants.py` mengambil artikel Momsmoney/Kontan dari kategori Hemat; setelah itu `promo_multisource_collector.py` mengambil katalog dari Hemat.id, Katalogpromosi.com, dan Scanharga.com; mengekstrak kartu/teks penawaran; menyimpan URL sumber dan frasa bukti tanggal/harga/diskon; serta menolak kandidat yang terlihat seperti judul artikel, syarat umum, atau klaim diskon kampanye.
-2. **Enhancer — normalisasi & validasi akhir:** membaca hasil collector terbaru yang lolos freshness gate dan CSV katalog baseline, menormalkan nama/harga/tanggal, mengulang validasi non-produk, memastikan nilai harga didukung oleh teks penawaran yang sama, menurunkan tanggal tanpa bukti yang bisa ditelusuri ke status estimasi/review, melakukan deduplikasi persis serta konsolidasi periode yang aman, kemudian menjalankan *fuzzy matching* lintas sumber sebelum ekspor.
-3. **Product validation:** modul bersama yang dipakai oleh collector dan enhancer. Ini adalah lapisan pertahanan ganda agar judul artikel tidak masuk kembali ke katalog dari sumber lama atau hasil scraping sebelumnya.
-4. **Product name engine:** menyamakan spasi, ejaan, satuan, dan format kemasan. *Fuzzy matching* memberi kandidat kemiripan, tetapi tidak boleh menggabungkan produk jika ukuran/varian atau detail penawaran bertentangan.
-5. **Regression tests:** menguji parsing, baris editorial, produk valid, contoh produk mirip, dan perlindungan terhadap harga/varian yang berbeda.
-
-Harga dan diskon produk diambil dari segmen `offer_text`, bukan dari gabungan nama produk dan teks promo. Audit internal juga menyimpan `price_evidence_text`, `discount_evidence_text`, `period_evidence_text`, dan `period_evidence_source`. Frasa periode pada judul/lead/kartu yang bertentangan ditandai sebagai konflik; tanggal yang tidak punya bukti sumber yang dapat dilacak tidak ditampilkan sebagai periode pasti.
+1. **Collector — pencari data:** `promo_catalog_all_merchants.py` mengambil artikel Momsmoney/Kontan dari kategori Hemat; setelah itu `promo_multisource_collector.py` mengambil katalog dari Hemat.id, Katalogpromosi.com, dan Scanharga.com; mengekstrak kartu/teks penawaran; menyimpan URL sumber; dan melakukan validasi awal untuk menolak kandidat yang terlihat seperti judul artikel, syarat umum, atau klaim diskon kampanye.
+2. **Enhancer — normalisasi & validasi akhir:** membaca hasil collector terbaru yang lolos freshness gate dan CSV katalog baseline, menormalkan nama/harga/tanggal, mengulang validasi non-produk, melakukan deduplikasi persis serta konsolidasi periode yang aman, kemudian menjalankan *fuzzy matching* lintas sumber sebelum ekspor.
+3. **Product validation:** modul bersama yang dipakai oleh collector dan enhancer. Teks yang jelas merupakan editorial ditolak; kandidat yang ambigu tetapi mungkin produk diarahkan ke review, bukan dibuang berdasarkan nama.
+4. **Merchant discovery:** alias merchant hanya dipakai untuk normalisasi nama yang sudah dikenal. Nama merchant baru juga dicoba diambil dari judul promo, slug URL, dan label singkat pada konteks kartu. Jadi merchant baru seperti `All Fruit`, `All Sayur`, atau `Fresh Basket` tidak perlu masuk daftar manual terlebih dahulu. Judul yang terlalu ambigu tetap perlu ditinjau.
+5. **Product name engine:** menyamakan spasi, ejaan, satuan, dan format kemasan. *Fuzzy matching* memberi kandidat kemiripan, tetapi tidak boleh menggabungkan produk jika ukuran/varian atau detail penawaran bertentangan.
+6. **Regression tests:** menguji parsing, baris editorial, produk valid, merchant baru yang tidak ada di daftar alias, contoh produk mirip, dan perlindungan terhadap harga/varian yang berbeda.
 
 ### Kenapa fuzzy matching dilakukan di enhancer?
 
@@ -38,6 +39,8 @@ Collector memproses satu halaman/sumber pada satu waktu sehingga belum memiliki 
 - Baris lama yang kehilangan `campaign_title` kini tetap divalidasi; judul seperti `Promo Paris Baguette BNI Wonderful Weekend` tidak bisa lolos hanya karena kolom judul kosong.
 - Fragmen generik satu kata seperti `Akhirnya` ditolak jika satu-satunya bukti penawaran adalah klaim persentase diskon dan tidak ada bukti SKU.
 - Baris promo bundling tanpa harga satuan tetap dapat lolos jika syarat seperti `Beli 1 Gratis 1` eksplisit.
+- Nama merchant/produk tidak ditolak hanya karena tidak ada di daftar alias. Alias merchant hanya untuk kanonisasi; ekstraksi dinamis memakai struktur judul promo, label konteks, atribut item, harga yang terkait langsung, dan bukti sumber.
+- Nama pendek/ambigu yang mungkin merupakan produk atau label merchant tidak di-blacklist; bila bukti item belum cukup, baris diarahkan ke `Perlu Review`.
 - Produk bernama jelas seperti `My Baby Body Cologne Sweet Floral 100 ml` tetap lolos validasi discount-only.
 - Tes regresi menguji kasus `campaign_title` kosong agar bug tidak kembali.
 
@@ -64,6 +67,7 @@ promo-katalog-engine/
 ├── requirements.txt
 ├── Install_Dependency.bat
 ├── Jalankan_Promo.bat
+├── Jalankan_Tes.bat
 ├── input/
 │   ├── momskonten_promo_active.csv
 │   └── promo_catalog_all_merchants.csv
@@ -71,10 +75,11 @@ promo-katalog-engine/
 │   ├── promo_multisource_collector.py
 │   ├── enrich_existing_promo_catalog_multisource.py
 │   ├── promo_product_validation.py
+│   ├── promo_merchant_utils.py
 │   ├── promo_names.py
 │   ├── promo_catalog_all_merchants.py
 │   ├── test_pipeline.py
-│   └── test_source_regressions.py
+│   └── test_dynamic_validation.py
 ├── hasil/       # dibuat otomatis
 └── _internal/   # data antara, log, dan audit; dibuat otomatis
 ```
@@ -87,7 +92,7 @@ CSV lama yang berada pada folder `input/` digunakan sebagai data pembanding/seed
 
 Setelah menjalankan `Jalankan_Promo.bat`, output utama ditulis ke folder `hasil/`:
 
-- **`hasil/Katalog_Promo_Final.xlsx`** — workbook katalog; berisi sheet Aktif, Terkonfirmasi, Perlu Review, Ditolak (Audit), Variasi Nama, dan Kemungkinan Duplikat.
+- **`hasil/Katalog_Promo_Final.xlsx`** — workbook katalog; berisi sheet Mulai Di Sini, Ringkasan Kategori, Referensi Kategori, Aktif, Periode Pasti, Perlu Review, Ditolak (Audit), Kemungkinan Duplikat, dan Variasi Nama.
 - **`hasil/Katalog_Promo_Final.csv`** — katalog ringkas untuk analisis/ingest ke sistem lain.
 
 File teknis tersimpan di `_internal/`:
@@ -102,7 +107,6 @@ File teknis tersimpan di `_internal/`:
 - **`promo_product_rows_rejected.csv`** — baris dari CSV lama/hasil collector yang ditolak oleh enhancer.
 - **`promo_possible_duplicate_candidates.csv`** — nama yang mirip tetapi belum aman digabung.
 - **`promo_multisource_runlog.json`** dan **`promo_multisource_quality_report.json`** — ringkasan status sumber, jumlah baris, alasan penolakan, duplikasi, dan kualitas.
-- Kolom bukti di file audit internal menunjukkan segmen teks yang mendukung harga/diskon serta frasa dan asal periode promo. Kolom teknis ini sengaja tidak membebani tampilan katalog utama.
 
 File `_internal/` digunakan untuk audit dan diagnosis. Untuk pemakaian sehari-hari, buka workbook atau CSV dari `hasil/`.
 
@@ -112,9 +116,10 @@ File `_internal/` digunakan untuk audit dan diagnosis. Untuk pemakaian sehari-ha
 
 1. Ekstrak seluruh ZIP ke folder baru.
 2. Pastikan Python **3.10 atau lebih baru** sudah terpasang dan opsi *Add Python to PATH* aktif.
-3. Pertama kali, jalankan `Install_Dependency.bat`. Dependensi yang diperlukan adalah `requests`, `beautifulsoup4`, dan `openpyxl`.
-4. Jalankan `Jalankan_Promo.bat`. Script melakukan self-test, uji regresi, collector, enhancer/fuzzy matching, lalu ekspor final.
-5. Buka `hasil/Katalog_Promo_Final.xlsx`.
+3. Pertama kali, jalankan `Install_Dependency.bat`. Script memeriksa Python 3.10+, memasang runtime dependencies (`requests`, `beautifulsoup4`, `openpyxl`) serta `pytest`, lalu memverifikasi instalasi.
+4. Untuk pemeriksaan tanpa akses internet, jalankan `Jalankan_Promo.bat --test-only` atau klik `Jalankan_Tes.bat`. Mode ini memeriksa sintaks, self-test, dan tes regresi tanpa scraping live.
+5. Untuk mengambil data terbaru dan membangun katalog, jalankan `Jalankan_Promo.bat`. Script menjalankan tes dahulu, baru menjalankan empat sumber live, validasi, konsolidasi/fuzzy matching, dan ekspor final.
+6. Buka `hasil/Katalog_Promo_Final.xlsx` setelah proses selesai. Tutup workbook dan CSV di Excel sebelum menjalankan pipeline lagi agar file keluaran tidak terkunci.
 
 Atau instal dependensi lewat terminal:
 
@@ -142,7 +147,6 @@ python engine/enrich_existing_promo_catalog_multisource.py
 - Fragmen satu kata seperti `Akhirnya` tidak diterima sebagai SKU hanya karena disertai klaim diskon.
 - Produk nyata dengan atribut SKU (misalnya ukuran) dan penawaran bundling eksplisit tetap dipertahankan.
 - Fuzzy matching tetap menjaga varian, harga, dan syarat promo yang bertentangan tetap terpisah.
-- Tes parser offline memeriksa Hemat.id, Katalogpromosi.com, Scanharga.com, dan Momsmoney/Kontan; tes juga memastikan angka harga tidak dipinjam dari nama produk dan periode tanpa bukti diturunkan ke estimasi/review.
 
 ---
 
@@ -160,3 +164,20 @@ python engine/enrich_existing_promo_catalog_multisource.py
 ## 📄 Lisensi & Penggunaan
 
 Gunakan hasil scraping sesuai ketentuan situs sumber, hak atas konten, dan aturan yang berlaku. Jika dipublikasikan di GitHub, hindari mengunggah token, kredensial, atau data pribadi. Periksa ketentuan penggunaan masing-masing sumber sebelum menjalankan scraping rutin.
+
+
+
+### Kategori Produk dan Subkategori
+
+- Katalog final memiliki kolom **Kategori Produk** dan **Subkategori** pada sheet Aktif, Periode Pasti, Perlu Review, dan Ditolak (Audit), serta pada CSV katalog ringkas. Keduanya bisa dipakai dengan filter Excel.
+- Taksonomi terdiri dari 29 kategori utama, mulai dari makanan/bahan pokok, minuman, perawatan tubuh, cuci pakaian, kebutuhan rumah tangga, restoran, elektronik, voucher/cashback, transportasi, hiburan, hingga layanan. Daftar lengkap dan contoh subkategori ada di sheet **Referensi Kategori** dan modul `engine/promo_categories.py`.
+- Sheet **Ringkasan Kategori** menghitung jumlah baris promo aktif per kategori. Angka ini menghitung baris promo, bukan jumlah SKU unik sepanjang waktu.
+- Nama produk/SKU diprioritaskan daripada klaim kampanye. Kampanye/rangkuman umum dikelompokkan ke **Promo Umum / Multi-Kategori**; teks yang tidak cukup jelas ditempatkan di **Lainnya / Perlu Review**. Kategori tidak mengubah status aktif, penilaian harga, bukti periode, atau validasi retailer.
+- Kategorisasi bersifat otomatis berbasis aturan dan dapat salah pada nama produk yang tidak deskriptif; nilai `Lainnya / Perlu Review` tersedia agar sistem tidak menebak. Tes regresi kategori ikut dijalankan sebelum scraping.
+
+### Bukti dan verifikasi
+
+- Kolom audit `promo_price_evidence_text`, `normal_price_evidence_text`, `discount_evidence_text`, dan `period_evidence_text` menyimpan kutipan teks sumber yang mendukung nilai hasil parsing. Nilai harga yang tidak dapat dicocokkan ke teks penawaran dibersihkan dan diarahkan ke review.
+- `Kepastian Periode` terpisah dari `Verifikasi Sumber`. `Periode Pasti` berarti rentang tanggal eksplisit dapat ditelusuri; ini **bukan** bukti bahwa retailer resmi telah mengonfirmasi promo.
+- `promo_multisource_runlog.json` menyediakan `source_health` untuk tiap sumber: request sukses/gagal, jumlah baris baru versus fallback, dan coverage bukti harga/diskon/periode. `promo_catalog_multisource_quality_report.json` memiliki `source_freshness` yang membedakan baris fresh, stale (>7 hari), dipertahankan dari run sebelumnya, dan historis/tanpa timestamp. Timestamp yang hilang tidak pernah dihitung sebagai data live baru.
+- Momsmoney/Kontan adalah artikel publik sekunder. Jika validasi katalog gagal, hasil percobaan terbaru tetap masuk jalur audit/review tanpa menimpa katalog last-good.
