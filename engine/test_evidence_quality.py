@@ -108,6 +108,54 @@ def test_unsubstantiated_price_is_cleared_and_sent_to_review():
     assert row["period_certainty"] == "estimated"
 
 
+def test_name_cleaned_to_empty_is_reviewed_and_never_published_as_product_price():
+    with __import__("tempfile").TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "generic_price_labels.csv"
+        fields = [
+            "product_text", "merchant_name", "campaign_title", "promo_status",
+            "valid_from", "valid_until", "period_precision", "promo_price",
+            "price_basis", "offer_text", "source_url", "source_name",
+        ]
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows([
+                {
+                    "product_text": "Potongan harga", "merchant_name": "Alfamart",
+                    "campaign_title": "Promo JSM Alfamart 23-25 Oktober 2026",
+                    "promo_status": "active", "valid_from": "2026-10-23",
+                    "valid_until": "2026-10-25", "period_precision": "range",
+                    "promo_price": "5000", "price_basis": "offer_price",
+                    "offer_text": "Rp5.000.", "source_url": "https://example.test/alfamart",
+                    "source_name": "Katalogpromosi.com",
+                },
+                {
+                    "product_text": "Harga spesial", "merchant_name": "Foodhall",
+                    "campaign_title": "Promo THEFOODHALL 23-29 Oktober 2026",
+                    "promo_status": "active", "valid_from": "2026-10-23",
+                    "valid_until": "2026-10-29", "period_precision": "range",
+                    "promo_price": "50000", "price_basis": "offer_price",
+                    "offer_text": "Rp 50.000 dan Rp 100.000 berlaku untuk produk tertentu",
+                    "source_url": "https://example.test/foodhall",
+                    "source_name": "Katalogpromosi.com",
+                },
+            ])
+        rows = enhancer.load_source(path, path.name)
+
+    assert len(rows) == 2
+    for row in rows:
+        assert row["product_text"] == ""
+        assert row["product_validation_status"] == "review"
+        assert row["promo_price"] is None
+        assert row["normal_price"] is None
+        assert row["discount_percent"] is None
+        assert row["product_subcategory"] == "Produk belum teridentifikasi"
+        display = enhancer.make_clean_row(row, review=True)
+        assert display["Nama Produk"] == "Produk belum teridentifikasi"
+        assert display["Harga Promo (Rp)"] is None
+        assert display["Harga Asli (Rp)"] is None
+
+
 def test_period_certainty_is_separate_from_retailer_verification():
     assert period_certainty("range", "active", None, "23-25 Oktober 2026") == "confirmed"
     assert period_certainty("month", "active_estimated", None, "Oktober 2026") == "estimated"

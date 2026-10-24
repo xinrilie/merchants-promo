@@ -8,7 +8,7 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 > **Penting:** data Hemat.id, Katalogpromosi.com, dan Scanharga.com merupakan data agregator/konten. Data tidak otomatis dikonfirmasi oleh retailer resmi. Gunakan kolom sumber dan status verifikasi sebelum menjadikan harga sebagai referensi final.
 
-> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, serta guardrail tambahan untuk judul artikel, syarat minimum belanja, jumlah benefit pembayaran QRIS, dan pemulihan nama SKU yang sempat terpotong. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 56 passed.
+> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, serta guardrail tambahan untuk judul artikel, syarat minimum belanja, jumlah benefit pembayaran QRIS, dan pemulihan nama SKU yang sempat terpotong. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 57 passed.
 
 ---
 
@@ -181,7 +181,7 @@ Gunakan hasil scraping sesuai ketentuan situs sumber, hak atas konten, dan atura
 - Baris tunggal `Min. Belanja`, `Minimum Pembelanjaan`, `Minimum Transaksi`, atau `Minimal Pembelian` ditolak dari katalog produk; nominalnya adalah ambang transaksi, bukan harga promo produk.
 - Baris pendek yang berisi nominal benefit pembayaran (`QRIS`, `myBCA`, `BCA mobile`, cashback, atau bahasa pembayaran sejenis) diarahkan ke `Perlu Review`; nominal tidak lagi ditampilkan di kolom harga produk sampai hubungan ke SKU terbukti.
 - Nama produk yang sebelumnya terpotong menjadi satu-dua kata dipulihkan dari nama asal hanya jika nama asal memuat atribut SKU/ukuran yang eksplisit. Contoh: `Pasti` dipulihkan menjadi `Pasti Hemat Facial Tissue 1000 sheet` dan dikategorikan sebagai `Tisu & Produk Kertas`.
-- Tes regresi mencakup contoh-contoh di atas; tes final build: **56 passed**.
+- Tes regresi mencakup contoh-contoh di atas; tes final build: **57 passed**.
 
 ### Bukti dan verifikasi
 
@@ -189,3 +189,10 @@ Gunakan hasil scraping sesuai ketentuan situs sumber, hak atas konten, dan atura
 - `Kepastian Periode` terpisah dari `Verifikasi Sumber`. `Periode Pasti` berarti rentang tanggal eksplisit dapat ditelusuri; ini **bukan** bukti bahwa retailer resmi telah mengonfirmasi promo.
 - `promo_multisource_runlog.json` menyediakan `source_health` untuk tiap sumber: request sukses/gagal, jumlah baris baru versus fallback, dan coverage bukti harga/diskon/periode. `promo_catalog_multisource_quality_report.json` memiliki `source_freshness` yang membedakan baris fresh, stale (>7 hari), dipertahankan dari run sebelumnya, dan historis/tanpa timestamp. Timestamp yang hilang tidak pernah dihitung sebagai data live baru.
 - Momsmoney/Kontan adalah artikel publik sekunder. Jika validasi katalog gagal, hasil percobaan terbaru tetap masuk jalur audit/review tanpa menimpa katalog last-good.
+
+
+### Penanganan baris tanpa nama produk
+
+- Bila `clean_product_name()` menghapus seluruh teks kandidat karena teks sumber hanya berupa frasa umum seperti `Potongan harga` atau `Harga spesial`, baris tidak dipublikasikan ke katalog aktif. Baris disimpan di `Perlu Review` dengan label tampilan `Produk belum teridentifikasi`.
+- Nominal yang melekat pada baris tanpa identitas produk tidak dipertahankan sebagai harga SKU atau diskon produk sampai ada bukti yang menghubungkannya ke produk tertentu. Detail penawaran, kampanye, merchant, dan URL sumber tetap tersedia untuk audit.
+- Suite regresi mencakup pola tersebut; hasil uji saat ini: **57 passed**.

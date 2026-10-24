@@ -754,6 +754,38 @@ def load_source(path, source_label):
                 row.get("data_quality_flags") or "",
                 "payment_benefit_amount_not_product_price",
             ])) or None
+
+        # If name normalization strips the whole candidate (e.g. source phrases
+        # like "Potongan harga" or "Harga spesial"), this is not a product SKU.
+        # Keep the source row for review/audit but never publish its attached amount
+        # as the price of an unidentified product.
+        if not product.strip():
+            row["product_validation_status"] = "review"
+            row["product_rejection_reason"] = None
+            row["product_review_reason"] = "Nama produk tidak teridentifikasi setelah pembersihan teks"
+            row["product_category"] = "Lainnya / Perlu Review"
+            row["product_subcategory"] = "Produk belum teridentifikasi"
+            for field in (
+                "promo_price", "normal_price", "promo_price_evidence_text",
+                "normal_price_evidence_text", "discount_evidence_text",
+                "discount_percent", "discount_percent_calculated",
+                "discount_savings_rp", "estimated_bundle_discount_percent",
+            ):
+                row[field] = None
+            row["discount_percent_basis"] = "not_available"
+            row["discount_percent_confidence"] = "unknown"
+            row["price_basis"] = None
+            row["price_parse_method"] = "unidentified_amount_not_product_price"
+            row["price_quality_flag"] = " | ".join(pipe_unique([
+                row.get("price_quality_flag") or "",
+                "product_identity_missing_amount_not_product_price",
+            ])) or None
+            row["data_quality_flags"] = " | ".join(pipe_unique([
+                row.get("data_quality_flags") or "",
+                "product_identity_missing_after_name_cleaning",
+                "product_identity_review:Nama produk tidak teridentifikasi setelah pembersihan teks",
+                "product_identity_missing_amount_not_product_price",
+            ])) or None
         output.append(row)
     return output
 
@@ -1590,6 +1622,10 @@ def make_clean_row(row, review=False):
     item["product_category"], item["product_subcategory"] = classify_promo_category(row)
     item["display_notes"] = display_notes(row)
     out = {label: item.get(key) for label, key in CLEAN_COLUMNS}
+    if review and not str(out.get("Nama Produk") or "").strip():
+        # The review sheet should be readable, while the full audit retains the
+        # original cleaned-empty value plus original_product_text/raw_line.
+        out["Nama Produk"] = "Produk belum teridentifikasi"
     if review:
         reasons = []
         if row.get("promo_status") == "active_estimated": reasons.append("Periode promo estimasi")
