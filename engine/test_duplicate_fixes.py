@@ -3,7 +3,7 @@ from __future__ import annotations
 """Regression tests for product-name cleanup and cross-source offer dedupe."""
 
 from promo_names import clean_product_name, product_name_similarity, product_names_can_auto_merge
-from enrich_existing_promo_catalog_multisource import merge_equivalent_cross_source_offers, build_possible_duplicate_rows
+from enrich_existing_promo_catalog_multisource import merge_equivalent_cross_source_offers
 
 
 def row(**overrides):
@@ -72,14 +72,14 @@ def test_duplicate_fixes_regressions():
     # My Baby B1G1 should be one offer even when the two sources use slightly different wording.
     m1 = row(source_name="Hemat.id", source_dataset="hemat.csv", valid_from="2026-10-01",
              valid_until="2026-10-31", period_precision="month", source_url="https://hemat.example/mybaby")
-    m2 = row(source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv",
+    m2 = row(source_name="Katalogpromosi.com", source_dataset="katalogpromosi.csv",
              offer_text="Beli 1 Gratis 1", deal_type="Beli 1 Gratis 1",
              campaign_title="Promo Berhadiah Indomaret 15-28 Oktober 2026 - Beli 1 Gratis 1 My Baby",
-             source_url="https://momsmoney.example/mybaby")
+             source_url="https://katalogpromosi.example/mybaby")
     merged, groups, absorbed = merge_equivalent_cross_source_offers([m1, m2])
     assert len(merged) == 1 and groups == 1 and absorbed == 1, "B1G1 duplicate was not consolidated"
     assert merged[0]["valid_from"] == "2026-10-15", "Prefer the explicit date range"
-    assert "Hemat.id" in (merged[0].get("source_names") or "") and "Momsmoney/Kontan" in (merged[0].get("source_names") or "")
+    assert "Hemat.id" in (merged[0].get("source_names") or "") and "Katalogpromosi.com" in (merged[0].get("source_names") or "")
 
     # Aice with a percentage claim vs explicit prices should merge when price and period agree.
     a1 = row(product_text="Aice Mochi Vanilla / Chocolate 270 g", merchant_name="Hypermart",
@@ -93,7 +93,7 @@ def test_duplicate_fixes_regressions():
              offer_text="Diskon 67%", purchase_condition=None, deal_type="Diskon Persentase", price_basis="offer_price")
     a2 = row(product_text="Aice Mochi Vanilla / Chocolate 270 g", original_product_text="Aice Mochi Vanilla/ Chocolate 270 g",
              product_name_variants="Aice Mochi Vanilla/ Chocolate 270 g", merchant_name="Hypermart",
-             source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv", source_url="https://momsmoney.example/aice",
+             source_name="Katalogpromosi.com", source_dataset="katalogpromosi.csv", source_url="https://katalogpromosi.example/aice",
              campaign_title="Promo Hypermart Daily Fresh 16-22 Oktober 2026", valid_from="2026-10-16",
              valid_until="2026-10-22", period_precision="range", promo_price=9900,
              normal_price=29990, discount_percent=67, discount_percent_basis="calculated_from_unit_prices",
@@ -116,9 +116,9 @@ def test_duplicate_fixes_regressions():
              source_dataset="hemat.csv", source_url="https://hemat.example/walls-a",
              source_item_url="https://hemat.example/item/walls-a")
     f2 = dict(f1, product_text=fuzzy_name_b, original_product_text=fuzzy_name_b,
-              product_name_variants=fuzzy_name_b, source_name="Momsmoney/Kontan",
-              source_dataset="momsmoney.csv", source_url="https://momsmoney.example/walls-b",
-              source_item_url="https://momsmoney.example/item/walls-b")
+              product_name_variants=fuzzy_name_b, source_name="Katalogpromosi.com",
+              source_dataset="katalogpromosi.csv", source_url="https://katalogpromosi.example/walls-b",
+              source_item_url="https://katalogpromosi.example/item/walls-b")
     fuzzy_merged, fuzzy_groups, fuzzy_absorbed = merge_equivalent_cross_source_offers([f1, f2])
     assert len(fuzzy_merged) == 1 and fuzzy_groups == 1 and fuzzy_absorbed == 1, "High-confidence fuzzy name match was not consolidated"
 
@@ -140,9 +140,9 @@ def test_duplicate_fixes_regressions():
         discount_percent=67, discount_percent_basis="calculated_from_unit_prices",
         offer_text="Harga Normal Rp 29.990 Harga Promo Rp 9.900", deal_type="Diskon Persentase", price_basis="offer_price",
         period_precision="month", valid_from="2026-10-01", valid_until="2026-10-31", period_flags=None)
-    known_merchant = row(merchant_name="Hypermart", source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv",
-        source_url="https://momsmoney.example/aice", source_page_url="https://momsmoney.example/aice",
-        source_item_url="https://momsmoney.example/item/aice", product_text="Aice Mochi Vanilla / Chocolate 270 g",
+    known_merchant = row(merchant_name="Hypermart", source_name="Katalogpromosi.com", source_dataset="katalogpromosi.csv",
+        source_url="https://katalogpromosi.example/aice", source_page_url="https://katalogpromosi.example/aice",
+        source_item_url="https://katalogpromosi.example/item/aice", product_text="Aice Mochi Vanilla / Chocolate 270 g",
         original_product_text="Aice Mochi Vanilla / Chocolate 270 g", product_name_variants="Aice Mochi Vanilla / Chocolate 270 g",
         promo_price=9900, normal_price=29990, discount_percent=67,
         discount_percent_basis="calculated_from_unit_prices", discount_percent_confidence="high",
@@ -162,9 +162,9 @@ def test_duplicate_fixes_regressions():
         promo_price=None, normal_price=None, discount_percent=50, discount_percent_basis="explicit_offer",
         offer_text="Diskon 50%", purchase_condition=None, deal_type="Diskon Persentase", price_basis="non_numeric_bundle_offer",
         valid_from="2026-10-01", valid_until="2026-10-31", period_precision="month", period_flags=None)
-    mybaby_known = row(merchant_name="Indomaret", source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv",
-        source_url="https://momsmoney.example/promo-indomaret", source_page_url="https://momsmoney.example/promo-indomaret",
-        source_item_url="https://momsmoney.example/item/mybaby", product_text="MY BABY Body Cologne Sweet Floral 100ml btl",
+    mybaby_known = row(merchant_name="Indomaret", source_name="Katalogpromosi.com", source_dataset="katalogpromosi.csv",
+        source_url="https://katalogpromosi.example/promo-indomaret", source_page_url="https://katalogpromosi.example/promo-indomaret",
+        source_item_url="https://katalogpromosi.example/item/mybaby", product_text="MY BABY Body Cologne Sweet Floral 100ml btl",
         original_product_text="MY BABY Body Cologne Sweet Floral 100ml btl", product_name_variants="MY BABY Body Cologne Sweet Floral 100ml btl",
         promo_price=None, normal_price=None, discount_percent=50, discount_percent_basis="bundle_estimate_same_item_value",
         discount_percent_confidence="low", estimated_bundle_discount_percent=50,
@@ -177,8 +177,8 @@ def test_duplicate_fixes_regressions():
     # If the exact same offer could correspond to two retailers named in the
     # combined Hemat URL, do not guess which retailer owns the card.
     known_alfamart = dict(known_merchant, merchant_name="Alfamart",
-        source_url="https://momsmoney.example/aice-alfamart",
-        source_page_url="https://momsmoney.example/aice-alfamart",
+        source_url="https://katalogpromosi.example/aice-alfamart",
+        source_page_url="https://katalogpromosi.example/aice-alfamart",
         campaign_title="Promo Alfamart 16-22 Oktober 2026")
     ambiguous_result, _, _ = merge_equivalent_cross_source_offers([
         dict(unknown_merchant), dict(known_merchant), known_alfamart
@@ -207,7 +207,7 @@ def test_duplicate_fixes_regressions():
     c1 = dict(a2, promo_price=10900, discount_percent=63.7, discount_percent_calculated=63.7,
               source_url="https://hemat.example/aice-price-a", source_name="Hemat.id", source_dataset="hemat.csv")
     c2 = dict(a2, promo_price=9900, discount_percent=67.0, discount_percent_calculated=67.0,
-              source_url="https://momsmoney.example/aice-price-b", source_name="Momsmoney/Kontan", source_dataset="momsmoney.csv")
+              source_url="https://katalogpromosi.example/aice-price-b", source_name="Katalogpromosi.com", source_dataset="katalogpromosi.csv")
     merged, groups, absorbed = merge_equivalent_cross_source_offers([c1, c2])
     assert len(merged) == 2 and groups == 0, "Conflicting prices were silently merged"
     print("SELF-TEST PASSED: name cleaning, conservative fuzzy matching, duplicate-candidate review, and price-conflict protection.")

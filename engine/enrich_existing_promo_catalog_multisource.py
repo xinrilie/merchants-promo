@@ -8,7 +8,6 @@ from collections import Counter, OrderedDict, defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-import importlib.util
 import math
 
 from promo_names import (
@@ -20,18 +19,18 @@ from promo_product_validation import PRODUCT_SPEC_RE, product_candidate_rejectio
 from promo_multisource_collector import infer_merchant_dynamic
 from promo_evidence import find_amount_evidence, find_discount_evidence, extract_period_evidence, period_certainty, source_verification_label
 from promo_categories import CATEGORY_TAXONOMY, CATEGORY_NAMES, classify_promo_category
+from promo_campaign_utils import (
+    TODAY, MERCHANT_ALIASES, campaign_type, discount_fields, normalize_text,
+    parse_explicit_discount, parse_period_details, promo_status, timestamp,
+)
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ENGINE_DIR.parent
 INPUT_DIR = ROOT_DIR / "input"
 INTERNAL_DIR = ROOT_DIR / "_internal"
 OUTPUT_DIR = ROOT_DIR / "hasil"
-OLD_CSV = INPUT_DIR / "momskonten_promo_active.csv"
-NEW_CSV = INPUT_DIR / "promo_catalog_all_merchants.csv"
-MULTISOURCE_CSV = INTERNAL_DIR / "promo_multisource_products_all.csv"  # dibuat oleh collector
-MOMSMONEY_CSV = INTERNAL_DIR / "promo_catalog_all_merchants.csv"  # hasil scrape Momsmoney/Kontan
-MOMSMONEY_RUN_LOG = INTERNAL_DIR / "promo_catalog_all_merchants_runlog.json"
-MOMSMONEY_ATTEMPT_CSV = INTERNAL_DIR / "promo_catalog_all_merchants_latest_attempt_products.csv"
+MULTISOURCE_CSV = INTERNAL_DIR / "promo_multisource_products_all.csv"  # hasil collector tiga sumber aktif
+MULTISOURCE_RUN_LOG = INTERNAL_DIR / "promo_multisource_runlog.json"
 OUT_ACTIVE = OUTPUT_DIR / "Katalog_Promo_Final.csv"
 OUT_CONFIRMED = INTERNAL_DIR / "promo_catalog_multisource_confirmed.csv"
 OUT_REVIEW = INTERNAL_DIR / "promo_catalog_multisource_review.csv"
@@ -42,29 +41,6 @@ OUT_POSSIBLE_DUPES = INTERNAL_DIR / "promo_possible_duplicate_candidates.csv"
 OUT_XLSX = OUTPUT_DIR / "Katalog_Promo_Final.xlsx"
 OUT_REJECTED_PRODUCTS = INTERNAL_DIR / "promo_product_rows_rejected.csv"
 CATEGORY_REVIEW_LIST_CSV = INPUT_DIR / "category_review_list.csv"
-
-# Reuse the exact parsing/discount logic that is in the revised scraper.
-spec = importlib.util.spec_from_file_location(
-    "promo_scraper", ENGINE_DIR / "promo_catalog_all_merchants.py"
-)
-if spec is None or spec.loader is None:
-    raise RuntimeError("Tidak dapat memuat promo_catalog_all_merchants.py")
-scraper = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(scraper)
-
-REQUIRED_SCRAPER_FUNCTIONS = (
-    "normalize_text", "infer_merchant", "campaign_type", "parse_period_details",
-    "promo_status", "parse_explicit_discount", "discount_fields", "timestamp",
-)
-_missing_functions = [name for name in REQUIRED_SCRAPER_FUNCTIONS if not hasattr(scraper, name)]
-if _missing_functions:
-    raise RuntimeError(
-        "Engine promo_catalog_all_merchants.py tidak kompatibel dengan enhancer. "
-        "Fungsi yang belum tersedia: " + ", ".join(_missing_functions) + ". "
-        "Pastikan file engine berada pada satu repositori dan diperbarui bersama."
-    )
-
-TODAY = scraper.TODAY
 
 FIELDS = [
     "product_text", "original_product_text", "product_name_variants", "product_category", "product_subcategory",
@@ -254,7 +230,7 @@ def latest_scrape_timestamp(rows):
 
 
 def norm_key(value) -> str:
-    value = scraper.normalize_text(value)
+    value = normalize_text(value)
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return " ".join(value.split())
 
@@ -291,7 +267,7 @@ def _known_merchants_in_text(value):
         return set()
     hits = set()
     aliases = []
-    for canonical, alias_values in getattr(scraper, "MERCHANT_ALIASES", []):
+    for canonical, alias_values in MERCHANT_ALIASES:
         for alias in alias_values:
             normalized_alias = _merchant_text_normalize(alias)
             if normalized_alias:
@@ -397,13 +373,13 @@ def canonical_campaign_type(value, title):
     }
     if value:
         return mapping.get(value.casefold(), value)
-    return scraper.campaign_type(title or "")
+    return campaign_type(title or "")
 
 
 def derive_deal_type(offer_text, existing=None):
     if existing:
         return existing
-    text = scraper.normalize_text(offer_text)
+    text = normalize_text(offer_text)
     patterns = [
         (r"\bbeli\s*\d+\s*gratis\s*\d+|\bbuy\s*\d+\s*get\s*\d+", "Beli Gratis"),
         (r"\bdiskon\s*\d+(?:[.,]\d+)?\s*%|\bpotongan(?:\s+harga)?\s*\d+\s*%", "Diskon Persentase"),
@@ -431,7 +407,7 @@ def period_meta(row, title):
     if precision not in known_precisions:
         precision = "unknown"
 
-    title_meta = scraper.parse_period_details(title or "")
+    title_meta = parse_period_details(title or "")
     title_precision = title_meta.get("period_precision", "unknown")
     exact_precisions = {"range", "single_day"}
 
@@ -500,7 +476,7 @@ def current_status(start, end, precision, period_flags=None, source_status=None)
         if (precision or "").casefold() == "until":
             return "active_estimated"
         return "unknown"
-    status = scraper.promo_status(start, end, precision)
+    status = promo_status(start, end, precision, today=TODAY)
     if (precision or "").casefold() == "unverified" and status == "upcoming":
         status = "upcoming_estimated"
     flags = set(pipe_unique([period_flags or ""]))
@@ -520,12 +496,12 @@ def current_status(start, end, precision, period_flags=None, source_status=None)
 
 
 def campaign_discount(title):
-    value, basis = scraper.parse_explicit_discount(title or "")
+    value, basis = parse_explicit_discount(title or "")
     if value is not None:
         return value, f"title_{basis}"
     # Keep soft headline claims visible, but don't apply them to every SKU as
     # a product discount.
-    m = re.search(r"diskon\s+hampir\s+(\d{1,2}(?:[.,]\d+)?)\s*%", scraper.normalize_text(title or ""))
+    m = re.search(r"diskon\s+hampir\s+(\d{1,2}(?:[.,]\d+)?)\s*%", normalize_text(title or ""))
     if m:
         return float(m.group(1).replace(",", ".")), "title_approximate_claim"
     return None, None
@@ -559,7 +535,7 @@ SKU_TOKEN_STOPWORDS = {
 
 
 def _sku_identity_tokens(value):
-    text = scraper.normalize_text(str(value or ""))
+    text = normalize_text(str(value or ""))
     tokens = re.findall(r"[a-z]+", text)
     return {token for token in tokens if token not in SKU_TOKEN_STOPWORDS and len(token) > 1}
 
@@ -602,7 +578,7 @@ def safe_discount_fields(offer_text, promo_price, normal_price, price_basis,
                          product_text=None, original_product_text=None, raw_line=None):
     """Hitung diskon konservatif dan pisahkan hadiah lintas-SKU dari diskon produk."""
     flags = quality_flags if quality_flags is not None else []
-    result = scraper.discount_fields(
+    result = discount_fields(
         offer_text=offer_text,
         promo_price=promo_price,
         normal_price=normal_price,
@@ -638,75 +614,6 @@ def safe_discount_fields(offer_text, promo_price, normal_price, price_basis,
         result["discount_percent_confidence"] = "unknown"
         flags.append("cross_sku_gift_not_product_discount")
     return result
-
-
-def momsmoney_output_is_fresh() -> tuple[bool, str]:
-    """Only ingest a Momsmoney CSV updated successfully in today's run.
-
-    The legacy collector intentionally preserves the previous CSV if validation
-    fails. Its run log is therefore the freshness gate; a stale CSV must not be
-    treated as newly scraped data.
-    """
-    if not MOMSMONEY_CSV.exists():
-        return False, "CSV hasil Momsmoney belum ada"
-    if not MOMSMONEY_RUN_LOG.exists():
-        return False, "run log Momsmoney belum ada; CSV dilewati agar data lama tidak disangka baru"
-    try:
-        log = json.loads(MOMSMONEY_RUN_LOG.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return False, f"run log Momsmoney tidak terbaca: {type(exc).__name__}"
-    checked_at = str(log.get("checked_at") or "")
-    if log.get("output_status") != "updated":
-        return False, f"output_status Momsmoney={log.get('output_status') or 'unknown'}"
-    if checked_at[:10] != TODAY.isoformat():
-        return False, f"tanggal run Momsmoney bukan hari ini ({checked_at[:10] or 'tidak tersedia'})"
-    return True, "hasil scrape Momsmoney berhasil diperbarui hari ini"
-
-
-def momsmoney_fresh_input() -> tuple[Path | None, str]:
-    """Choose only current-run Momsmoney data, never a stale last-good CSV.
-
-    If collector validation succeeds, the last-good catalog is safe. If it
-    fails its volume guard, use the separately written latest-attempt CSV as
-    candidates: exact-period rows can join the catalog and estimated rows are
-    routed to review by the enhancer. The previous catalog is never substituted
-    for a failed current attempt.
-    """
-    if not MOMSMONEY_RUN_LOG.exists():
-        return None, "run log Momsmoney belum ada"
-    try:
-        log = json.loads(MOMSMONEY_RUN_LOG.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return None, f"run log Momsmoney tidak terbaca: {type(exc).__name__}"
-
-    checked_at = str(log.get("checked_at") or "")
-    if checked_at[:10] != TODAY.isoformat():
-        return None, f"tanggal run Momsmoney bukan hari ini ({checked_at[:10] or 'tidak tersedia'})"
-
-    successful_articles = as_int(log.get("successful_articles")) or 0
-    if successful_articles <= 0:
-        return None, "tidak ada artikel Momsmoney berhasil dibaca pada run hari ini"
-
-    # Prefer current attempted rows when available, because it includes both
-    # confirmed and estimated candidates with their own period precision.
-    latest_rows = as_int(log.get("latest_attempt_product_rows")) or 0
-    if MOMSMONEY_ATTEMPT_CSV.exists() and latest_rows > 0:
-        status = str(log.get("output_status") or "unknown")
-        if status == "updated":
-            note = f"menggunakan {latest_rows} kandidat percobaan terbaru; katalog collector lolos validasi"
-        else:
-            note = (
-                f"menggunakan {latest_rows} kandidat dari percobaan terbaru; "
-                f"katalog terakhir tetap dipertahankan karena output_status={status}"
-            )
-        return MOMSMONEY_ATTEMPT_CSV, note
-
-    # Backward compatibility for repositories running an older collector:
-    # only load the stable CSV when today's run explicitly passed validation.
-    output_fresh, output_note = momsmoney_output_is_fresh()
-    if output_fresh:
-        return MOMSMONEY_CSV, output_note
-    return None, f"tidak ada kandidat Momsmoney segar yang aman dimuat; {output_note}"
 
 
 def _validated_value_evidence(raw, amount, evidence_field, kind, fallback_texts):
@@ -863,21 +770,14 @@ def load_source(path, source_label):
 
         source_name_value = (raw.get("source_name") or "").strip()
         source_type_value = (raw.get("source_type") or "").strip()
-        if not source_name_value:
-            if "promo_catalog_all_merchants" in source_label.casefold() or "momsmoney" in source_label.casefold() or "momsmoney" in original_product.casefold():
-                source_name_value = "Momsmoney/Kontan"
         if not source_type_value:
-            if source_name_value.casefold().startswith("momsmoney") or "promo_catalog_all_merchants" in source_label.casefold() or "momsmoney" in source_label.casefold():
-                source_type_value = "secondary_public_articles"
-            elif "promo_multisource" in source_label.casefold() or source_name_value in {"Hemat.id", "Katalogpromosi.com", "Scanharga.com"}:
+            if "promo_multisource" in source_label.casefold() or source_name_value in {"Hemat.id", "Katalogpromosi.com", "Scanharga.com"}:
                 source_type_value = "aggregator"
         source_name_value = source_name_value or None
         source_type_value = source_type_value or None
         verification_status_value = (raw.get("verification_status") or "").strip()
         if not verification_status_value:
-            if source_type_value == "secondary_public_articles":
-                verification_status_value = "secondary_public_articles"
-            elif source_type_value == "aggregator" or "promo_multisource" in source_label.casefold():
+            if source_type_value == "aggregator" or "promo_multisource" in source_label.casefold():
                 verification_status_value = "aggregator_only"
             else:
                 verification_status_value = "historical_baseline_unknown"
@@ -1076,7 +976,7 @@ def merge_rows(rows):
                 "published_at", "period_precision", "period_flags", "promo_price",
                 "normal_price", "discount_percent", "price_parse_method", "price_quality_flag",
                 "merchant_name", "source_url",
-            )) + (2 if r.get("source_dataset") == OLD_CSV.name else 0)
+            ))
         best = dict(max(group, key=score))
         validation_statuses = {str(r.get("product_validation_status") or "eligible") for r in group}
         # Any independent source with stronger product evidence can corroborate an
@@ -1340,7 +1240,7 @@ def _bundle_ratio(row):
 
 
 def _offer_family(row):
-    text = scraper.normalize_text(" ".join(str(row.get(k) or "") for k in (
+    text = normalize_text(" ".join(str(row.get(k) or "") for k in (
         "offer_text", "purchase_condition", "deal_type"
     )))
     ratio = _bundle_ratio(row)
@@ -1402,7 +1302,7 @@ def _compatible_prices(a, b):
 
 def _purchase_quantity_signature(row):
     """Return an explicit buy-quantity from offer text/condition, if present."""
-    text = scraper.normalize_text(" ".join(str(row.get(k) or "") for k in (
+    text = normalize_text(" ".join(str(row.get(k) or "") for k in (
         "purchase_condition", "offer_text", "deal_type"
     )))
     match = re.search(
@@ -1933,7 +1833,7 @@ def discount_price_consistency_issue(row):
         return None
     stated = as_decimal(row.get("discount_percent"))
     if stated is None:
-        stated, parsed_basis = scraper.parse_explicit_discount(str(row.get("offer_text") or ""))
+        stated, parsed_basis = parse_explicit_discount(str(row.get("offer_text") or ""))
         stated = as_decimal(stated)
         if stated is None or parsed_basis not in {"explicit_offer", "explicit_max"}:
             return None
@@ -2529,7 +2429,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ["Diskon vs harga", f"{sum((export_gate_report or {}).get('issue_counts', {}).get(k, 0) for k in ('explicit_discount_price_math_disagreement', 'maximum_discount_below_price_calculation'))} temuan klaim diskon yang tidak cocok dengan hitungan harga; klaim sumber dipisah dari Diskon (%) dan baris perlu review."],
         ["Kesegaran Data", "Status per baris: segar ≤7 hari, katalog lama dipertahankan, usang, atau historis/timestamp tidak tersedia. Ini berbeda dari Verifikasi Sumber."],
         ["Status Validasi Produk", "Kolom ini terpisah dari Status Promo. 'Valid' berarti identitas produk dan pemeriksaan harga/merchant lolos gerbang; 'Perlu review' berarti perlu pemeriksaan, meskipun tanggal promo masih berstatus Aktif."],
-        ["Sumber produk", "Hemat.id, Katalogpromosi.com, Scanharga.com, dan katalog lama"],
+        ["Sumber produk", "Hemat.id, Katalogpromosi.com, dan Scanharga.com"],
         ["Catatan", "Kepastian periode dipisahkan dari verifikasi sumber; agregator dan artikel publik bukan verifikasi resmi retailer."],
         ["Petunjuk", f"Buka sheet Aktif untuk katalog sehari-hari. Gunakan filter Kategori Produk dan Subkategori untuk mencari jenis barang. Ringkasan Kategori menunjukkan jumlah promo aktif per kategori; Referensi Kategori berisi daftar {len(CATEGORY_TAXONOMY)} kategori. Daftar Filter Produk mengulang daftar contoh klasifikasi yang disimpan di input/category_review_list.csv."],
         ["File teknis", "Data mentah dan log tersimpan di folder _internal; laporan gerbang ekspor ada di promo_export_quality_gate_report.json."],
@@ -2839,12 +2739,10 @@ def build_source_freshness_report(all_loaded_rows, now_dt=None, source_run_metad
             names = ["Multi-source provenance; freshness not attributable"]
         else:
             dataset = str(row.get("source_dataset") or "").strip()
-            if "momsmoney" in dataset.casefold():
-                names = ["Momsmoney/Kontan"]
-            elif "multi" in dataset.casefold():
+            if "multi" in dataset.casefold():
                 names = ["Multi-source aggregator"]
             else:
-                names = ["Historical baseline; source unknown"]
+                names = ["Source tidak diketahui"]
         for name in names:
             per_source[name].append(row)
 
@@ -2913,9 +2811,13 @@ def build_source_freshness_report(all_loaded_rows, now_dt=None, source_run_metad
                     "baris kandidat baru hanya menunjukkan percobaan ekstraksi, bukan pembaruan katalog penuh."
                 )
             elif output_status == "updated":
-                run_meta["freshness_note"] = "Run log menunjukkan katalog stabil diperbarui; periksa freshness per baris tetap."
+                run_meta["freshness_note"] = "Run log menunjukkan baris baru berhasil dikumpulkan; freshness tetap dihitung per baris."
+            elif output_status == "mixed_fresh_and_preserved":
+                run_meta["freshness_note"] = "Sumber menghasilkan baris baru dan mempertahankan sebagian baris lama; jangan menganggap seluruh sumber segar."
+            elif output_status == "request_failed":
+                run_meta["freshness_note"] = "Request sumber gagal; baris yang ada mungkin merupakan data lama yang dipertahankan."
             else:
-                run_meta["freshness_note"] = "Status pembaruan katalog tidak terkonfirmasi; jangan menganggap semua baris segar."
+                run_meta["freshness_note"] = "Status run belum cukup untuk menyatakan seluruh data segar."
             if run_date_current is False:
                 run_meta["freshness_note"] = (
                     f"Run log berasal dari {str(run_meta.get('checked_at') or 'tanggal tidak diketahui')[:10]}, "
@@ -2930,43 +2832,61 @@ def build_source_freshness_report(all_loaded_rows, now_dt=None, source_run_metad
 
 
 def current_source_run_metadata():
-    """Read the Momsmoney run log as operational context, not row-level freshness proof."""
-    if not MOMSMONEY_RUN_LOG.exists():
+    """Read generic health metadata for Hemat.id, Katalogpromosi.com, and Scanharga.com."""
+    run_log_path = MULTISOURCE_RUN_LOG
+    if not run_log_path.exists():
         return {}
     try:
-        log = json.loads(MOMSMONEY_RUN_LOG.read_text(encoding="utf-8-sig"))
+        log = json.loads(run_log_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return {}
-    keys = (
-        "checked_at", "reference_date", "output_status", "latest_attempt_product_rows",
-        "active_articles", "active_product_rows", "active_estimated_articles",
-        "active_estimated_product_rows", "upcoming_articles", "expired_articles",
-        "unknown_period_articles", "validation",
-    )
-    metadata = {key: log.get(key) for key in keys if key in log}
-    checked_at = str(log.get("checked_at") or "")
-    metadata["run_log_is_current_date"] = bool(checked_at[:10] == TODAY.isoformat())
-    return {"Momsmoney/Kontan": metadata}
 
+    checked_at = str(log.get("built_at") or "")
+    reference_date = str(log.get("reference_date") or "")
+    is_current = bool(checked_at[:10] == TODAY.isoformat())
+    results = {}
+    health = log.get("source_health") or {}
+    for source_name, stats in health.items():
+        stats = dict(stats or {})
+        status = str(stats.get("status") or "unknown")
+        preserved = as_int(stats.get("preserved_previous_rows")) or 0
+        fresh = as_int(stats.get("fresh_product_rows")) or 0
+        if status == "preserved_previous" or (preserved > 0 and fresh == 0):
+            output_status = "preserved_previous_catalog"
+        elif status == "fresh" and preserved > 0:
+            output_status = "mixed_fresh_and_preserved"
+        elif status == "fresh":
+            output_status = "updated"
+        elif status in {"request_failed", "blocked_or_limited"}:
+            output_status = "request_failed"
+        else:
+            output_status = status
+        results[source_name] = {
+            **stats,
+            "checked_at": checked_at or None,
+            "reference_date": reference_date or None,
+            "output_status": output_status,
+            "source_health_status": status,
+            "run_log_is_current_date": is_current,
+        }
+    return results
 
 def main():
     INTERNAL_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    if not OLD_CSV.exists() or not NEW_CSV.exists():
-        raise FileNotFoundError(f"Dua CSV lama wajib ada: {OLD_CSV.name} dan {NEW_CSV.name}")
-
-    old_rows = load_source(OLD_CSV, OLD_CSV.name)
-    new_rows = load_source(NEW_CSV, NEW_CSV.name)
-    multisource_rows = load_source(MULTISOURCE_CSV, MULTISOURCE_CSV.name) if MULTISOURCE_CSV.exists() else []
-    momsmoney_input_path, momsmoney_status_note = momsmoney_fresh_input()
-    momsmoney_fresh = momsmoney_input_path is not None
-    momsmoney_input_label = MOMSMONEY_CSV.name
-    if momsmoney_input_path is not None:
-        momsmoney_rows = load_source(momsmoney_input_path, momsmoney_input_label)
-    else:
-        momsmoney_rows = []
-    print("Momsmoney/Kontan fresh scrape:", len(momsmoney_rows), "rows;", momsmoney_status_note)
-    all_loaded_rows = old_rows + new_rows + multisource_rows + momsmoney_rows
+    if not MULTISOURCE_CSV.exists():
+        raise FileNotFoundError(
+            f"Data collector belum ada: {MULTISOURCE_CSV.relative_to(ROOT_DIR)}. "
+            "Jalankan Jalankan_Promo.bat agar tiga sumber dikumpulkan terlebih dahulu."
+        )
+    multisource_rows = load_source(MULTISOURCE_CSV, MULTISOURCE_CSV.name)
+    if not multisource_rows:
+        raise RuntimeError(
+            "Collector menghasilkan 0 baris. Ekspor final dibatalkan agar katalog lama tidak ditimpa. "
+            "Periksa promo_multisource_runlog.json."
+        )
+    print("Baris dari tiga sumber agregator:", len(multisource_rows))
+    all_loaded_rows = multisource_rows
     rejected_product_rows = [r for r in all_loaded_rows if r.get("product_validation_status") == "rejected"]
     input_rows = [r for r in all_loaded_rows if r.get("product_validation_status") != "rejected"]
     # Fuzzy matching belongs here, after all source outputs are loaded and bad
@@ -3019,23 +2939,9 @@ def main():
         all_loaded_rows, source_run_metadata=source_run_metadata
     )
     report = {
-        "built_at": scraper.timestamp(),
+        "built_at": timestamp(),
         "reference_date": TODAY.isoformat(),
-        "input_files": {
-            OLD_CSV.name: len(old_rows),
-            NEW_CSV.name: len(new_rows),
-            **({MULTISOURCE_CSV.name: len(multisource_rows)} if MULTISOURCE_CSV.exists() else {}),
-            **({momsmoney_input_path.name: len(momsmoney_rows)} if momsmoney_input_path is not None else {}),
-        },
-        "momsmoney_fresh_scrape_loaded": momsmoney_fresh,
-        "momsmoney_current_attempt_loaded": momsmoney_fresh,
-        "momsmoney_stable_catalog_updated": bool(
-            source_run_metadata.get("Momsmoney/Kontan", {}).get("output_status") == "updated"
-            and source_run_metadata.get("Momsmoney/Kontan", {}).get("run_log_is_current_date")
-        ),
-        "momsmoney_output_status_last_run": source_run_metadata.get("Momsmoney/Kontan", {}).get("output_status"),
-        "momsmoney_fresh_scrape_note": momsmoney_status_note,
-        "momsmoney_input_file": str(momsmoney_input_path.name) if momsmoney_input_path is not None else None,
+        "input_files": {MULTISOURCE_CSV.name: len(multisource_rows)},
         "input_row_count": len(all_loaded_rows),
         "eligible_product_input_rows": len(input_rows),
         "rejected_non_product_rows": len(rejected_product_rows),
@@ -3105,7 +3011,7 @@ def main():
             "price_based_percent": "calculated only when normal and promo prices are positive, unit-comparable, and price_basis is offer_price; Indonesian thousands separators are parsed safely",
             "period_confirmation": "Periode Pasti requires exact range/single_day plus visible text evidence and no unresolved material conflict; it is not retailer verification",
             "price_provenance": "A price is only retained when the same amount can be traced to visible offer text or raw line; otherwise the row is routed to review",
-            "source_verification": "aggregator_only / secondary_public_articles are distinct from retailer_verified; never imply official retailer verification",
+            "source_verification": "aggregator_only is distinct from retailer_verified; never imply official retailer verification",
             "buy_x_free_y": "separate low-confidence estimate assuming the free item has the same value; not a confirmed discount",
             "cross_sku_gift": "if named gift item differs from the SKU on the row, bundle estimate is cleared as product discount and row is routed to review",
             "campaign_title_percent": "stored separately and never copied to every product row",
@@ -3116,8 +3022,6 @@ def main():
     print("DONE")
     print("input rows:", len(input_rows))
     print("multi-aggregator input rows:", len(multisource_rows))
-    print("fresh Momsmoney input rows:", len(momsmoney_rows))
-    print("Momsmoney load status:", momsmoney_status_note)
     print("exact deduplicated rows:", len(merged_raw))
     print("consolidated rows:", len(consolidated))
     print("overlapping offer rows absorbed:", consolidated_rows)

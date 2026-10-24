@@ -163,14 +163,8 @@ def source_verification_label(value: object) -> str:
         return "Retailer terverifikasi"
     if values == {"aggregator_only"}:
         return "Agregator; belum diverifikasi retailer"
-    if values == {"secondary_public_articles"}:
-        return "Artikel publik sekunder"
     if values == {"historical_baseline_unknown"} or values == {"baseline_unknown"}:
         return "Baseline historis; asal verifikasi belum diketahui"
-    if {"aggregator_only", "secondary_public_articles"}.issubset(values) and not any(
-        "baseline_unknown" in value or "historical_baseline_unknown" in value for value in values
-    ):
-        return "Agregator + artikel publik sekunder; belum diverifikasi retailer"
     if any("baseline_unknown" in value or "historical_baseline_unknown" in value for value in values):
         return "Beberapa sumber; sebagian asal verifikasi belum diketahui"
     if not values:

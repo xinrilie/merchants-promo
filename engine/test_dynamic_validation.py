@@ -7,7 +7,6 @@ ENGINE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ENGINE_DIR))
 
 import promo_multisource_collector as collector
-import promo_catalog_all_merchants as momsmoney
 from promo_product_validation import product_candidate_rejection_reason, product_candidate_review_reason
 
 
@@ -19,9 +18,6 @@ def test_unknown_future_merchants_are_inferred_without_allowlist():
     assert collector.infer_merchant_dynamic("Promo JSM Fresh Basket 23-25 Oktober 2026") == "Fresh Basket"
     # Known merchants still receive canonical names.
     assert collector.infer_merchant_dynamic("Promo JSM Alfamart 23-25 Oktober 2026") == "Alfamart"
-    # The Momsmoney adapter uses the same fallback, not only the aggregator collector.
-    assert momsmoney.infer_merchant("Promo All Fruit 23-25 Oktober 2026") == "All Fruit"
-    assert momsmoney.infer_merchant("Promo Alfamart 16-31 Oktober 2026") == "Alfamart"
 
 
 def test_future_merchant_name_is_not_a_product_denylist_entry():

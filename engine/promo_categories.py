@@ -1404,17 +1404,3 @@ def classify_promo_category(row: dict | None) -> tuple[str, str]:
     pair = _classify_promo_category_unmapped(row)
     return _canonical_category_pair(row, pair)
 
-
-def category_counts(rows: list[dict]) -> list[dict]:
-    """Count main categories in the supplied product rows for reporting."""
-    counts = {name: 0 for name in CATEGORY_NAMES}
-    subcategories: dict[tuple[str, str], int] = {}
-    for row in rows:
-        category, subcategory = classify_promo_category(row)
-        counts[category] = counts.get(category, 0) + 1
-        key = (category, subcategory)
-        subcategories[key] = subcategories.get(key, 0) + 1
-    return [
-        {"Kategori Produk": name, "Jumlah Produk": counts.get(name, 0)}
-        for name in CATEGORY_NAMES
-    ]

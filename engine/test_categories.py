@@ -8,7 +8,6 @@ sys.path.insert(0, str(ENGINE_DIR))
 
 import promo_categories
 import promo_multisource_collector as collector
-import promo_catalog_all_merchants as momsmoney
 import enrich_existing_promo_catalog_multisource as enhancer
 
 
@@ -86,7 +85,7 @@ def test_product_category_is_prioritized_over_campaign_discount_language():
     assert promo_categories.classify_promo_category(row)[0] == "Minuman & Produk Susu"
 
 
-def test_multisource_and_momsmoney_adapters_emit_category_fields():
+def test_multisource_adapter_emits_category_fields():
     meta = collector.parse_promo_metadata("Promo Supermarket 23-25 Oktober 2026", "", "Berlaku 23-25 Oktober 2026")
     row = collector.make_product_row(
         source_name="Hemat.id",
@@ -100,14 +99,6 @@ def test_multisource_and_momsmoney_adapters_emit_category_fields():
     )
     assert row["product_category"] == "Cuci Pakaian"
     assert row["product_subcategory"] == "Deterjen"
-
-    moms = momsmoney.parse_product_line(
-        "Susu UHT Full Cream 1 L – Harga Normal Rp20.000, Harga Promo Rp15.000",
-        "Promo Harian", "https://example.test/moms-promo"
-    )
-    assert moms is not None
-    assert moms["product_category"] == "Minuman & Produk Susu"
-    assert moms["product_subcategory"] == "Susu/produk susu"
 
 
 def test_clean_excel_rows_include_filterable_category_columns_and_reference_sheets():

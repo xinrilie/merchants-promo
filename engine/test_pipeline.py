@@ -10,7 +10,7 @@ sys.path.insert(0, str(ENGINE_DIR))
 
 import promo_multisource_collector as collector
 import enrich_existing_promo_catalog_multisource as enhancer
-from promo_names import clean_product_name, product_names_can_auto_merge
+from promo_names import product_names_can_auto_merge
 from promo_product_validation import product_candidate_rejection_reason, product_candidate_review_reason
 
 
@@ -123,21 +123,21 @@ def test_real_products_stay_eligible():
             "offer_text": "Promo: Beli 1 Gratis 1",
             "purchase_condition": "Beli 1 Gratis 1",
             "campaign_title": "Promo Alfamidi 16-31 Oktober 2026",
-            "source_name": "Momsmoney/Kontan",
+            "source_name": "Katalogpromosi.com",
         },
         {
             "product_text": "Koepoe Baking Powder, Perisa Vanilla, Soda Kue, SP Pengemulsi 45 g; 20 g; 81 g; 30 g",
             "offer_text": "Diskon 15%",
             "discount_percent": 15,
             "campaign_title": "Promo Hypermart Daily Fresh 16-22 Oktober 2026",
-            "source_name": "Momsmoney/Kontan",
+            "source_name": "Katalogpromosi.com",
         },
         {
             "product_text": "My Baby Body Cologne Sweet Floral 100 ml",
             "offer_text": "Diskon 50%",
             "discount_percent": 50,
             "campaign_title": "Promo My Baby 23-25 Oktober 2026",
-            "source_name": "Momsmoney/Kontan",
+            "source_name": "Katalogpromosi.com",
         },
     ]
     for row in samples:
@@ -152,7 +152,7 @@ def test_discount_only_short_fragments_need_product_identity():
     ]
     for row in bad_rows:
         # No campaign_title on purpose: validator must still reject stale rows.
-        reason = product_candidate_rejection_reason(row, "momskonten_promo_active.csv")
+        reason = product_candidate_rejection_reason(row, "promo_multisource_products_all.csv")
         assert reason is not None, (row, reason)
 
     bundle_row = {
@@ -160,14 +160,14 @@ def test_discount_only_short_fragments_need_product_identity():
         "offer_text": "Beli 1 Gratis 1", "purchase_condition": "Beli 1 Gratis 1",
         "merchant_name": "Alfamart", "normal_price": None, "promo_price": None,
     }
-    assert product_candidate_rejection_reason(bundle_row, "momskonten_promo_active.csv") is None
+    assert product_candidate_rejection_reason(bundle_row, "promo_multisource_products_all.csv") is None
 
     named_item = {
         "product_text": "My Baby Body Cologne Sweet Floral 100 ml",
         "offer_text": "Diskon 50%", "merchant_name": "Indomaret",
         "normal_price": None, "promo_price": None,
     }
-    assert product_candidate_rejection_reason(named_item, "momskonten_promo_active.csv") is None
+    assert product_candidate_rejection_reason(named_item, "promo_multisource_products_all.csv") is None
 
 
 def test_enhancer_rejects_stale_false_rows_without_campaign_title():
@@ -421,8 +421,8 @@ def test_cross_source_fuzzy_merge_and_guardrails():
             "valid_from": "2026-10-23", "valid_until": "2026-10-25", "period_precision": "range",
             "normal_price": "14900", "promo_price": "9900", "discount_percent": "33.6",
             "offer_text": "Harga Promo Rp9.900, Harga Normal Rp14.900",
-            "source_url": "https://momsmoney.kontan.co.id/news/promo-aice", "source_name": "Momsmoney/Kontan",
-            "source_page_url": "https://momsmoney.kontan.co.id/news/promo-aice",
+            "source_url": "https://katalogpromosi.com/promo/promo-aice", "source_name": "Katalogpromosi.com",
+            "source_page_url": "https://katalogpromosi.com/promo/promo-aice",
             "deal_type": "Diskon Persentase", "price_basis": "offer_price",
         },
         {
@@ -430,8 +430,8 @@ def test_cross_source_fuzzy_merge_and_guardrails():
             "campaign_title": "Promo Indomaret 23-25 Oktober 2026", "promo_status": "active",
             "valid_from": "2026-10-23", "valid_until": "2026-10-25", "period_precision": "range",
             "normal_price": "", "promo_price": "", "discount_percent": "50",
-            "offer_text": "Diskon 50%", "source_url": "https://momsmoney.kontan.co.id/news/promo-my-baby",
-            "source_name": "Momsmoney/Kontan", "source_page_url": "https://momsmoney.kontan.co.id/news/promo-my-baby",
+            "offer_text": "Diskon 50%", "source_url": "https://katalogpromosi.com/promo/promo-my-baby",
+            "source_name": "Katalogpromosi.com", "source_page_url": "https://katalogpromosi.com/promo/promo-my-baby",
             "deal_type": "Diskon Persentase",
         },
         {
@@ -440,8 +440,8 @@ def test_cross_source_fuzzy_merge_and_guardrails():
             "valid_from": "2026-10-23", "valid_until": "2026-10-25", "period_precision": "range",
             "normal_price": "14900", "promo_price": "11500", "discount_percent": "22.8",
             "offer_text": "Harga Promo Rp11.500, Harga Normal Rp14.900",
-            "source_url": "https://momsmoney.kontan.co.id/news/promo-aice-different-price", "source_name": "Momsmoney/Kontan",
-            "source_page_url": "https://momsmoney.kontan.co.id/news/promo-aice-different-price",
+            "source_url": "https://katalogpromosi.com/promo/promo-aice-different-price", "source_name": "Katalogpromosi.com",
+            "source_page_url": "https://katalogpromosi.com/promo/promo-aice-different-price",
             "deal_type": "Diskon Persentase", "price_basis": "offer_price",
         },
     ]
@@ -461,7 +461,7 @@ def test_cross_source_fuzzy_merge_and_guardrails():
 
         assert len(loaded) == 6
         assert len(fuzzy) == 4, [(r.get("product_text"), r.get("promo_price"), r.get("source_names")) for r in fuzzy]
-        cross_source_rows = [r for r in fuzzy if "Hemat.id" in str(r.get("source_names")) and "Momsmoney/Kontan" in str(r.get("source_names"))]
+        cross_source_rows = [r for r in fuzzy if "Hemat.id" in str(r.get("source_names")) and "Katalogpromosi.com" in str(r.get("source_names"))]
         assert len(cross_source_rows) == 2, [(r.get("product_text"), r.get("source_names")) for r in cross_source_rows]
         assert any("Aice Mochi Vanilla" in str(r.get("product_text")) for r in cross_source_rows)
         assert any("My Baby" in str(r.get("product_text")) for r in cross_source_rows)
@@ -472,76 +472,8 @@ def test_cross_source_fuzzy_merge_and_guardrails():
         assert len(same_name_aice) == 2
         assert {str(r.get("promo_price")) for r in same_name_aice} == {"9900", "11500"}
 
-def test_momsmoney_feed_freshness_gate():
-    from datetime import date
-    with tempfile.TemporaryDirectory() as temp_dir:
-        folder = Path(temp_dir)
-        feed = folder / "promo_catalog_all_merchants.csv"
-        log = folder / "promo_catalog_all_merchants_runlog.json"
-        feed.write_text("product_text\nExample SKU\n", encoding="utf-8")
-        old_feed_path, old_log_path = enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_RUN_LOG
-        try:
-            enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_RUN_LOG = feed, log
-            log.write_text(__import__("json").dumps({
-                "checked_at": enhancer.TODAY.isoformat() + "T10:00:00+07:00",
-                "output_status": "updated",
-            }), encoding="utf-8")
-            fresh, _ = enhancer.momsmoney_output_is_fresh()
-            assert fresh, "Successful Momsmoney feed for today should be loaded"
-            log.write_text(__import__("json").dumps({
-                "checked_at": enhancer.TODAY.isoformat() + "T10:00:00+07:00",
-                "output_status": "preserved_previous_catalog",
-            }), encoding="utf-8")
-            fresh, _ = enhancer.momsmoney_output_is_fresh()
-            assert not fresh, "Previous CSV must not be loaded after failed validation"
-            log.write_text(__import__("json").dumps({
-                "checked_at": "2001-01-01T10:00:00+07:00",
-                "output_status": "updated",
-            }), encoding="utf-8")
-            fresh, _ = enhancer.momsmoney_output_is_fresh()
-            assert not fresh, "Stale Momsmoney run must not be treated as fresh"
-        finally:
-            enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_RUN_LOG = old_feed_path, old_log_path
 
 
-def test_momsmoney_current_attempt_is_available_without_loading_stale_catalog():
-    import json
-    with tempfile.TemporaryDirectory() as temp_dir:
-        folder = Path(temp_dir)
-        stable_feed = folder / "promo_catalog_all_merchants.csv"
-        attempt_feed = folder / "promo_catalog_all_merchants_latest_attempt_products.csv"
-        log_path = folder / "promo_catalog_all_merchants_runlog.json"
-        stable_feed.write_text("product_text\nSTALE PREVIOUS SKU\n", encoding="utf-8")
-        attempt_feed.write_text("product_text,promo_status\nFresh SKU,active\nEstimated SKU,active_estimated\n", encoding="utf-8")
-
-        old_paths = (enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_ATTEMPT_CSV, enhancer.MOMSMONEY_RUN_LOG)
-        try:
-            enhancer.MOMSMONEY_CSV = stable_feed
-            enhancer.MOMSMONEY_ATTEMPT_CSV = attempt_feed
-            enhancer.MOMSMONEY_RUN_LOG = log_path
-            log_path.write_text(json.dumps({
-                "checked_at": enhancer.TODAY.isoformat() + "T06:00:00+07:00",
-                "successful_articles": 60,
-                "output_status": "preserved_previous_catalog",
-                "latest_attempt_product_rows": 2,
-            }), encoding="utf-8")
-
-            path, note = enhancer.momsmoney_fresh_input()
-            assert path == attempt_feed, (path, note)
-            assert "preserved_previous_catalog" in note
-
-            # A stale run log invalidates both files; last-good data is not
-            # mistaken for a current scrape merely because the CSV exists.
-            log_path.write_text(json.dumps({
-                "checked_at": "2001-01-01T06:00:00+07:00",
-                "successful_articles": 60,
-                "output_status": "preserved_previous_catalog",
-                "latest_attempt_product_rows": 2,
-            }), encoding="utf-8")
-            path, _ = enhancer.momsmoney_fresh_input()
-            assert path is None
-        finally:
-            enhancer.MOMSMONEY_CSV, enhancer.MOMSMONEY_ATTEMPT_CSV, enhancer.MOMSMONEY_RUN_LOG = old_paths
 
 
 def test_multisource_month_periods_are_estimates_and_rank_current_titles_first():
@@ -566,25 +498,6 @@ def test_multisource_month_periods_are_estimates_and_rank_current_titles_first()
     assert end_only["promo_status"] == "active_estimated"
 
 
-def test_momsmoney_rows_get_source_metadata():
-    with tempfile.TemporaryDirectory() as temp_dir:
-        path = Path(temp_dir) / "feed.csv"
-        fields = ["product_text", "offer_text", "purchase_condition", "campaign_title",
-                  "valid_from", "valid_until", "promo_status", "source_url", "promo_price", "normal_price"]
-        with path.open("w", encoding="utf-8-sig", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fields)
-            writer.writeheader()
-            writer.writerow({
-                "product_text": "My Baby Body Cologne Sweet Floral 100 ml",
-                "offer_text": "Beli 1 Gratis 1", "purchase_condition": "Beli 1 Gratis 1",
-                "campaign_title": "Promo Indomaret 23-25 Oktober 2026",
-                "valid_from": "2026-10-23", "valid_until": "2026-10-25", "promo_status": "active",
-                "source_url": "https://momsmoney.kontan.co.id/news/promo-test",
-            })
-        rows = enhancer.load_source(path, "promo_catalog_all_merchants.csv")
-        assert len(rows) == 1
-        assert rows[0]["source_name"] == "Momsmoney/Kontan"
-        assert rows[0]["verification_status"] == "secondary_public_articles"
 
 
 def main():
@@ -599,9 +512,6 @@ def main():
     test_collector_article_extraction_regression()
     test_enhancer_defense_in_depth()
     test_cross_source_fuzzy_merge_and_guardrails()
-    test_momsmoney_feed_freshness_gate()
-    test_momsmoney_current_attempt_is_available_without_loading_stale_catalog()
-    test_momsmoney_rows_get_source_metadata()
     test_multisource_month_periods_are_estimates_and_rank_current_titles_first()
     print("REGRESSION TESTS PASSED")
     print("- editorial/headline fragments from the screenshot are rejected")
@@ -613,8 +523,6 @@ def main():
     print("- PWP explanatory sentence fragments are rejected even when they inherit a price")
     print("- enhancer independently filters stale/old false product rows even when campaign_title is missing")
     print("- fuzzy merge combines corroborated cross-source offers but preserves variant/price conflicts")
-    print("- Momsmoney/Kontan uses only current-run data; stale last-good CSV is never loaded as fresh data")
-    print("- fresh Momsmoney attempt rows can be reviewed without overwriting a stale last-good catalog")
     print("- multi-source article selection prioritizes current period evidence; month-only periods remain estimates")
 
 

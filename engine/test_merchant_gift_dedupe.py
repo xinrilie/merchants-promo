@@ -43,7 +43,7 @@ def test_generic_merchant_is_resolved_from_article_title_and_url():
     merchant, method = enhancer.canonical_merchant(
         "Lainnya",
         "Duo Bakso A: promo spesial Es Teler 77",
-        "https://momsmoney.kontan.co.id/news/promo-es-teler-77-duo-bakso-a",
+        "https://katalogpromosi.com/promo/promo-es-teler-77-duo-bakso-a",
     )
     assert merchant == "Es Teler 77"
     assert method in {"title_url_known_alias", "known_alias_from_title_or_url", "source_url_known_alias"}

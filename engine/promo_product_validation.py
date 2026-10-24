@@ -263,7 +263,7 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
     # not entire editorial sentences. Structured card sources can have longer labels,
     # so the extra length guard is applied to article-like records only.
     mode = (source_mode or row.get("source_mode") or row.get("source_name") or "").casefold()
-    article_mode = any(x in mode for x in ("article", "katalogpromosi", "scanharga", "momsmoney", "kontan"))
+    article_mode = any(x in mode for x in ("article", "katalogpromosi", "scanharga"))
     if article_mode and len(tokens) >= 16:
         overlap, sequence = _campaign_overlap(clean_name, title)
         # Long names are acceptable for grouped variants (e.g. several flavours/weights).

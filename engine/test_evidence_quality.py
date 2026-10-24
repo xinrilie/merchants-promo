@@ -9,7 +9,6 @@ ENGINE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ENGINE_DIR))
 
 import enrich_existing_promo_catalog_multisource as enhancer
-import promo_catalog_all_merchants as momsmoney
 import promo_multisource_collector as collector
 from bs4 import BeautifulSoup
 from promo_product_validation import pipe_sources_for_validation
@@ -162,9 +161,8 @@ def test_period_certainty_is_separate_from_retailer_verification():
     assert period_certainty("unverified", "active_estimated", "period_evidence_missing_unverified", None) == "estimated"
     assert period_certainty("range", "active", "title_period_mismatch_with_catalog_dates", "23-25 Oktober 2026") == "conflict"
     assert source_verification_label("aggregator_only") == "Agregator; belum diverifikasi retailer"
-    assert source_verification_label("secondary_public_articles") == "Artikel publik sekunder"
+    assert source_verification_label("unrecognized_source_type") == "Beberapa sumber; bukan verifikasi retailer"
     assert source_verification_label("retailer_verified") == "Retailer terverifikasi"
-    assert source_verification_label("aggregator_only | secondary_public_articles") == "Agregator + artikel publik sekunder; belum diverifikasi retailer"
     assert source_verification_label("aggregator_only | historical_baseline_unknown") == "Beberapa sumber; sebagian asal verifikasi belum diketahui"
 
 
@@ -206,15 +204,6 @@ def test_each_live_adapter_emits_price_and_period_evidence():
     assert article_rows[0]["normal_price_evidence_text"]
     assert article_rows[0]["period_evidence_text"]
 
-    # Momsmoney/Kontan article-line parser.
-    moms_row = momsmoney.parse_product_line(
-        "Aice Mochi Vanilla 270 g – Harga Normal Rp29.990, Harga Promo Rp9.900, Diskon 67%",
-        "Promo Mingguan", "https://momsmoney.example/promo-aice"
-    )
-    assert moms_row is not None
-    assert moms_row["promo_price_evidence_text"] and "Rp9.900" in moms_row["promo_price_evidence_text"]
-    assert moms_row["normal_price_evidence_text"] and "Rp29.990" in moms_row["normal_price_evidence_text"]
-    assert moms_row["discount_evidence_text"] and "67%" in moms_row["discount_evidence_text"]
 
 
 def test_source_freshness_report_does_not_call_missing_timestamp_fresh():
@@ -222,15 +211,15 @@ def test_source_freshness_report_does_not_call_missing_timestamp_fresh():
     rows = [
         {"source_name": "Hemat.id", "scraped_at": "2026-10-23T11:50:00+07:00"},
         {"source_name": "Scanharga.com", "scraped_at": "2026-10-01T11:50:00+07:00"},
-        {"source_name": "Momsmoney/Kontan", "scraped_at": "2026-10-23T11:55:00+07:00", "retained_from_previous_run": "true"},
+        {"source_name": "Katalogpromosi.com", "scraped_at": "2026-10-23T11:55:00+07:00", "retained_from_previous_run": "true"},
         {"source_dataset": "older_catalog_baseline.csv", "scraped_at": ""},
     ]
     report = enhancer.build_source_freshness_report(rows, now)
     assert report["Hemat.id"]["status"] == "fresh"
     assert report["Hemat.id"]["fresh_rows"] == 1
     assert report["Scanharga.com"]["status"] == "stale"
-    assert report["Momsmoney/Kontan"]["status"] == "preserved_previous"
-    assert report["Historical baseline; source unknown"]["status"] == "historical_or_unverified"
+    assert report["Katalogpromosi.com"]["status"] == "preserved_previous"
+    assert report["Source tidak diketahui"]["status"] == "historical_or_unverified"
 
 
 def test_collector_source_health_distinguishes_failure_from_empty_source():
@@ -246,10 +235,9 @@ def test_collector_source_health_distinguishes_failure_from_empty_source():
         {"source_name": "Hemat.id", "status": "ok"},
         {"source_name": "Scanharga.com", "status": "ok"},
         {"source_name": "Katalogpromosi.com", "status": "ok"},
-        {"source_name": "Momsmoney/Kontan", "status": "request_error"},
     ]
     report = collector.build_source_health_report(
-        ["Hemat.id", "Scanharga.com", "Katalogpromosi.com", "Momsmoney/Kontan"],
+        ["Hemat.id", "Scanharga.com", "Katalogpromosi.com"],
         products,
         requests,
     )
@@ -257,7 +245,6 @@ def test_collector_source_health_distinguishes_failure_from_empty_source():
     assert report["Hemat.id"]["promo_price_evidence_coverage"] == 1.0
     assert report["Scanharga.com"]["status"] == "preserved_previous"
     assert report["Katalogpromosi.com"]["status"] == "reachable_no_products"
-    assert report["Momsmoney/Kontan"]["status"] == "request_failed"
 
 
 def test_unknown_verification_provenance_is_not_mislabeled_as_aggregator():
@@ -273,21 +260,20 @@ def test_storage_dataset_name_never_counts_as_independent_source():
 def test_source_freshness_reports_mixed_fresh_and_historical_and_last_good_status():
     now = datetime.fromisoformat("2026-10-24T19:40:00+07:00")
     rows = [
-        {"source_name": "Momsmoney/Kontan", "scraped_at": "2026-10-24T19:36:00+07:00"},
-        {"source_name": "Momsmoney/Kontan", "scraped_at": ""},
-        {"source_name": "Momsmoney/Kontan", "scraped_at": None},
+        {"source_name": "Katalogpromosi.com", "scraped_at": "2026-10-24T19:36:00+07:00"},
+        {"source_name": "Katalogpromosi.com", "scraped_at": ""},
+        {"source_name": "Katalogpromosi.com", "scraped_at": None},
     ]
     report = enhancer.build_source_freshness_report(rows, now, {
-        "Momsmoney/Kontan": {
+        "Katalogpromosi.com": {
             "checked_at": "2026-10-24T19:36:21+07:00",
             "output_status": "preserved_previous_catalog",
-            "latest_attempt_product_rows": 17,
-            "active_product_rows": 3,
-            "active_estimated_product_rows": 14,
-            "validation": {"valid": False, "reasons": ["only three confirmed rows"]},
+            "preserved_previous_rows": 17,
+            "fresh_product_rows": 0,
+            "request_count": 10,
         }
     })
-    source = report["Momsmoney/Kontan"]
+    source = report["Katalogpromosi.com"]
     assert source["status"] == "mixed_fresh_and_historical_or_unverified"
     assert source["fresh_rows"] == 1
     assert source["rows_missing_or_invalid_timestamp"] == 2
@@ -295,8 +281,7 @@ def test_source_freshness_reports_mixed_fresh_and_historical_and_last_good_statu
     assert source["fresh_row_percent"] == 33.3
     assert enhancer.freshness_display_label("mixed:fresh|historical_or_unverified") == "Campuran: Segar (≤7 hari) + Historis / timestamp tidak tersedia"
     assert source["current_run"]["previous_catalog_preserved"] is True
-    assert source["current_run"]["validation_passed"] is False
-    assert source["current_run"]["active_product_rows"] == 3
+    assert source["current_run"]["previous_catalog_preserved"] is True
     assert "tidak menggantikan katalog stabil" in source["current_run"]["freshness_note"]
 
 
@@ -305,9 +290,30 @@ def test_multi_source_provenance_does_not_copy_one_timestamp_to_every_source():
     report = enhancer.build_source_freshness_report([
         {
             "source_name": "Katalogpromosi.com",
-            "source_names": "Katalogpromosi.com | Momsmoney/Kontan",
+            "source_names": "Katalogpromosi.com | Scanharga.com",
             "scraped_at": "2026-10-24T11:55:00+07:00",
         }
     ], now)
     assert report["Katalogpromosi.com"]["fresh_rows"] == 1
-    assert "Momsmoney/Kontan" not in report
+    assert "Scanharga.com" not in report
+
+
+def test_current_source_metadata_comes_from_three_source_runlog(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setattr(enhancer, "INTERNAL_DIR", tmp_path)
+    monkeypatch.setattr(enhancer, "MULTISOURCE_RUN_LOG", tmp_path / "promo_multisource_runlog.json")
+    log = {
+        "built_at": "2026-10-24T19:36:21+07:00",
+        "reference_date": "2026-10-24",
+        "source_health": {
+            "Hemat.id": {"status": "fresh", "fresh_product_rows": 20, "preserved_previous_rows": 0, "request_count": 5},
+            "Katalogpromosi.com": {"status": "preserved_previous", "fresh_product_rows": 0, "preserved_previous_rows": 12, "request_count": 8},
+            "Scanharga.com": {"status": "request_failed", "fresh_product_rows": 0, "preserved_previous_rows": 0, "request_count": 2},
+        },
+    }
+    (tmp_path / "promo_multisource_runlog.json").write_text(json.dumps(log), encoding="utf-8")
+    metadata = enhancer.current_source_run_metadata()
+    assert set(metadata) == {"Hemat.id", "Katalogpromosi.com", "Scanharga.com"}
+    assert metadata["Hemat.id"]["output_status"] == "updated"
+    assert metadata["Katalogpromosi.com"]["output_status"] == "preserved_previous_catalog"
+    assert metadata["Scanharga.com"]["output_status"] == "request_failed"

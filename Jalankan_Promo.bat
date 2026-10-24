@@ -23,7 +23,6 @@ if not defined PYTHON_CMD goto :no_python
 %PYTHON_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
 if errorlevel 1 goto :python_version_error
 
-if not exist "%~dp0engine\promo_catalog_all_merchants.py" goto :bad_project
 if not exist "%~dp0engine\promo_multisource_collector.py" goto :bad_project
 if not exist "%~dp0engine\enrich_existing_promo_catalog_multisource.py" goto :bad_project
 
@@ -78,22 +77,16 @@ if /I "%MODE%"=="test" goto :test_success
 echo.
 echo =====================================================
 echo TES LULUS. MULAI SCRAPING LIVE
-echo Sumber: Momsmoney/Kontan, Hemat.id, Katalogpromosi.com,
-echo         Scanharga.com
+echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com
 echo =====================================================
 echo.
 
-echo [LIVE 1/3] Mengambil artikel promo Momsmoney/Kontan...
-%PYTHON_CMD% -u "%~dp0engine\promo_catalog_all_merchants.py"
-if errorlevel 1 goto :error
-
-echo.
-echo [LIVE 2/3] Mengambil promo agregator multi-sumber...
+echo [LIVE 1/2] Mengambil promo dari tiga sumber agregator...
 %PYTHON_CMD% -u "%~dp0engine\promo_multisource_collector.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [LIVE 3/3] Menggabungkan sumber, memvalidasi, fuzzy matching, dan ekspor...
+echo [LIVE 2/2] Menggabungkan sumber, memvalidasi, fuzzy matching, dan ekspor...
 %PYTHON_CMD% -u "%~dp0engine\enrich_existing_promo_catalog_multisource.py"
 if errorlevel 1 goto :error
 
