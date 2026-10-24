@@ -23,7 +23,7 @@ Basis audit: paket ZIP yang diunggah pengguna. Pemeriksaan ini bersifat offline;
 ## Validasi yang dijalankan
 
 - `python -m compileall -q engine`: lulus.
-- `python -m pytest -q`: **50 passed**.
+- `python -m pytest -q`: **56 passed**.
 - `python engine/promo_names.py`: self-test lulus.
 - `python engine/promo_multisource_collector.py --self-test`: self-test lulus.
 - `python engine/test_duplicate_fixes.py`: self-test lulus (opsional untuk menjalankan skrip langsung; tesnya juga sudah dikumpulkan oleh pytest).
@@ -48,3 +48,15 @@ python engine/enrich_existing_promo_catalog_multisource.py
 ```
 
 Untuk menjalankan scraping live dan ekspor lengkap, gunakan `Jalankan_Promo.bat`. Jika ada HTTP 401/403/429, timeout, server error, atau redirect keluar domain, pipeline harus berhenti dengan aman dan mempertahankan data *last-good* yang sesuai.
+
+
+## Tindak lanjut dari sampel workbook pengguna
+
+Audit lanjutan menemukan beberapa kebocoran kandidat non-produk yang belum tercakup pada pemeriksaan sebelumnya. Temuan dan perbaikannya:
+
+1. `Gimana Mantapp Kan Promo Alfamart ...` dapat lolos karena frasa `Gimana` belum dikenali sebagai awalan editorial. Awalan tersebut kini ditambahkan ke validator dan ada tes regresi dengan nominal harga yang ikut terbaca.
+2. Baris persis `Min. Belanja`/`Minimum Pembelanjaan`/`Minimum Transaksi`/`Minimal Pembelian` sebelumnya bisa masuk ke tab aktif dengan nominal syarat transaksi pada kolom harga promo. Baris tersebut kini ditolak dari katalog produk dan tetap dapat ditelusuri di `Ditolak (Audit)`.
+3. `Extra` dengan detail `Rp 2.000 Dengan QRIS BCA myBCA & BCA mobile` sebelumnya diperlakukan sebagai produk berharga Rp2.000. Nama pendek yang terikat ke konteks pembayaran kini diarahkan ke review; nilai yang tidak terbukti sebagai harga produk dikosongkan dari kolom harga/diskon, sementara bukti teks tetap disimpan di detail penawaran.
+4. `Pasti Hemat 1000 sheet Facial Tissue ...` pernah dipotong menjadi `Pasti` karena kata `Hemat 1000` dikira label penghematan. Aturan normalisasi sekarang mengenali kuantitas `sheet`, dan nama asal dengan atribut SKU yang eksplisit dapat dipulihkan jika nama normalisasi terlalu pendek. Pada hasil ekspor yang dibuat ulang, produk ini tampil sebagai `Pasti Hemat Facial Tissue 1000 sheet` dalam kategori `Tisu & Produk Kertas`.
+
+Verifikasi sesudah perbaikan: `compileall`, self-test nama, self-test parser/guardrail, dan **56 tes regresi lulus**. Excel dibangun ulang dari input dan cache lokal yang ada. Tidak ada scraping live dijalankan, jadi ini membuktikan perbaikan jalur validasi/ekspor pada data lokal dan tes, bukan pembaruan sumber live.

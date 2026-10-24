@@ -267,3 +267,11 @@ def test_category_classifier_reuses_compiled_regex_patterns():
     assert first == second == ("Perawatan Rambut & Kulit", "Sampo")
     assert compiled_count > 0
     assert len(cache) == compiled_count
+
+
+def test_category_classifier_recovers_truncated_product_name_from_original():
+    row = {
+        "product_text": "Pasti",
+        "original_product_text": "Pasti Hemat 1000 sheet Facial Tissue 1000 sheet",
+    }
+    assert promo_categories.classify_promo_category(row) == ("Tisu & Produk Kertas", "Tisu wajah")

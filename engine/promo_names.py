@@ -87,7 +87,7 @@ def clean_product_name(value: object) -> str:
             break
 
     measure_pattern = re.compile(
-        r"\b(\d+(?:[.,]\d+)?)\s*(ml|gr?\.?|grams?|kg|litre|liter|ltr|l)\b",
+        r"\b(\d+(?:[.,]\d+)?)\s*(ml|gr?\.?|grams?|kg|litre|liter|ltr|l|sheets?|lembar|pcs?|pieces|rolls?)\b",
         re.IGNORECASE,
     )
     measures: list[str] = []
@@ -103,7 +103,7 @@ def clean_product_name(value: object) -> str:
         r"\s*(?:[-–—|,:]\s*)?(?:"
         r"harga\s+(?:normal|promo|spesial|setelah\s+diskon)\b|"
         r"diskon(?:\s+(?:hingga|sampai))?(?:\s*[:\-]?\s*\d+(?:[.,]\d+)?\s*%)?\b|"
-        r"hemat\s+(?:rp\.?\s*)?\d|"
+        r"hemat\s+(?:rp\.?\s*)?\d[\d.,]*\b(?!\s*(?:sheets?|lembar|pcs?|pieces|pack|pak|roll|buah|botol|kaleng)\b)|"
         r"potongan\s+(?:harga|\d)|"
         r"rp\.?\s*\d[\d.,]*\b|"
         r"promo\s*[:\-]\s*(?:rp\.?\s*\d|diskon|harga|beli|gratis)"

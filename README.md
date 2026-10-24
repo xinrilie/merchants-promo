@@ -8,7 +8,7 @@ Mesin otomasi untuk mengumpulkan, membersihkan, memvalidasi, dan menggabungkan k
 
 > **Penting:** data Hemat.id, Katalogpromosi.com, dan Scanharga.com merupakan data agregator/konten. Data tidak otomatis dikonfirmasi oleh retailer resmi. Gunakan kolom sumber dan status verifikasi sebelum menjadikan harga sebagai referensi final.
 
-> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, tidak hanya disimpan manual di workbook. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 50 passed.
+> **Paket build diperbarui (24 Oktober 2026):** klasifikasi 29 kategori dipisah antara makanan kemasan dan restoran; halaman redirect lintas domain serta timeout Momsmoney dihentikan dengan aman; fungsi/import yang tidak terpakai dibersihkan; dan sheet audit kategori kini dapat dibuat ulang dari file input, serta guardrail tambahan untuk judul artikel, syarat minimum belanja, jumlah benefit pembayaran QRIS, dan pemulihan nama SKU yang sempat terpotong. Jalankan `Jalankan_Promo.bat --test-only` untuk pemeriksaan offline sebelum scraping live. Tes offline build ini: 56 passed.
 
 ---
 
@@ -174,6 +174,14 @@ Gunakan hasil scraping sesuai ketentuan situs sumber, hak atas konten, dan atura
 - Sheet **Ringkasan Kategori** menghitung jumlah baris promo aktif per kategori. Angka ini menghitung baris promo, bukan jumlah SKU unik sepanjang waktu.
 - Nama produk/SKU diprioritaskan daripada klaim kampanye. Kampanye/rangkuman umum dikelompokkan ke **Promo Umum / Multi-Kategori**; teks yang tidak cukup jelas ditempatkan di **Lainnya / Perlu Review**. Kategori tidak mengubah status aktif, penilaian harga, bukti periode, atau validasi retailer.
 - Kategorisasi bersifat otomatis berbasis aturan dan dapat salah pada nama produk yang tidak deskriptif; nilai `Lainnya / Perlu Review` tersedia agar sistem tidak menebak. Tes regresi kategori ikut dijalankan sebelum scraping.
+
+### Guardrail tambahan hasil pemeriksaan workbook (24 Oktober 2026)
+
+- Judul editorial yang diawali bentuk percakapan `Gimana ... Promo ...` ditolak sebagai kandidat SKU meskipun di teks ikut terbaca angka harga.
+- Baris tunggal `Min. Belanja`, `Minimum Pembelanjaan`, `Minimum Transaksi`, atau `Minimal Pembelian` ditolak dari katalog produk; nominalnya adalah ambang transaksi, bukan harga promo produk.
+- Baris pendek yang berisi nominal benefit pembayaran (`QRIS`, `myBCA`, `BCA mobile`, cashback, atau bahasa pembayaran sejenis) diarahkan ke `Perlu Review`; nominal tidak lagi ditampilkan di kolom harga produk sampai hubungan ke SKU terbukti.
+- Nama produk yang sebelumnya terpotong menjadi satu-dua kata dipulihkan dari nama asal hanya jika nama asal memuat atribut SKU/ukuran yang eksplisit. Contoh: `Pasti` dipulihkan menjadi `Pasti Hemat Facial Tissue 1000 sheet` dan dikategorikan sebagai `Tisu & Produk Kertas`.
+- Tes regresi mencakup contoh-contoh di atas; tes final build: **56 passed**.
 
 ### Bukti dan verifikasi
 

@@ -16,7 +16,7 @@ from promo_names import (
     product_names_can_auto_merge, product_name_block_key,
     product_name_size_signature, product_name_variant_signature,
 )
-from promo_product_validation import product_candidate_rejection_reason, product_candidate_review_reason
+from promo_product_validation import PRODUCT_SPEC_RE, product_candidate_rejection_reason, product_candidate_review_reason
 from promo_multisource_collector import infer_merchant_dynamic
 from promo_evidence import find_amount_evidence, find_discount_evidence, extract_period_evidence, period_certainty, source_verification_label
 from promo_categories import CATEGORY_TAXONOMY, CATEGORY_NAMES, classify_promo_category
@@ -506,7 +506,22 @@ def load_source(path, source_label):
         title = (raw.get("campaign_title") or "").strip()
         merchant = canonical_merchant(raw.get("merchant_name") or raw.get("merchant"), title)
         original_product = (raw.get("original_product_text") or raw.get("product_text") or "").strip()
-        product = clean_product_name(raw.get("product_text") or original_product)
+        source_product = (raw.get("product_text") or "").strip()
+        product = clean_product_name(source_product or original_product)
+        # Some earlier parsers accidentally truncated a long SKU to its first word
+        # (e.g. "Pasti" from "Pasti Hemat 1000 sheet Facial Tissue"). Recover the
+        # richer original label only when it carries explicit item-size evidence;
+        # do not restore longer editorial/campaign snippets indiscriminately.
+        original_clean = clean_product_name(original_product)
+        product_tokens = re.findall(r"[a-z0-9]+", product.casefold())
+        original_tokens = re.findall(r"[a-z0-9]+", original_clean.casefold())
+        if (
+            len(product_tokens) <= 2
+            and len(original_tokens) >= 4
+            and not PRODUCT_SPEC_RE.search(product)
+            and PRODUCT_SPEC_RE.search(original_clean)
+        ):
+            product = original_clean
         offer = (raw.get("offer_text") or raw.get("detail") or "").strip()
         raw_line = (raw.get("raw_line") or "").strip()
         if not offer:
@@ -712,6 +727,32 @@ def load_source(path, source_label):
             row["data_quality_flags"] = " | ".join(pipe_unique([
                 row.get("data_quality_flags") or "",
                 "product_identity_review:" + review_reason,
+            ])) or None
+        if review_reason == "short_name_with_payment_offer_needs_review":
+            # The parsed amount is a payment/cashback benefit, not an item price.
+            # Preserve the original wording in offer_text/raw_line for audit, but
+            # clear product price/discount columns so they cannot be mistaken for
+            # the selling price of a truncated product name.
+            row["promo_price"] = None
+            row["normal_price"] = None
+            row["promo_price_evidence_text"] = None
+            row["normal_price_evidence_text"] = None
+            row["discount_evidence_text"] = None
+            row["discount_percent"] = None
+            row["discount_percent_basis"] = "not_available"
+            row["discount_percent_confidence"] = "unknown"
+            row["discount_percent_calculated"] = None
+            row["discount_savings_rp"] = None
+            row["estimated_bundle_discount_percent"] = None
+            row["price_basis"] = None
+            row["price_parse_method"] = "payment_benefit_amount_not_product_price"
+            row["price_quality_flag"] = " | ".join(pipe_unique([
+                row.get("price_quality_flag") or "",
+                "payment_benefit_amount_not_product_price",
+            ])) or None
+            row["data_quality_flags"] = " | ".join(pipe_unique([
+                row.get("data_quality_flags") or "",
+                "payment_benefit_amount_not_product_price",
             ])) or None
         output.append(row)
     return output

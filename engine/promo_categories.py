@@ -1207,6 +1207,36 @@ def _strict_product_override(product: str):
     return None
 
 
+def _category_product_text(row: dict | None) -> str:
+    """Prefer a richer original SKU when the normalized name was truncated.
+
+    This is a deliberately narrow recovery: use the original only when the
+    normalized label is at most two tokens and the original has a clear size or
+    pack quantity absent from the short label. Longer noisy editorial text is
+    not restored by this rule.
+    """
+    row = row or {}
+    primary = _norm(row.get("product_text") or row.get("Nama Produk"))
+    original = _norm(row.get("original_product_text") or row.get("product_name_variants"))
+    if not primary:
+        return original
+    primary_tokens = re.findall(r"[a-z0-9]+", primary)
+    original_tokens = re.findall(r"[a-z0-9]+", original)
+    quantity = re.compile(
+        r"\b\d+(?:[.,]\d+)?\s*(?:ml|l|g|kg|mg|mcg|pcs?|pack|sachet|tablet|kaplet|botol|kaleng|gr|gram|liter|meter|cm|mm|inch|inci|sheets?|lembar|rolls?)\b|"
+        r"\b\d+\s*[x×]\s*\d+\b",
+        re.I,
+    )
+    if (
+        len(primary_tokens) <= 2
+        and len(original_tokens) >= 4
+        and quantity.search(original)
+        and not quantity.search(primary)
+    ):
+        return original
+    return primary
+
+
 def _classify_promo_category_unmapped(row: dict | None) -> tuple[str, str]:
     """Return (Kategori Produk, Subkategori) from product evidence and context.
 
@@ -1214,7 +1244,7 @@ def _classify_promo_category_unmapped(row: dict | None) -> tuple[str, str]:
     the dedicated general-promo category. Weak/ambiguous text goes to review.
     """
     row = row or {}
-    product = _norm(row.get("product_text") or row.get("original_product_text") or row.get("Nama Produk"))
+    product = _category_product_text(row)
     offer = _norm(row.get("offer_text") or row.get("Detail Penawaran"))
     title = _norm(row.get("campaign_title") or row.get("Kampanye") or row.get("title"))
     merchant = _norm(row.get("merchant_name") or row.get("Merchant"))
@@ -1314,11 +1344,7 @@ def _canonical_category_pair(row: dict | None, pair: tuple[str, str]) -> tuple[s
     """Refine subcategories and reject labels outside the 29-category taxonomy."""
     category, subcategory = pair
     row = row or {}
-    product = _norm(
-        row.get("product_text")
-        or row.get("original_product_text")
-        or row.get("Nama Produk")
-    )
+    product = _category_product_text(row)
 
     # Active rules emit final taxonomy labels directly; this function only
     # applies subcategory refinements and rejects labels outside the taxonomy.

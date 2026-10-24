@@ -33,7 +33,7 @@ EDITORIAL_PREFIX_RE = re.compile(
     # Article/question headings commonly misread as a product name.
     r"apa(?:\s+saja|\s+benefit|\s+manfaat|\s+yang|\s+keuntungan)?\b|"
     r"berapa(?:\s+(?:minimum|minimal|maksimum|maximal|besar|banyak|harga|biaya|transaksi))?\b|"
-    r"bagaimana(?:\s+cara)?\b|mengapa\b|kenapa\b|apakah\b|"
+    r"bagaimana(?:\s+cara)?\b|gimana(?:\s+cara)?\b|mengapa\b|kenapa\b|apakah\b|"
     r"memanfaatkan\b|manfaatkan\b|menikmati\b|mendapatkan\b|memperoleh\b|"
     r"menggunakan\b|memaksimalkan\b|maksimalkan\b|"
     r"belanja(?:\s+(?:kebutuhan|lebih|hemat|sehari-hari))?\b|"
@@ -92,6 +92,22 @@ CAMPAIGN_HEADING_PREFIX_RE = re.compile(
     r"^(?:promo(?:si)?|diskon|katalog|program(?:\s+promo)?|weekend|weekday|"
     r"campaign|kampanye|cek\s+(?:gambar|info|informasi|promo)|info\s+promo|"
     r"lihat\s+promo|jangan\s+lewatkan)\b",
+    re.I,
+)
+
+# These labels describe purchase thresholds, not a product/SKU. Keeping them as
+# product rows causes the threshold amount to be mistaken for a promo price.
+PURCHASE_CONDITION_ONLY_RE = re.compile(
+    r"^(?:(?:syarat\s+)?(?:minimum|minimal)\s+(?:belanja|pembelanjaan|transaksi|pembelian)|"
+    r"min\.?\s*(?:belanja|pembelanjaan|transaksi|pembelian))$",
+    re.I,
+)
+
+# Payment benefit amounts can sit next to an unrelated/fragmented product name
+# in article text. They are not price evidence for that product.
+PAYMENT_PROMO_CONTEXT_RE = re.compile(
+    r"\b(?:qris|bca\s+mobile|mybca|kartu\s+(?:kredit|debit)|paylater|cashback|cash\s*back|"
+    r"promo\s+bank|pembayaran|transaksi\s+bank|rekening|uang\s+kembali)\b",
     re.I,
 )
 
@@ -163,6 +179,12 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
     tokens = _tokens(clean_name)
     if len(clean_name) < 3 or not any(ch.isalpha() for ch in clean_name):
         return "product_name_empty_or_invalid"
+
+    # Purchase thresholds belong in purchase_condition, never in the product-name
+    # or promo-price fields. Match the whole label to avoid rejecting real products
+    # whose names merely contain the word "belanja" or "transaksi".
+    if PURCHASE_CONDITION_ONLY_RE.fullmatch(clean_name):
+        return "purchase_condition_misparsed_as_product"
 
     # Reject article/question/imperative fragments even when a discount percentage
     # was split from the same paragraph. The leading-symbol cleanup matters for
@@ -261,7 +283,7 @@ def product_candidate_rejection_reason(row: dict, source_mode: str = "") -> str 
 # Product identity is assessed from evidence and row structure, not a list of
 # retailer/brand names. Ambiguous names are routed to review instead of rejected.
 PRODUCT_SPEC_RE = re.compile(
-    r"\b\d+(?:[.,]\d+)?\s*(?:ml|l|g|kg|mg|mcg|pcs?|pack|sachet|tablet|kaplet|botol|kaleng|gr|gram|liter|meter|cm|mm|inch|inci)\b|"
+    r"\b\d+(?:[.,]\d+)?\s*(?:ml|l|g|kg|mg|mcg|pcs?|pack|sachet|tablet|kaplet|botol|kaleng|gr|gram|liter|meter|cm|mm|inch|inci|sheets?|lembar|rolls?)\b|"
     r"\b\d+\s*[x×]\s*\d+\b|\b(?:model|sku|kode)\s*[:#-]?\s*[a-z0-9-]+",
     re.I,
 )
@@ -307,6 +329,16 @@ def product_candidate_review_reason(row: dict, source_mode: str = "") -> str | N
     has_bundle = _has_bundle(offer, row)
     has_discount = bool(DISCOUNT_RE.search(offer))
     has_item_offer = has_price or has_bundle or has_discount
+
+    # A short fragment paired with payment language (e.g. "Extra Diskon" plus
+    # "Rp 2.000 dengan QRIS BCA") is not adequately linked to a product price.
+    # Put it in review before a direct-price or cross-source shortcut can bless it.
+    payment_context = " ".join([
+        offer, _text(row.get("campaign_title") or row.get("title")),
+        _text(row.get("deal_type")), _text(row.get("purchase_condition")),
+    ])
+    if len(tokens) <= 2 and not has_spec and PAYMENT_PROMO_CONTEXT_RE.search(payment_context):
+        return "short_name_with_payment_offer_needs_review"
 
     # An item name with size/model/variant-like evidence is specific enough even
     # when the merchant is new and absent from any canonical alias table.

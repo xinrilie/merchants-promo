@@ -11,7 +11,7 @@ sys.path.insert(0, str(ENGINE_DIR))
 import promo_multisource_collector as collector
 import enrich_existing_promo_catalog_multisource as enhancer
 from promo_names import clean_product_name, product_names_can_auto_merge
-from promo_product_validation import product_candidate_rejection_reason
+from promo_product_validation import product_candidate_rejection_reason, product_candidate_review_reason
 
 
 def test_article_headlines_are_not_products():
@@ -620,3 +620,125 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+def test_screenshot_campaign_headline_never_passes_as_a_product():
+    row = {
+        "product_text": (
+            "Gimana Mantapp Kan Promo Alfamart Paling Murah Sejagat Terbaru Buat Minggu Ini. "
+            "Yang Pastinya Serba Lengkap, Serba Hemat!! Produknya Bisa Bunda Dapatkan Mulai Dari Ceban"
+        ),
+        "offer_text": "Rp 10.000",
+        "promo_price": 10000,
+        "merchant_name": "Alfamart",
+        "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo Alfamart Terbaru Minggu Ini",
+    }
+    reason = product_candidate_rejection_reason(row, "Katalogpromosi.com article")
+    assert reason == "editorial_heading_misparsed_as_product"
+
+
+def test_standalone_minimum_purchase_threshold_is_not_a_product_or_price():
+    for name in ["Min. Belanja", "Minimum Pembelanjaan", "Minimum Transaksi", "Minimal Pembelian"]:
+        row = {
+            "product_text": name,
+            "offer_text": "Rp. 15.000",
+            "promo_price": 15000,
+            "merchant_name": "Indomaret",
+            "source_name": "Scanharga.com",
+            "campaign_title": "Promo PTW Indomaret Product Of The Week",
+        }
+        assert product_candidate_rejection_reason(row, "Scanharga.com article") == "purchase_condition_misparsed_as_product"
+
+
+def test_payment_benefit_amount_on_short_name_is_review_not_product_price():
+    row = {
+        "product_text": "Extra",
+        "original_product_text": "Extra Diskon",
+        "offer_text": "Rp 2.000 Dengan QRIS BCA myBCA & BCA mobile",
+        "promo_price": 2000,
+        "merchant_name": "Indomaret",
+        "source_url": "https://www.scanharga.com/2025/11/promo-pwp-indomaret-tebus-murah.html",
+        "source_name": "Scanharga.com",
+        "campaign_title": "Promo PWP Indomaret Tebus Murah 15-28 Oktober 2026",
+        "deal_type": "Tebus Murah / PWP",
+    }
+    assert product_candidate_rejection_reason(row, "Scanharga.com article") is None
+    assert product_candidate_review_reason(row, "Scanharga.com article") == "short_name_with_payment_offer_needs_review"
+
+
+def test_truncated_tissue_name_is_recovered_from_original_label():
+    fields = [
+        "product_text", "original_product_text", "offer_text", "promo_price", "normal_price",
+        "merchant_name", "campaign_title", "promo_status", "valid_from", "valid_until",
+        "period_precision", "source_name", "source_url", "source_item_url",
+    ]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "truncated_tissue.csv"
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerow({
+                "product_text": "Pasti",
+                "original_product_text": "Pasti Hemat 1000 sheet Facial Tissue 1000 sheet",
+                "offer_text": "Harga Promo Rp29.800",
+                "promo_price": 29800,
+                "normal_price": "",
+                "merchant_name": "Yogya",
+                "campaign_title": "Promo Unggulan Yogya Minggu Ini",
+                "promo_status": "active_estimated",
+                "valid_from": "2026-10-23",
+                "valid_until": "2026-10-25",
+                "period_precision": "range",
+                "source_name": "Hemat.id",
+                "source_url": "https://www.hemat.id/katalog-alfamart,yogya/",
+                "source_item_url": "https://www.hemat.id/harga-pasti-hemat-facial-tissue-1000-sheet-yogya/",
+            })
+        rows = enhancer.load_source(path, path.name)
+    assert len(rows) == 1
+    row = rows[0]
+    assert "Facial Tissue" in row["product_text"], row["product_text"]
+    assert "1000 sheet" in row["product_text"].casefold(), row["product_text"]
+    assert row["product_category"] == "Tisu & Produk Kertas", row["product_category"]
+    assert row["product_validation_status"] != "review", row["product_review_reason"]
+
+
+
+def test_payment_benefit_amount_is_not_exported_as_product_price():
+    fields = [
+        "product_text", "original_product_text", "offer_text", "promo_price", "normal_price",
+        "merchant_name", "campaign_title", "promo_status", "valid_from", "valid_until",
+        "period_precision", "source_name", "source_url", "deal_type",
+    ]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "payment_offer.csv"
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerow({
+                "product_text": "Extra",
+                "original_product_text": "Extra Diskon",
+                "offer_text": "Rp 2.000 Dengan QRIS BCA myBCA & BCA mobile",
+                "promo_price": 2000,
+                "normal_price": "",
+                "merchant_name": "Indomaret",
+                "campaign_title": "Promo PWP Indomaret Tebus Murah 15-28 Oktober 2026",
+                "promo_status": "active",
+                "valid_from": "2026-10-15",
+                "valid_until": "2026-10-28",
+                "period_precision": "range",
+                "source_name": "Scanharga.com",
+                "source_url": "https://www.scanharga.com/2025/11/promo-pwp-indomaret-tebus-murah.html",
+                "deal_type": "Tebus Murah / PWP",
+            })
+        rows = enhancer.load_source(path, path.name)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["product_validation_status"] == "review"
+    assert row["product_review_reason"] == "short_name_with_payment_offer_needs_review"
+    assert row["promo_price"] is None
+    assert row["normal_price"] is None
+    assert row["discount_percent"] is None
+    assert "Rp 2.000 Dengan QRIS" in row["offer_text"]
+    assert "payment_benefit_amount_not_product_price" in row["price_quality_flag"]
