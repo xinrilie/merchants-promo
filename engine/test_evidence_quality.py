@@ -73,6 +73,29 @@ def test_load_source_reconstructs_evidence_and_keeps_new_merchant():
     assert row["source_verification_label"] == "Agregator; belum diverifikasi retailer"
 
 
+def test_uniqlo_editorial_fragment_with_rp199000_is_rejected_by_final_import():
+    with __import__("tempfile").TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "uniqlo_editorial.csv"
+        _write_feed(path, {
+            "product_text": "Jangan Sampai Kelewatan Promo Uniqlo Limited Offers Mulai",
+            "merchant_name": "Uniqlo Limited Offers",
+            "campaign_title": "Promo UNIQLO Weekly Limited Offers 23-29 Oktober 2026",
+            "promo_status": "active",
+            "valid_from": "2026-10-23",
+            "valid_until": "2026-10-29",
+            "period_precision": "range",
+            "promo_price": "199000",
+            "price_basis": "offer_price",
+            "offer_text": "Rp199.000 ini. Berlaku mulai tanggal 23-29 Oktober 2026, buruan ke toko atau belanja online di UNIQLO!",
+            "source_name": "Katalogpromosi.com",
+            "source_url": "https://katalogpromosi.com/promo-uniqlo-limited-offers-minggu-ini/",
+        })
+        rows = enhancer.load_source(path, "promo_multisource_products_all.csv")
+    assert len(rows) == 1
+    assert rows[0]["product_validation_status"] == "rejected"
+    assert rows[0]["product_rejection_reason"] == "editorial_heading_misparsed_as_product"
+
+
 def test_unsubstantiated_price_is_cleared_and_sent_to_review():
     with __import__("tempfile").TemporaryDirectory() as temp_dir:
         path = Path(temp_dir) / "feed.csv"
@@ -152,7 +175,7 @@ def test_name_cleaned_to_empty_is_reviewed_and_never_published_as_product_price(
         display = enhancer.make_clean_row(row, review=True)
         assert display["Nama Produk"] == "Produk belum teridentifikasi"
         assert display["Harga Promo (Rp)"] is None
-        assert display["Harga Asli (Rp)"] is None
+        assert display["Harga Asli dari Sumber (Rp)"] is None
 
 
 def test_period_certainty_is_separate_from_retailer_verification():
@@ -296,6 +319,34 @@ def test_multi_source_provenance_does_not_copy_one_timestamp_to_every_source():
     ], now)
     assert report["Katalogpromosi.com"]["fresh_rows"] == 1
     assert "Scanharga.com" not in report
+
+
+def test_missing_per_source_validation_is_unknown_not_false():
+    now = datetime.fromisoformat("2026-10-24T21:30:00+07:00")
+    report = enhancer.build_source_freshness_report(
+        [{"source_name": "Hemat.id", "scraped_at": "2026-10-24T21:29:00+07:00"}],
+        now,
+        {"Hemat.id": {"output_status": "updated", "source_health_status": "fresh"}},
+    )
+    run = report["Hemat.id"]["current_run"]
+    assert run["output_status"] == "updated"
+    assert run["source_health_status"] == "fresh"
+    assert run["validation_passed"] is None
+    assert run["validation_status"] == "not_reported"
+    assert "tidak dilaporkan" in run["freshness_note"]
+
+
+def test_explicit_per_source_validation_is_preserved():
+    now = datetime.fromisoformat("2026-10-24T21:30:00+07:00")
+    rows = [{"source_name": "Hemat.id", "scraped_at": "2026-10-24T21:29:00+07:00"}]
+    passed = enhancer.build_source_freshness_report(rows, now, {
+        "Hemat.id": {"output_status": "updated", "validation": {"valid": True}}
+    })["Hemat.id"]["current_run"]
+    failed = enhancer.build_source_freshness_report(rows, now, {
+        "Hemat.id": {"output_status": "updated", "validation": {"valid": False}}
+    })["Hemat.id"]["current_run"]
+    assert passed["validation_passed"] is True and passed["validation_status"] == "passed"
+    assert failed["validation_passed"] is False and failed["validation_status"] == "failed"
 
 
 def test_current_source_metadata_comes_from_three_source_runlog(tmp_path, monkeypatch):

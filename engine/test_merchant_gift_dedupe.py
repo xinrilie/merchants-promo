@@ -145,14 +145,18 @@ def test_dedupe_does_not_merge_different_named_gift_items():
 
 
 def test_duplicate_review_rows_show_priority_and_sort_highest_first():
+    # Same product and compatible offer, but date evidence is missing; this is a
+    # legitimate high-priority review candidate rather than an offer conflict.
     exact_a = _base_row(
         product_text="Sunlight Jeruk 755 ml",
-        offer_text="Harga Promo Rp16.900 dan diskon sumber berbeda",
+        offer_text="Harga Promo Rp16.900",
         promo_price=16900,
+        valid_from=None,
+        valid_until=None,
         source_url="https://example.test/a",
         source_item_url="https://example.test/item-a",
     )
-    exact_b = dict(exact_a, source_url="https://example.test/b", source_item_url="https://example.test/item-b", promo_price=15900)
+    exact_b = dict(exact_a, source_url="https://example.test/b", source_item_url="https://example.test/item-b")
     similar = dict(
         exact_a,
         product_text="Sunlight Jeruk Lime 755 ml",
@@ -169,3 +173,31 @@ def test_duplicate_review_rows_show_priority_and_sort_highest_first():
     assert ranks == sorted(ranks)
     assert candidates[0]["Prioritas Review"] == "Tinggi"
     assert "Prioritas Review" in enhancer.POSSIBLE_DUPLICATE_FIELDS
+
+
+def test_different_purchase_quantity_tiers_are_not_high_priority_duplicate_merges():
+    buy_five = _base_row(
+        product_text="Yummy Choice Fried Chicken",
+        offer_text="Beli 5 diskon Rp10.000",
+        purchase_condition="Beli 5 pcs diskon Rp10.000",
+        deal_type="Beli Banyak Lebih Hemat",
+        promo_price=None,
+        normal_price=None,
+        valid_from=None,
+        valid_until=None,
+        source_url="https://example.test/yummy-a",
+        source_item_url="https://example.test/yummy-item-a",
+    )
+    buy_ten = dict(
+        buy_five,
+        offer_text="Beli 10 diskon Rp24.000",
+        purchase_condition="Beli 10 pcs diskon Rp24.000",
+        source_url="https://example.test/yummy-b",
+        source_item_url="https://example.test/yummy-item-b",
+    )
+    candidates = enhancer.build_possible_duplicate_rows([buy_five, buy_ten])
+    assert len(candidates) == 1
+    pair = candidates[0]
+    assert pair["Prioritas Review"] != "Tinggi"
+    assert "Pertahankan terpisah" in pair["Tindakan"]
+    assert "tingkat pembelian berbeda" in pair["Tindakan"]

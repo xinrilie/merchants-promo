@@ -37,6 +37,8 @@ EDITORIAL_PREFIX_RE = re.compile(
     r"memanfaatkan\b|manfaatkan\b|menikmati\b|mendapatkan\b|memperoleh\b|"
     r"menggunakan\b|memaksimalkan\b|maksimalkan\b|"
     r"belanja(?:\s+(?:kebutuhan|lebih|hemat|sehari-hari))?\b|"
+    r"jangan\s+sampai\s+(?:kelewatan|ketinggalan|terlewat|lupa)\b|"
+    r"buruan\s+(?:ke|cek|lihat|kunjungi|beli)\b|"
     r"cek\s+(?:gambar|info|informasi|promo|syarat|ketentuan)\b|"
     r"klik\b|lihat\s+(?:gambar|promo|selengkapnya)\b|"
     r"jangan\s+lewatkan\b|hadir(?:kan|nya)?\b|kembali\s+hadir\b|"

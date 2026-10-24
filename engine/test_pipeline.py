@@ -26,6 +26,9 @@ def test_article_headlines_are_not_products():
         "Kalau Kamu Lagi Cari Promo Belanja Hemat, Promo Alfamidi Katalog Mingguan Adalah Jawabannya! Dari Tanggal 16-31 Oktober 2026, Kamu Bisa Nikmati Berbagai Penawaran Menarik Mulai Dari",
         # Regression: titles can be missing in legacy/stale CSV rows.
         "Akhirnya",
+        # Live false-positive found in diagnostic.zip: a teaser/headline fragment
+        # was incorrectly exported as a Uniqlo product at Rp199.000.
+        "Jangan Sampai Kelewatan Promo Uniqlo Limited Offers Mulai",
     ]
     for name in cases:
         title_values = ["Promo Paris Baguette BNI Wonderful Weekend 23-24 Oktober 2026"]
@@ -51,6 +54,24 @@ def test_article_headlines_are_not_products():
                 "editorial_sentence_misparsed_as_product",
                 "long_editorial_sentence_misparsed_as_product",
             }, (name, title, reason)
+
+
+def test_uniqlo_cta_fragment_with_price_is_rejected_as_editorial_not_product():
+    row = {
+        "product_text": "Jangan Sampai Kelewatan Promo Uniqlo Limited Offers Mulai",
+        "original_product_text": "Jangan Sampai Kelewatan Promo Uniqlo Limited Offers Mulai",
+        "offer_text": "Rp199.000 ini. Berlaku mulai tanggal 23-29 Oktober 2026, buruan ke toko atau belanja online di UNIQLO!",
+        "raw_line": "Jangan Sampai Kelewatan Promo Uniqlo Limited Offers Mulai Rp199.000 ini.",
+        "campaign_title": "Promo UNIQLO Weekly Limited Offers 23-29 Oktober 2026",
+        "merchant_name": "Uniqlo Limited Offers",
+        "normal_price": None,
+        "promo_price": 199000,
+        "source_name": "Katalogpromosi.com",
+        "source_url": "https://katalogpromosi.com/promo-uniqlo-limited-offers-minggu-ini/",
+    }
+    reason = product_candidate_rejection_reason(row, "Katalogpromosi.com article")
+    assert reason == "editorial_heading_misparsed_as_product", (row["product_text"], reason)
+
 
 
 def test_editorial_teaser_rejected_even_with_structured_bundle_offer():
