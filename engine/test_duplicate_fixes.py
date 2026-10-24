@@ -186,6 +186,23 @@ def test_duplicate_fixes_regressions():
     assert len(ambiguous_result) == 3, "Ambiguous retailer match was incorrectly merged"
     assert any(not r.get("merchant_name") for r in ambiguous_result), "Ambiguous Hemat row should remain unassigned"
 
+    # Distinct purchase tiers remain separate even when their row prices are absent.
+    tier5 = row(
+        product_text="Yummy Choice Fried Chicken", merchant_name="Indomaret",
+        source_name="Katalogpromosi.com", source_dataset="katalog.csv",
+        source_url="https://katalogpromosi.example/yummy-choice",
+        campaign_title="Promo Indomaret Fresh 16-31 Oktober 2026",
+        valid_from="2026-10-16", valid_until="2026-10-31", period_precision="range",
+        promo_price=None, normal_price=None, discount_percent=None,
+        offer_text="Beli 5 pcs Diskon Rp10.000", purchase_condition="Beli 5 pcs",
+        deal_type="Diskon nominal", price_basis="bundle_offer_amount",
+    )
+    tier10 = dict(tier5, source_name="Scanharga.com", source_dataset="scan.csv",
+        source_url="https://scan.example/yummy-choice",
+        offer_text="Beli 10 pcs Diskon Rp24.000", purchase_condition="Beli 10 pcs")
+    tier_result, tier_groups, tier_absorbed = merge_equivalent_cross_source_offers([tier5, tier10])
+    assert len(tier_result) == 2 and tier_groups == 0 and tier_absorbed == 0, "different buy-quantity tiers were merged"
+
     # Conflicting explicit prices must never be silently merged.
     c1 = dict(a2, promo_price=10900, discount_percent=63.7, discount_percent_calculated=63.7,
               source_url="https://hemat.example/aice-price-a", source_name="Hemat.id", source_dataset="hemat.csv")

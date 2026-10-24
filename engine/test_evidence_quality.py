@@ -268,3 +268,46 @@ def test_storage_dataset_name_never_counts_as_independent_source():
     assert pipe_sources_for_validation({"source_dataset": "promo_baseline.csv"}) == []
     assert pipe_sources_for_validation({"source_name": "Hemat.id", "source_dataset": "promo_baseline.csv"}) == ["Hemat.id"]
     assert pipe_sources_for_validation({"source_names": "Hemat.id | Scanharga.com", "source_dataset": "promo_baseline.csv"}) == ["Hemat.id", "Scanharga.com"]
+
+
+def test_source_freshness_reports_mixed_fresh_and_historical_and_last_good_status():
+    now = datetime.fromisoformat("2026-10-24T19:40:00+07:00")
+    rows = [
+        {"source_name": "Momsmoney/Kontan", "scraped_at": "2026-10-24T19:36:00+07:00"},
+        {"source_name": "Momsmoney/Kontan", "scraped_at": ""},
+        {"source_name": "Momsmoney/Kontan", "scraped_at": None},
+    ]
+    report = enhancer.build_source_freshness_report(rows, now, {
+        "Momsmoney/Kontan": {
+            "checked_at": "2026-10-24T19:36:21+07:00",
+            "output_status": "preserved_previous_catalog",
+            "latest_attempt_product_rows": 17,
+            "active_product_rows": 3,
+            "active_estimated_product_rows": 14,
+            "validation": {"valid": False, "reasons": ["only three confirmed rows"]},
+        }
+    })
+    source = report["Momsmoney/Kontan"]
+    assert source["status"] == "mixed_fresh_and_historical_or_unverified"
+    assert source["fresh_rows"] == 1
+    assert source["rows_missing_or_invalid_timestamp"] == 2
+    assert source["all_rows_fresh"] is False
+    assert source["fresh_row_percent"] == 33.3
+    assert enhancer.freshness_display_label("mixed:fresh|historical_or_unverified") == "Campuran: Segar (≤7 hari) + Historis / timestamp tidak tersedia"
+    assert source["current_run"]["previous_catalog_preserved"] is True
+    assert source["current_run"]["validation_passed"] is False
+    assert source["current_run"]["active_product_rows"] == 3
+    assert "tidak menggantikan katalog stabil" in source["current_run"]["freshness_note"]
+
+
+def test_multi_source_provenance_does_not_copy_one_timestamp_to_every_source():
+    now = datetime.fromisoformat("2026-10-24T12:00:00+07:00")
+    report = enhancer.build_source_freshness_report([
+        {
+            "source_name": "Katalogpromosi.com",
+            "source_names": "Katalogpromosi.com | Momsmoney/Kontan",
+            "scraped_at": "2026-10-24T11:55:00+07:00",
+        }
+    ], now)
+    assert report["Katalogpromosi.com"]["fresh_rows"] == 1
+    assert "Momsmoney/Kontan" not in report

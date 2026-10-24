@@ -145,3 +145,76 @@ def test_gate_routes_cross_source_price_conflict_to_review():
     assert report["status"] == "passed"
     assert "cross_source_price_disagreement" in report["routed_rows"][0]["issues"]
     assert row["product_validation_status"] == "review"
+
+
+def test_explicit_discount_conflicting_with_same_row_prices_routes_to_review():
+    row = _candidate(
+        normal_price=17900,
+        promo_price=10900,
+        discount_percent=35.0,
+        discount_percent_basis="explicit_offer",
+        discount_percent_calculated=39.1,
+        discount_savings_rp=7000,
+        offer_text="Diskon: Hemat 35% | Harga Normal: Rp17.900 | Harga Promo: Rp10.900",
+        raw_line="Cadbury Dairy Milk Roast Almond 52 g - Hemat 35%, normal Rp17.900, promo Rp10.900",
+        discount_evidence_text="Hemat 35%",
+    )
+    current, report = enhancer.apply_export_quality_gate([row])
+    assert current == []
+    assert report["status"] == "passed"
+    assert "explicit_discount_price_math_disagreement" in report["routed_rows"][0]["issues"]
+    assert row["source_discount_claim_percent"] == 35.0
+    assert row["discount_percent"] is None
+    assert row["discount_percent_basis"] == "discount_price_mismatch_review"
+    assert row["discount_percent_calculated"] == 39.1
+    cleaned = enhancer.make_clean_row(row, review=True)
+    assert cleaned["Diskon (%)"] is None
+    assert cleaned["Klaim Diskon Sumber (Review) (%)"] == 35.0
+    assert "39.1%" in cleaned["Catatan"]
+
+
+def test_maximum_discount_claim_only_flags_when_price_math_exceeds_claim():
+    acceptable = _candidate(
+        normal_price=20000, promo_price=15000,
+        discount_percent=30, discount_percent_basis="explicit_max",
+        discount_percent_calculated=25.0,
+        offer_text="Diskon hingga 30%, harga normal Rp20.000, harga promo Rp15.000",
+    )
+    assert enhancer.discount_price_consistency_issue(acceptable) is None
+    excessive = dict(acceptable, discount_percent_calculated=36.0)
+    assert enhancer.discount_price_consistency_issue(excessive) == "maximum_discount_below_price_calculation"
+
+
+def test_row_freshness_is_visible_and_not_conflated_with_verification():
+    recent = enhancer.classify_row_freshness("2026-10-24T10:00:00+07:00", now_dt=__import__("datetime").datetime.fromisoformat("2026-10-24T12:00:00+07:00"))
+    historic = enhancer.classify_row_freshness("")
+    assert recent == "fresh"
+    assert historic == "historical_or_unverified"
+    assert enhancer.classify_row_freshness("bukan-timestamp") == "invalid_timestamp"
+    future = enhancer.classify_row_freshness(
+        "2026-10-25T00:00:00+07:00",
+        now_dt=__import__("datetime").datetime.fromisoformat("2026-10-24T12:00:00+07:00"),
+    )
+    assert future == "invalid_timestamp"
+    row = _candidate(freshness_status="historical_or_unverified", scraped_at=None)
+    cleaned = enhancer.make_clean_row(row)
+    assert cleaned["Kesegaran Data"] == "Historis / timestamp tidak tersedia"
+    assert cleaned["Verifikasi Sumber"] != cleaned["Kesegaran Data"]
+
+
+def test_discount_conflict_in_existing_review_row_is_sanitized_too():
+    row = _candidate(
+        product_validation_status="review",
+        normal_price=17900,
+        promo_price=10900,
+        discount_percent=35.0,
+        discount_percent_basis="explicit_offer",
+        discount_percent_calculated=39.1,
+        offer_text="Hemat 35%, Harga Normal Rp17.900, Harga Promo Rp10.900",
+        discount_evidence_text="Hemat 35%",
+    )
+    _, report = enhancer.apply_export_quality_gate([row])
+    assert report["additional_existing_review_discount_rows"] == 1
+    assert "explicit_discount_price_math_disagreement" in row["export_gate_flags"]
+    assert row["source_discount_claim_percent"] == 35.0
+    assert row["discount_percent"] is None

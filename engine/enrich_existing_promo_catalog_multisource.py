@@ -79,7 +79,8 @@ FIELDS = [
     "purchase_condition", "deal_type", "offer_text", "section",
     "source_url", "source_urls", "source_campaign_titles", "source_dataset",
     "source_name", "source_names", "source_type", "verification_status", "source_verification_label", "merchant_resolution_method",
-    "source_page_url", "source_item_url", "region_or_channel", "scraped_at",
+    "source_page_url", "source_item_url", "region_or_channel", "scraped_at", "freshness_status",
+    "source_discount_claim_percent",
     "duplicate_count", "duplicate_group_id", "cross_dataset_duplicate", "overlapping_offer_count",
     "overlap_period_flag", "price_quality_flag", "data_quality_flags", "retained_from_previous_run", "raw_line",
     "product_validation_status", "product_rejection_reason", "product_review_reason", "export_gate_flags",
@@ -170,6 +171,86 @@ def as_int(value):
         return int(number.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     except InvalidOperation:
         return None
+
+
+FRESHNESS_MAX_AGE_DAYS = 7
+FRESHNESS_DISPLAY_LABELS = {
+    "fresh": "Segar (≤7 hari)",
+    "preserved_previous": "Katalog lama dipertahankan",
+    "stale": "Usang (>7 hari)",
+    "historical_or_unverified": "Historis / timestamp tidak tersedia",
+    "invalid_timestamp": "Timestamp tidak valid/masa depan",
+}
+
+
+def classify_row_freshness(scraped_at, retained_from_previous_run=False, now_dt=None):
+    """Classify one row's recency independently from its source verification."""
+    if truthy(retained_from_previous_run):
+        return "preserved_previous"
+    stamp = str(scraped_at or "").strip()
+    if not stamp:
+        return "historical_or_unverified"
+    now_dt = now_dt or datetime.now().astimezone()
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        age_seconds = (now_dt - parsed.astimezone(now_dt.tzinfo)).total_seconds()
+        if age_seconds < 0:
+            return "invalid_timestamp"
+        if age_seconds > FRESHNESS_MAX_AGE_DAYS * 86400:
+            return "stale"
+        return "fresh"
+    except (TypeError, ValueError, OverflowError):
+        # A missing timestamp is historical/unverified; a present but malformed
+        # timestamp is a separate data-quality condition and must be visible as such.
+        return "invalid_timestamp"
+
+
+def combine_freshness_statuses(statuses):
+    """Combine provenance recency from equivalent rows without overstating freshness."""
+    flattened = []
+    for value in statuses:
+        value = str(value or "").strip()
+        if not value:
+            continue
+        if value.startswith("mixed:"):
+            flattened.extend(part for part in value.partition(":")[2].split("|") if part)
+        else:
+            flattened.append(value)
+    values = list(OrderedDict.fromkeys(flattened))
+    if not values:
+        return "historical_or_unverified"
+    if len(values) == 1:
+        return values[0]
+    order = ["fresh", "preserved_previous", "stale", "historical_or_unverified", "invalid_timestamp"]
+    ordered = [value for value in order if value in values] + [value for value in values if value not in order]
+    labels = [FRESHNESS_DISPLAY_LABELS.get(value, value) for value in ordered]
+    return "mixed:" + "|".join(ordered)
+
+
+def freshness_display_label(status):
+    status = str(status or "historical_or_unverified")
+    if status.startswith("mixed:"):
+        parts = status.partition(":")[2].split("|")
+        return "Campuran: " + " + ".join(FRESHNESS_DISPLAY_LABELS.get(part, part) for part in parts)
+    return FRESHNESS_DISPLAY_LABELS.get(status, FRESHNESS_DISPLAY_LABELS["historical_or_unverified"])
+
+
+def latest_scrape_timestamp(rows):
+    parsed_values = []
+    for row in rows:
+        stamp = str(row.get("scraped_at") or "").strip()
+        if not stamp:
+            continue
+        try:
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.astimezone()
+            parsed_values.append((parsed.timestamp(), stamp))
+        except (TypeError, ValueError, OverflowError, OSError):
+            continue
+    return max(parsed_values)[1] if parsed_values else None
 
 
 def norm_key(value) -> str:
@@ -626,6 +707,9 @@ def load_source(path, source_label):
             else:
                 verification_status_value = "historical_baseline_unknown"
 
+        scraped_at_value = (raw.get("scraped_at") or "").strip() or None
+        retained_value = truthy(raw.get("retained_from_previous_run"))
+        row_freshness = classify_row_freshness(scraped_at_value, retained_value)
         price_method = (raw.get("price_parse_method") or "").strip()
         if not price_method:
             if promo is not None and normal is not None:
@@ -685,8 +769,10 @@ def load_source(path, source_label):
             "source_page_url": (raw.get("source_page_url") or "").strip() or None,
             "source_item_url": (raw.get("source_item_url") or "").strip() or None,
             "region_or_channel": (raw.get("region_or_channel") or "").strip() or None,
-            "scraped_at": (raw.get("scraped_at") or "").strip() or None,
-            "retained_from_previous_run": truthy(raw.get("retained_from_previous_run")),
+            "scraped_at": scraped_at_value,
+            "freshness_status": row_freshness,
+            "source_discount_claim_percent": None,
+            "retained_from_previous_run": retained_value,
             "duplicate_count": as_int(raw.get("duplicate_count")) or 1,
             "cross_dataset_duplicate": False,
             "overlapping_offer_count": 1,
@@ -854,6 +940,11 @@ def merge_rows(rows):
         best["verification_status"] = " | ".join(verification) or None
         best["duplicate_count"] = sum(as_int(r.get("duplicate_count")) or 1 for r in group)
         best["retained_from_previous_run"] = any(truthy(r.get("retained_from_previous_run")) for r in group)
+        best["freshness_status"] = combine_freshness_statuses([
+            r.get("freshness_status") or classify_row_freshness(r.get("scraped_at"), r.get("retained_from_previous_run"))
+            for r in group
+        ])
+        best["scraped_at"] = latest_scrape_timestamp(group) or best.get("scraped_at")
         best["cross_dataset_duplicate"] = len(sources) > 1
         best["overlapping_offer_count"] = 1
         best["overlap_period_flag"] = None
@@ -1018,6 +1109,11 @@ def consolidate_overlapping_offers(rows):
             best["promo_status"] = current_status(best["valid_from"], best["valid_until"], best["period_precision"], best.get("period_flags"))
             best["duplicate_count"] = sum(as_int(r.get("duplicate_count")) or 1 for r in members)
             best["overlapping_offer_count"] = len(members)
+            best["freshness_status"] = combine_freshness_statuses([
+                r.get("freshness_status") or classify_row_freshness(r.get("scraped_at"), r.get("retained_from_previous_run"))
+                for r in members
+            ])
+            best["scraped_at"] = latest_scrape_timestamp(members) or best.get("scraped_at")
             best["cross_dataset_duplicate"] = len(all_datasets) > 1
             best["duplicate_group_id"] = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:12]
             best["data_quality_flags"] = " | ".join(pipe_unique([
@@ -1125,9 +1221,27 @@ def _compatible_prices(a, b):
     return True
 
 
+def _purchase_quantity_signature(row):
+    """Return an explicit buy-quantity from offer text/condition, if present."""
+    text = scraper.normalize_text(" ".join(str(row.get(k) or "") for k in (
+        "purchase_condition", "offer_text", "deal_type"
+    )))
+    match = re.search(
+        r"\b(?:beli|buy)\s*(\d+)\s*(?:pcs?|buah|item|unit|pack|pak|box|kemasan)?\b",
+        text,
+        re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else None
+
+
 def _compatible_offers(a, b):
     fa, fb = _offer_family(a), _offer_family(b)
     if fa[0] == fb[0] == "bundle" and fa[1] != fb[1]:
+        return False
+    # Different quantity tiers must stay separate, even when promo-price fields
+    # are empty or identical (e.g. Beli 5 pcs diskon Rp10.000 vs Beli 10 pcs).
+    qty_a, qty_b = _purchase_quantity_signature(a), _purchase_quantity_signature(b)
+    if qty_a is not None and qty_b is not None and qty_a != qty_b:
         return False
 
     if fa[0] == fb[0] == "general":
@@ -1473,6 +1587,11 @@ def merge_equivalent_cross_source_offers(rows):
             best["source_type"] = " | ".join(OrderedDict.fromkeys(v for v in all_source_types if v)) or None
             best["verification_status"] = " | ".join(OrderedDict.fromkeys(v for v in all_verification if v)) or None
             best["region_or_channel"] = " | ".join(OrderedDict.fromkeys(v for v in all_region_channels if v)) or None
+            best["freshness_status"] = combine_freshness_statuses([
+                m.get("freshness_status") or classify_row_freshness(m.get("scraped_at"), m.get("retained_from_previous_run"))
+                for m in cluster
+            ])
+            best["scraped_at"] = latest_scrape_timestamp(cluster) or best.get("scraped_at")
             best["duplicate_count"] = sum(as_int(m.get("duplicate_count")) or 1 for m in cluster)
             best["overlapping_offer_count"] = len(cluster)
             dataset_parts = pipe_unique([best.get("source_dataset") or ""])
@@ -1596,6 +1715,44 @@ def _product_price_gate_issue(row, field, kind):
     return None
 
 
+DISCOUNT_PRICE_MATH_TOLERANCE = Decimal("3.0")
+
+
+def discount_price_consistency_issue(row):
+    """Flag explicit product discount claims that materially disagree with price math.
+
+    Percentage claims are compared only when the same row has positive normal/promo
+    prices, the parser marks them as offer prices, and unit context is not already
+    ambiguous. 'Hingga/up to' claims are only flagged when the calculated SKU discount
+    exceeds the stated maximum; a smaller value is compatible with a maximum claim.
+    """
+    basis = str(row.get("discount_percent_basis") or "").strip().casefold()
+    if basis not in {"explicit_offer", "explicit_max"}:
+        return None
+    if str(row.get("price_basis") or "").strip().casefold() != "offer_price":
+        return None
+    flags = {part.strip() for part in str(row.get("price_quality_flag") or "").split("|") if part.strip()}
+    if {"price_unit_context_requires_review", "normal_price_ambiguous_unit", "promo_price_ambiguous_unit"} & flags:
+        return None
+    promo = as_int(row.get("promo_price"))
+    normal = as_int(row.get("normal_price"))
+    if promo is None or normal is None or promo <= 0 or normal <= promo:
+        return None
+    stated = as_decimal(row.get("discount_percent"))
+    if stated is None:
+        stated, parsed_basis = scraper.parse_explicit_discount(str(row.get("offer_text") or ""))
+        stated = as_decimal(stated)
+        if stated is None or parsed_basis not in {"explicit_offer", "explicit_max"}:
+            return None
+        basis = parsed_basis
+    calculated = as_decimal(row.get("discount_percent_calculated"))
+    if calculated is None:
+        calculated = (Decimal(normal - promo) / Decimal(normal) * Decimal("100")).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    if basis == "explicit_max":
+        return "maximum_discount_below_price_calculation" if calculated > stated + DISCOUNT_PRICE_MATH_TOLERANCE else None
+    return "explicit_discount_price_math_disagreement" if abs(calculated - stated) > DISCOUNT_PRICE_MATH_TOLERANCE else None
+
+
 def export_quality_gate_issues(row):
     """Return blockers for a row that is about to enter the user-facing active catalog."""
     issues = []
@@ -1662,6 +1819,9 @@ def export_quality_gate_issues(row):
         issues.append("product_discount_out_of_range")
     if discount is not None and "discount_without_matching_offer_evidence" in price_flags:
         issues.append("product_discount_missing_matching_offer_evidence")
+    consistency_issue = discount_price_consistency_issue(row)
+    if consistency_issue:
+        issues.append(consistency_issue)
     return list(OrderedDict.fromkeys(issues))
 
 
@@ -1674,6 +1834,22 @@ def _quarantine_for_export_gate(row, issues):
         row.get("product_review_reason") or "",
         "Gerbang kualitas ekspor: " + ", ".join(issues),
     ]))
+    if "explicit_discount_price_math_disagreement" in issues or "maximum_discount_below_price_calculation" in issues:
+        source_claim = as_decimal(row.get("discount_percent"))
+        if source_claim is not None:
+            row["source_discount_claim_percent"] = float(source_claim)
+        calculated = as_decimal(row.get("discount_percent_calculated"))
+        claim = as_decimal(row.get("source_discount_claim_percent"))
+        row["discount_percent"] = None
+        row["discount_savings_rp"] = None
+        row["discount_evidence_text"] = row.get("discount_evidence_text") or row.get("offer_text")
+        row["discount_percent_basis"] = "discount_price_mismatch_review"
+        row["discount_percent_confidence"] = "unknown"
+        row["discount_mismatch_note"] = (
+            f"Klaim sumber {claim:g}% berbeda dengan hitungan harga {calculated:g}%; periksa varian/satuan"
+            if claim is not None and calculated is not None else
+            "Klaim diskon sumber tidak cocok dengan hitungan harga; perlu review"
+        )
     if "product_identity_empty_or_generic" in issues:
         for field in (
             "promo_price", "normal_price", "promo_price_evidence_text", "normal_price_evidence_text",
@@ -1736,6 +1912,7 @@ def apply_export_quality_gate(consolidated_rows):
         and row.get("product_validation_status") != "review"
         and not has_material_period_conflict(row)
     ]
+    candidate_ids = {id(row) for row in candidates}
     for row in candidates:
         issues = export_quality_gate_issues(row)
         if issues:
@@ -1745,11 +1922,35 @@ def apply_export_quality_gate(consolidated_rows):
                 "merchant_name": row.get("merchant_name") or "",
                 "campaign_title": row.get("campaign_title") or "",
                 "source_url": row.get("source_url") or "",
+                "source_discount_claim_percent": row.get("source_discount_claim_percent"),
+                "discount_percent_calculated": row.get("discount_percent_calculated"),
                 "issues": issues,
             })
             issue_counts.update(issues)
         else:
             current.append(row)
+
+    # Existing review / non-active records also need their source discount claim
+    # separated from the validated discount field. They are not new active-gate
+    # candidates, but should not continue showing a contradictory number as valid.
+    already_reviewed_discount_conflicts = []
+    for row in consolidated_rows:
+        if id(row) in candidate_ids or str(row.get("product_validation_status") or "").casefold() == "rejected":
+            continue
+        issue = discount_price_consistency_issue(row)
+        if not issue:
+            continue
+        _quarantine_for_export_gate(row, [issue])
+        already_reviewed_discount_conflicts.append({
+            "product_text": row.get("product_text") or "",
+            "merchant_name": row.get("merchant_name") or "",
+            "campaign_title": row.get("campaign_title") or "",
+            "source_url": row.get("source_url") or "",
+            "source_discount_claim_percent": row.get("source_discount_claim_percent"),
+            "discount_percent_calculated": row.get("discount_percent_calculated"),
+            "issues": [issue],
+        })
+        issue_counts.update([issue])
 
     remaining = []
     for row in current:
@@ -1766,8 +1967,10 @@ def apply_export_quality_gate(consolidated_rows):
         "candidate_active_rows": len(candidates),
         "accepted_active_rows": len(current),
         "routed_to_review_rows": len(quarantined),
+        "additional_existing_review_discount_rows": len(already_reviewed_discount_conflicts),
         "issue_counts": dict(issue_counts),
         "routed_rows": quarantined,
+        "discount_mismatches_already_in_review": already_reviewed_discount_conflicts,
         "blocking_rows_remaining": remaining,
     }
     return current, report
@@ -1787,6 +1990,9 @@ CLEAN_COLUMNS = [
     ("Status Validasi Produk", "product_quality_label"),
     ("Kepastian Periode", "period_certainty"),
     ("Verifikasi Sumber", "source_verification_label"),
+    ("Kesegaran Data", "freshness_display"),
+    ("Waktu Scrape", "scraped_at"),
+    ("Klaim Diskon Sumber (Review) (%)", "source_discount_claim_percent"),
     ("Mulai Berlaku", "valid_from"),
     ("Berakhir", "valid_until"),
     ("Jenis Promo", "display_deal_type"),
@@ -1831,6 +2037,8 @@ def display_notes(row):
         notes.append("Merchant dicocokkan dari penawaran lintas sumber; belum diverifikasi retailer resmi")
     if row.get("price_quality_flag"):
         notes.append("Harga/nominal perlu diperiksa")
+    if row.get("discount_mismatch_note"):
+        notes.append(str(row.get("discount_mismatch_note")))
     if truthy(row.get("retained_from_previous_run")):
         notes.append("Data dipertahankan dari scraping sebelumnya karena sumber tidak menghasilkan produk baru pada run ini")
     campaign_claim = row.get("campaign_discount_percent")
@@ -1857,6 +2065,7 @@ def make_clean_row(row, review=False):
     item["display_deal_type"] = row.get("deal_type") or row.get("campaign_type") or ""
     item["product_category"], item["product_subcategory"] = classify_promo_category(row)
     item["display_notes"] = display_notes(row)
+    item["freshness_display"] = freshness_display_label(row.get("freshness_status"))
     out = {label: item.get(key) for label, key in CLEAN_COLUMNS}
     if review and not str(out.get("Nama Produk") or "").strip():
         # The review sheet should be readable, while the full audit retains the
@@ -1872,6 +2081,11 @@ def make_clean_row(row, review=False):
             reasons.append("Identitas produk perlu diverifikasi: " + str(row.get("product_review_reason")))
         if row.get("discount_percent_confidence") == "low": reasons.append("Persentase diskon estimasi")
         if row.get("overlap_period_flag"): reasons.append("Penawaran serupa muncul pada beberapa artikel")
+        if row.get("discount_mismatch_note"): reasons.append(str(row.get("discount_mismatch_note")))
+        if "explicit_discount_price_math_disagreement" in str(row.get("export_gate_flags") or ""):
+            reasons.append("Klaim diskon tertulis berbeda signifikan dari hitungan harga")
+        if "maximum_discount_below_price_calculation" in str(row.get("export_gate_flags") or ""):
+            reasons.append("Diskon hitungan melampaui klaim diskon maksimum sumber")
         if not row.get("merchant_name"): reasons.append("Merchant belum diketahui")
         if row.get("merchant_resolution_method") == "cross_source_corroboration_unverified": reasons.append("Merchant dicocokkan lintas sumber; belum terverifikasi resmi")
         if not row.get("source_url"): reasons.append("Sumber URL tidak tersedia")
@@ -2107,6 +2321,8 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ["Kandidat duplikat untuk diperiksa", len(possible_duplicate_rows)],
         ["Kategori utama", len(CATEGORY_TAXONOMY)],
         ["Gerbang kualitas ekspor", f"{(export_gate_report or {}).get('status', 'not_reported')} — {(export_gate_report or {}).get('routed_to_review_rows', 0)} baris dialihkan ke Perlu Review oleh validasi akhir."],
+        ["Diskon vs harga", f"{sum((export_gate_report or {}).get('issue_counts', {}).get(k, 0) for k in ('explicit_discount_price_math_disagreement', 'maximum_discount_below_price_calculation'))} temuan klaim diskon yang tidak cocok dengan hitungan harga; klaim sumber dipisah dari Diskon (%) dan baris perlu review."],
+        ["Kesegaran Data", "Status per baris: segar ≤7 hari, katalog lama dipertahankan, usang, atau historis/timestamp tidak tersedia. Ini berbeda dari Verifikasi Sumber."],
         ["Status Validasi Produk", "Kolom ini terpisah dari Status Promo. 'Valid' berarti identitas produk dan pemeriksaan harga/merchant lolos gerbang; 'Perlu review' berarti perlu pemeriksaan, meskipun tanggal promo masih berstatus Aktif."],
         ["Sumber produk", "Hemat.id, Katalogpromosi.com, Scanharga.com, dan katalog lama"],
         ["Catatan", "Kepastian periode dipisahkan dari verifikasi sumber; agregator dan artikel publik bukan verifikasi resmi retailer."],
@@ -2230,7 +2446,8 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         width_by_header = {
             "Nama Produk": 38, "Kategori Produk": 31, "Subkategori": 28, "Harga Asli (Rp)": 15, "Harga Promo (Rp)": 15,
             "Diskon (%)": 12, "Merchant": 22, "Hemat (Rp)": 15, "Status Promo": 22,
-            "Kepastian Periode": 20, "Verifikasi Sumber": 34,
+            "Kepastian Periode": 20, "Verifikasi Sumber": 34, "Kesegaran Data": 34,
+            "Waktu Scrape": 28, "Klaim Diskon Sumber (Review) (%)": 29,
             "Mulai Berlaku": 17, "Berakhir": 17, "Jenis Promo": 22,
             "Detail Penawaran": 52, "Kampanye": 48, "Catatan": 56, "Sumber URL": 52,
             "Alasan Review": 50,
@@ -2245,7 +2462,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
             field = headers[idx - 1]
             for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
                 cell = col_cells[0]
-                cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Review"})
+                cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Kesegaran Data", "Klaim Diskon Sumber (Review) (%)", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Review"})
                 if field in {"Harga Asli (Rp)", "Harga Promo (Rp)", "Hemat (Rp)"}:
                     cell.number_format = '#,##0'
                 elif field == "Diskon (%)":
@@ -2270,7 +2487,8 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     rejected_width_by_header = {
         "Nama Produk": 38, "Kategori Produk": 31, "Subkategori": 28, "Harga Asli (Rp)": 15, "Harga Promo (Rp)": 15,
         "Diskon (%)": 12, "Merchant": 22, "Hemat (Rp)": 15, "Status Promo": 22,
-        "Kepastian Periode": 20, "Verifikasi Sumber": 34,
+        "Kepastian Periode": 20, "Verifikasi Sumber": 34, "Kesegaran Data": 34,
+        "Waktu Scrape": 28, "Klaim Diskon Sumber (Review) (%)": 29,
         "Mulai Berlaku": 17, "Berakhir": 17, "Jenis Promo": 22,
         "Detail Penawaran": 52, "Kampanye": 48, "Catatan": 56,
         "Sumber URL": 52, "Alasan Penolakan": 48,
@@ -2285,7 +2503,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         field = rejected_headers[idx - 1]
         for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
             cell = col_cells[0]
-            cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Penolakan"})
+            cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Kesegaran Data", "Klaim Diskon Sumber (Review) (%)", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "Alasan Penolakan"})
             if field in {"Harga Asli (Rp)", "Harga Promo (Rp)", "Hemat (Rp)"}:
                 cell.number_format = '#,##0'
             elif field == "Diskon (%)":
@@ -2388,11 +2606,10 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     return True
 
 
-def build_source_freshness_report(all_loaded_rows, now_dt=None):
-    """Summarize source freshness without treating missing timestamps as fresh."""
+def build_source_freshness_report(all_loaded_rows, now_dt=None, source_run_metadata=None):
+    """Summarize row freshness without labelling mixed/historical data fully fresh."""
     from collections import defaultdict
     now_dt = now_dt or datetime.now().astimezone()
-    freshness_days = 7
     per_source = defaultdict(list)
 
     def split_values(*values):
@@ -2405,8 +2622,17 @@ def build_source_freshness_report(all_loaded_rows, now_dt=None):
         return result
 
     for row in all_loaded_rows:
-        names = split_values(row.get("source_names"), row.get("source_name"))
-        if not names:
+        # scraped_at belongs to the row's primary source_name. Do not copy its
+        # freshness timestamp to every name in a multi-source provenance string.
+        primary_name = str(row.get("source_name") or "").strip()
+        provenance_names = split_values(row.get("source_names"))
+        if primary_name:
+            names = [primary_name]
+        elif len(provenance_names) == 1:
+            names = provenance_names
+        elif len(provenance_names) > 1:
+            names = ["Multi-source provenance; freshness not attributable"]
+        else:
             dataset = str(row.get("source_dataset") or "").strip()
             if "momsmoney" in dataset.casefold():
                 names = ["Momsmoney/Kontan"]
@@ -2417,54 +2643,105 @@ def build_source_freshness_report(all_loaded_rows, now_dt=None):
         for name in names:
             per_source[name].append(row)
 
+    source_run_metadata = source_run_metadata or {}
+    for name in source_run_metadata:
+        per_source.setdefault(name, [])
+
     output = {}
+    component_order = ["fresh", "preserved_previous", "stale", "historical_or_unverified", "invalid_timestamp"]
+    base_status = {
+        "fresh": "fresh",
+        "preserved_previous": "preserved_previous",
+        "stale": "stale",
+        "historical_or_unverified": "historical_or_unverified",
+        "invalid_timestamp": "invalid_timestamp",
+        "no_rows": "no_rows",
+    }
     for name, rows in sorted(per_source.items(), key=lambda item: item[0].casefold()):
-        fresh = preserved = stale = unknown = 0
+        counts = Counter()
         timestamped = 0
         for row in rows:
-            retained = str(row.get("retained_from_previous_run", "")).strip().casefold() in {"true", "1", "yes"}
-            stamp = str(row.get("scraped_at") or "").strip()
-            if retained:
-                preserved += 1
-                continue
-            if not stamp:
-                unknown += 1
-                continue
-            try:
-                parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    parsed = parsed.astimezone()
-                age = now_dt - parsed.astimezone(now_dt.tzinfo)
-                timestamped += 1
-                if age.total_seconds() < 0:
-                    # Future timestamps are clock/config anomalies, not fresh evidence.
-                    unknown += 1
-                elif age.days <= freshness_days:
-                    fresh += 1
-                else:
-                    stale += 1
-            except (TypeError, ValueError, OverflowError):
-                unknown += 1
-        if fresh:
-            status = "fresh"
-        elif preserved:
-            status = "preserved_previous"
-        elif stale:
-            status = "stale"
-        elif unknown:
-            status = "historical_or_unverified"
-        else:
+            status = classify_row_freshness(
+                row.get("scraped_at"), row.get("retained_from_previous_run"), now_dt
+            )
+            counts[status] += 1
+            if str(row.get("scraped_at") or "").strip():
+                try:
+                    datetime.fromisoformat(str(row.get("scraped_at")).strip().replace("Z", "+00:00"))
+                    timestamped += 1
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        components = [component for component in component_order if counts[component] > 0]
+        if not rows:
             status = "no_rows"
-        output[name] = {
+        elif len(components) == 1:
+            status = base_status[components[0]]
+        elif components:
+            status = "mixed_" + "_and_".join(components)
+        else:
+            status = "historical_or_unverified"
+
+        item = {
             "status": status,
             "row_count": len(rows),
-            "fresh_rows": fresh,
-            "preserved_previous_rows": preserved,
-            "stale_rows_over_7_days": stale,
-            "rows_missing_or_invalid_timestamp": unknown,
+            "fresh_rows": counts["fresh"],
+            "preserved_previous_rows": counts["preserved_previous"],
+            "stale_rows_over_7_days": counts["stale"],
+            "rows_missing_or_invalid_timestamp": counts["historical_or_unverified"] + counts["invalid_timestamp"],
             "rows_with_parseable_timestamp": timestamped,
+            "invalid_or_future_timestamp_rows": counts["invalid_timestamp"],
+            "all_rows_fresh": bool(rows) and counts["fresh"] == len(rows),
+            "fresh_row_percent": round(100 * counts["fresh"] / len(rows), 1) if rows else None,
+            "freshness_components": components,
         }
+        run_meta = source_run_metadata.get(name)
+        if run_meta:
+            run_meta = dict(run_meta)
+            output_status = str(run_meta.get("output_status") or "unknown")
+            validation = run_meta.get("validation") or {}
+            run_date_current = run_meta.get("run_log_is_current_date")
+            run_meta["previous_catalog_preserved"] = output_status == "preserved_previous_catalog"
+            run_meta["validation_passed"] = bool(validation.get("valid")) if isinstance(validation, dict) else None
+            if output_status == "preserved_previous_catalog":
+                run_meta["freshness_note"] = (
+                    "Run log terakhir menunjukkan percobaan tidak menggantikan katalog stabil; "
+                    "baris kandidat baru hanya menunjukkan percobaan ekstraksi, bukan pembaruan katalog penuh."
+                )
+            elif output_status == "updated":
+                run_meta["freshness_note"] = "Run log menunjukkan katalog stabil diperbarui; periksa freshness per baris tetap."
+            else:
+                run_meta["freshness_note"] = "Status pembaruan katalog tidak terkonfirmasi; jangan menganggap semua baris segar."
+            if run_date_current is False:
+                run_meta["freshness_note"] = (
+                    f"Run log berasal dari {str(run_meta.get('checked_at') or 'tanggal tidak diketahui')[:10]}, "
+                    "bukan tanggal referensi saat ini; status tersebut bukan bukti scraping hari ini. "
+                    + run_meta["freshness_note"]
+                )
+            item["current_run"] = run_meta
+        if counts["fresh"] and (counts["historical_or_unverified"] or counts["stale"] or counts["preserved_previous"] or counts["invalid_timestamp"]):
+            item["freshness_note"] = "Campuran data baru dan data lama/tidak terverifikasi; label sumber tidak boleh dibaca sebagai seluruh baris segar."
+        output[name] = item
     return output
+
+
+def current_source_run_metadata():
+    """Read the Momsmoney run log as operational context, not row-level freshness proof."""
+    if not MOMSMONEY_RUN_LOG.exists():
+        return {}
+    try:
+        log = json.loads(MOMSMONEY_RUN_LOG.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    keys = (
+        "checked_at", "reference_date", "output_status", "latest_attempt_product_rows",
+        "active_articles", "active_product_rows", "active_estimated_articles",
+        "active_estimated_product_rows", "upcoming_articles", "expired_articles",
+        "unknown_period_articles", "validation",
+    )
+    metadata = {key: log.get(key) for key in keys if key in log}
+    checked_at = str(log.get("checked_at") or "")
+    metadata["run_log_is_current_date"] = bool(checked_at[:10] == TODAY.isoformat())
+    return {"Momsmoney/Kontan": metadata}
 
 
 def main():
@@ -2532,7 +2809,10 @@ def main():
 
     discount_basis = Counter(r.get("discount_percent_basis") or "not_available" for r in current)
     merchant_counts = Counter(r.get("merchant_name") or "UNKNOWN" for r in current)
-    source_freshness = build_source_freshness_report(all_loaded_rows)
+    source_run_metadata = current_source_run_metadata()
+    source_freshness = build_source_freshness_report(
+        all_loaded_rows, source_run_metadata=source_run_metadata
+    )
     report = {
         "built_at": scraper.timestamp(),
         "reference_date": TODAY.isoformat(),
@@ -2543,6 +2823,12 @@ def main():
             **({momsmoney_input_path.name: len(momsmoney_rows)} if momsmoney_input_path is not None else {}),
         },
         "momsmoney_fresh_scrape_loaded": momsmoney_fresh,
+        "momsmoney_current_attempt_loaded": momsmoney_fresh,
+        "momsmoney_stable_catalog_updated": bool(
+            source_run_metadata.get("Momsmoney/Kontan", {}).get("output_status") == "updated"
+            and source_run_metadata.get("Momsmoney/Kontan", {}).get("run_log_is_current_date")
+        ),
+        "momsmoney_output_status_last_run": source_run_metadata.get("Momsmoney/Kontan", {}).get("output_status"),
         "momsmoney_fresh_scrape_note": momsmoney_status_note,
         "momsmoney_input_file": str(momsmoney_input_path.name) if momsmoney_input_path is not None else None,
         "input_row_count": len(all_loaded_rows),
@@ -2558,6 +2844,7 @@ def main():
         "category_counts_current": dict(Counter(classify_promo_category(r)[0] for r in current)),
         "subcategory_counts_current": dict(Counter(f"{classify_promo_category(r)[0]} > {classify_promo_category(r)[1]}" for r in current)),
         "source_freshness": source_freshness,
+        "source_run_status": source_run_metadata,
         "exact_deduplicated_row_count": len(merged_raw),
         "exact_duplicate_rows_collapsed": len(input_rows) - len(merged_raw),
         "overlapping_offer_groups_consolidated": consolidated_groups,
@@ -2566,6 +2853,11 @@ def main():
         "equivalent_cross_source_offer_rows_absorbed": equivalent_offer_rows_absorbed,
         "consolidated_row_count": len(consolidated),
         "current_active_including_estimates": len(current),
+        "discount_price_mismatch_review_rows": sum(
+            any(issue in str(row.get("export_gate_flags") or "") for issue in (
+                "explicit_discount_price_math_disagreement", "maximum_discount_below_price_calculation"
+            )) for row in consolidated
+        ),
         "export_quality_gate": {
             "status": export_gate_report.get("status"),
             "candidate_active_rows": export_gate_report.get("candidate_active_rows", 0),
@@ -2596,7 +2888,8 @@ def main():
         "clean_catalog_columns": [label for label, _ in CLEAN_COLUMNS],
         "full_audit_file": OUT_FULL.name,
         "discount_policy": {
-            "explicit_product_offer_percent": "used as the displayed discount; explicit 'hingga' is marked as a maximum claim",
+            "explicit_product_offer_percent": "only displayed as a validated product discount when it does not materially contradict comparable product-level prices; mismatches are routed to review and the source claim is preserved separately",
+            "discount_price_math_tolerance_percentage_points": str(DISCOUNT_PRICE_MATH_TOLERANCE),
             "price_based_percent": "calculated only when normal and promo prices are positive, unit-comparable, and price_basis is offer_price; Indonesian thousands separators are parsed safely",
             "period_confirmation": "Periode Pasti requires exact range/single_day plus visible text evidence and no unresolved material conflict; it is not retailer verification",
             "price_provenance": "A price is only retained when the same amount can be traced to visible offer text or raw line; otherwise the row is routed to review",

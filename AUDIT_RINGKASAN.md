@@ -98,3 +98,25 @@ Diterapkan pada build 24 Oktober 2026, di atas paket false-positive fix.
 - Verifikasi: `compileall`, semua self-test, **66/66 tes lulus**, ekspor Excel/CSV lulus.
 
 **Batas verifikasi:** build Excel memakai CSV/cache lokal. Log Momsmoney/Kontan yang tersedia bertanggal 23 Oktober 2026 sehingga tidak dipakai sebagai scrape segar pada build 24 Oktober. Tidak ada scraping live yang dijalankan saat tahap audit ini.
+
+
+## Quality Gate v2 — 24 Oktober 2026
+
+Perubahan lanjutan setelah audit log run live pengguna:
+
+1. **Kesegaran sumber tidak lagi diringkas secara keliru menjadi `fresh`.** Laporan sekarang menghitung kesegaran per baris dan dapat menyatakan campuran baris segar, hasil katalog sebelumnya yang dipertahankan, baris usang, timestamp tidak valid/masa depan, serta data historis/tanpa timestamp. Timestamp pada satu record multi-sumber tidak otomatis diberikan ke semua sumber dalam provenance.
+2. **Status run Momsmoney/Kontan ditampilkan terpisah dari kesegaran row-level.** Laporan menyertakan `output_status`, tanggal run, jumlah produk percobaan terbaru, validasi, dan keterangan bila `preserved_previous_catalog`. Status tersebut berarti katalog stabil tidak diganti oleh percobaan terbaru; tidak berarti seluruh dataset lama telah di-scrape ulang.
+3. **Diskon tertulis dibandingkan terhadap harga yang sebanding.** Jika `normal_price` dan `promo_price` merupakan harga penawaran yang mempunyai konteks SKU dan tidak memiliki flag satuan ambigu, klaim diskon eksplisit yang berbeda lebih dari 3 poin persentase dari hasil hitung dipindahkan ke review. Klaim `hingga` ditandai hanya saat hasil hitungan melampaui batas maksimum yang disebutkan.
+4. **Nilai tidak dihapus dari jejak audit.** Di baris mismatch, diskon display dikosongkan agar tidak dianggap valid; klaim sumber dipertahankan pada `Klaim Diskon Sumber (Review) (%)`, hasil hitung tetap tersedia untuk audit, dan catatan mismatch ditampilkan. Baris yang sudah berada di review juga dibersihkan dari diskon display yang bertentangan.
+5. **Penawaran kuantitas berbeda dipisahkan.** Fuzzy merge lintas sumber tidak menggabungkan tawaran dengan kuantitas pembelian eksplisit berbeda, seperti beli 5 vs beli 10, meski nama produk sama.
+
+### Verifikasi Quality Gate v2
+
+- `python -m compileall -q engine`: lulus.
+- `python -m pytest -q engine`: **72 passed**.
+- `python engine/promo_names.py`: self-test lulus.
+- `python engine/promo_multisource_collector.py --self-test`: self-test lulus.
+- `python engine/test_duplicate_fixes.py`: self-test lulus.
+- Uji ekspor lokal menghasilkan kolom `Kesegaran Data`, `Waktu Scrape`, dan `Klaim Diskon Sumber (Review) (%)`.
+
+**Batas verifikasi:** tidak ada scraping live setelah perubahan ini. Pengujian menggunakan kode, tes, dan cache lokal; data live perlu divalidasi setelah pengguna menjalankan paket Quality Gate v2 di Windows. Output runtime lama tidak disertakan dalam ZIP final agar tidak disalahartikan sebagai data live baru.
