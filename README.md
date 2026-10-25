@@ -163,7 +163,9 @@ Jika produk hanya memiliki harga promo dan harga normal tidak tercantum, buat da
 python engine\export_manual_price_search.py
 ```
 
-Buka `hasil\Daftar_Cari_Harga_Manual.xlsx`, salin kolom **Kata Kunci Pencarian (copy)** ke Google/Google AI Mode. Untuk setiap sumber harga yang cocok, isi:
+**Cara yang lebih cepat (AI + JSON):** setelah menjalankan pipeline, buka `hasil\Daftar_Produk_Untuk_AI.json` dan `hasil\PROMPT_AI_CARI_HARGA.txt`. Unggah JSON antrean produk ke AI yang dapat melakukan pencarian web, lalu kirim prompt tersebut. Kerjakan 10–20 produk per batch agar bukti dan kecocokan produk tetap bisa dicek. Minta AI membalas JSON valid sesuai skema prompt, tanpa markdown. Simpan jawaban AI sebagai `hasil\Referensi_Harga_AI.json` (pastikan ekstensi benar-benar `.json`, bukan `.json.txt`), kemudian jalankan `python engine\import_manual_price_references.py`. Jika file JSON ada, importer akan memprioritaskannya. Importer memeriksa kolom wajib, harga, tanggal, URL dasar, dan duplikasi; ia tidak dapat membuktikan sendiri bahwa kutipan AI benar-benar ada pada halaman, jadi jangan gunakan data tanpa URL halaman langsung dan bukti harga yang dapat ditelusuri.
+
+**Cara Excel tetap tersedia:** buka `hasil\Daftar_Cari_Harga_Manual.xlsx`, salin kolom **Kata Kunci Pencarian (copy)** ke Google/Google AI Mode. Untuk setiap sumber harga yang cocok, isi:
 - `Harga Referensi (Rp)`
 - `Nama Sumber`
 - `URL Halaman Harga` (URL halaman produk/harga, bukan URL halaman hasil pencarian)
@@ -171,10 +173,10 @@ Buka `hasil\Daftar_Cari_Harga_Manual.xlsx`, salin kolom **Kata Kunci Pencarian (
 - `Tanggal Cek (YYYY-MM-DD)`
 - `Jenis Referensi (pasar/normal)`
 
-Kalau ingin membandingkan harga dari beberapa toko, duplikasi baris produk lalu isi satu sumber berbeda per baris. Jangan masukkan perkiraan tanpa bukti. Simpan dan tutup Excel, kemudian impor:
+Kalau ingin membandingkan harga dari beberapa toko, duplikasi baris produk lalu isi satu sumber berbeda per baris. Jangan masukkan perkiraan tanpa bukti. Simpan dan tutup Excel, kemudian impor dengan menunjuk file Excel secara eksplisit (agar JSON AI yang mungkin tersimpan tidak diprioritaskan):
 
 ```cmd
-python engine\import_manual_price_references.py
+python engine\import_manual_price_references.py hasil\Daftar_Cari_Harga_Manual.xlsx
 python engine\enrich_existing_promo_catalog_multisource.py
 ```
 

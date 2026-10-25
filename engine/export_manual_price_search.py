@@ -1,6 +1,6 @@
 from __future__ import annotations
-import csv, sys
-from datetime import date
+import csv, json, sys
+from datetime import date, datetime
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -9,6 +9,8 @@ from openpyxl.utils import get_column_letter
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "_internal" / "promo_multisource_products_all.csv"
 OUT = ROOT / "hasil" / "Daftar_Cari_Harga_Manual.xlsx"
+AI_QUEUE = ROOT / "hasil" / "Daftar_Produk_Untuk_AI.json"
+AI_PROMPT = ROOT / "hasil" / "PROMPT_AI_CARI_HARGA.txt"
 HEADERS = [
     "ID Produk", "Nama Produk", "Merchant Promo", "Harga Promo (Rp)",
     "Kata Kunci Pencarian (copy)", "Harga Referensi (Rp) - isi manual",
@@ -106,8 +108,50 @@ def main():
     for row in helpws.iter_rows():
         for c in row: c.alignment=Alignment(wrap_text=True,vertical="top")
     wb.save(OUT)
+
+    # JSON queue is easier to upload to an AI tool than manually copying hundreds of rows.
+    ai_products = [{
+        "product_id": row.get("ID Produk", ""),
+        "product_name": row.get("Nama Produk", ""),
+        "promo_merchant": row.get("Merchant Promo", ""),
+        "promo_price": row.get("Harga Promo (Rp)", ""),
+        "search_query": row.get("Kata Kunci Pencarian (copy)", ""),
+    } for row in merged]
+    queue = {
+        "schema_version": 1,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "instructions": "Daftar produk yang perlu dicari harga pembanding. Data di bagian products adalah identitas katalog; jangan mengubah product_name ketika membuat referensi.",
+        "products": ai_products,
+    }
+    AI_QUEUE.write_text(json.dumps(queue, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    AI_PROMPT.write_text("""Kamu bertugas mencari referensi harga produk dari file Daftar_Produk_Untuk_AI.json yang saya lampirkan.
+
+Kerjakan HANYA 10-20 produk per batch agar setiap hasil punya bukti yang memadai. Saya akan meminta batch berikutnya setelah ini. Cari harga yang benar-benar terlihat pada halaman produk/toko atau sumber yang dapat dibuka. Cocokkan merek, varian, ukuran/berat/volume, dan jumlah isi. Utamakan harga normal atau harga pasar yang dapat dibandingkan dengan harga promo.
+
+Jangan mengarang harga, URL, tanggal, atau kutipan. Jangan gunakan URL hasil pencarian Google/Bing sebagai source_url; pakai URL halaman produk/harga langsung. Jika tidak menemukan kecocokan yang memadai, jangan masukkan produk itu ke references. Satu produk boleh punya beberapa referensi dari domain berbeda, tetapi tiap referensi harus memiliki URL dan bukti sendiri. Jangan menganggap harga promo katalog sebagai harga pasar.
+
+Balas HANYA JSON valid tanpa markdown atau penjelasan di luar JSON, dengan skema berikut:
+{
+  "references": [
+    {
+      "product_name": "nama persis dari product_name pada file antrean",
+      "reference_price": 16900,
+      "source_name": "nama toko/situs",
+      "source_url": "https://alamat-halaman-produk-langsung",
+      "evidence_text": "kutipan teks halaman yang menunjukkan produk dan harganya",
+      "checked_date": "2026-10-25",
+      "reference_type": "pasar",
+      "page_title": "judul halaman jika tersedia"
+    }
+  ]
+}
+
+Gunakan reference_type "pasar" untuk harga pasar/toko saat ini dan "normal" hanya jika sumber secara jelas menyatakan harga normal. reference_price harus angka Rupiah tanpa simbol/titik. checked_date format YYYY-MM-DD. Pertahankan product_name persis sama dengan antrean katalog, walaupun judul halaman sedikit berbeda. Bila tidak ada hasil yang bisa dibuktikan, kembalikan references kosong untuk produk tersebut.
+""", encoding="utf-8")
     print(f"Daftar pencarian dibuat: {OUT}")
+    print(f"Antrean produk untuk AI: {AI_QUEUE}")
+    print(f"Prompt AI siap salin: {AI_PROMPT}")
     print(f"Produk tanpa harga normal: {len(merged)}")
-    print("Isi referensi manual, simpan, tutup Excel, lalu jalankan import_manual_price_references.py")
+    print("Unggah Daftar_Produk_Untuk_AI.json ke AI, gunakan prompt di PROMPT_AI_CARI_HARGA.txt, simpan jawaban JSON sebagai hasil\\Referensi_Harga_AI.json, lalu jalankan importer.")
 
 if __name__ == "__main__": main()
