@@ -40,7 +40,7 @@ Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebag
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
-   `--dry-run` hanya menampilkan antrean, tanpa mengakses internet. Mode gratis memakai halaman hasil pencarian publik dan validasi HTML/JSON-LD, bukan model AI berbayar. Tidak memerlukan API key; hasil dapat lebih terbatas, dan layanan pencarian publik dapat membatasi request atau mengubah format halaman. Mulai dengan `--limit 5` dan jangan menaikkan frekuensi pencarian secara agresif. Jika mesin pencari tidak bisa diakses, pencarian ditandai gagal dan tidak disimpan sebagai hasil kosong.
+   `--dry-run` hanya menampilkan antrean, tanpa mengakses internet. Mode gratis memakai halaman hasil pencarian publik dan validasi HTML/JSON-LD, bukan model AI berbayar. Tidak memerlukan API key. DuckDuckGo dicoba lebih dulu; bila mengembalikan HTTP 202/halaman challenge, program beralih ke Bing RSS publik tanpa API key. Hasil tetap dapat lebih terbatas, dan kedua layanan dapat membatasi request atau mengubah format halaman. Mulai dengan `--limit 5` dan jangan menaikkan frekuensi pencarian secara agresif. Jika kedua penyedia tidak bisa diakses, pencarian ditandai gagal dan tidak disimpan sebagai hasil kosong.
 
    **Alternatif berbayar:** `engine\promo_ai_price_finder.py` tetap tersedia secara opsional dan menggunakan OpenAI Responses API dengan `web_search`. API key dan penagihannya terpisah dari langganan ChatGPT. Jangan jalankan mode ini kecuali kamu memang bersedia menggunakan API berbayar:
 

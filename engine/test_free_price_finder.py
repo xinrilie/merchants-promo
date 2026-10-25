@@ -43,6 +43,49 @@ def _page_html(product="Sunlight Jeruk 755 ml", price="Rp22.900"):
     <body><h1>{product}</h1><div>Harga normal {price} untuk {product}. Stok tersedia.</div></body></html>'''
 
 
+class FallbackSession:
+    """Simulate DuckDuckGo's HTTP 202 challenge and a valid Bing RSS fallback."""
+    def __init__(self, page_html: str):
+        self.page_html = page_html
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if url == free_finder.SEARCH_URL:
+            return FakeResponse("<html><body>challenge page</body></html>", 202)
+        if url == free_finder.BING_RSS_URL:
+            return FakeResponse(
+                "<?xml version='1.0'?><rss version='2.0'><channel>"
+                "<item><title>Sunlight Jeruk 755 ml</title>"
+                "<link>https://shop.example/sunlight-jeruk-755-ml</link>"
+                "<description>Harga Sunlight Jeruk 755 ml</description></item>"
+                "</channel></rss>", 200,
+                headers={"Content-Type": "application/rss+xml"},
+            )
+        return FakeResponse(self.page_html)
+
+
+def test_free_finder_falls_back_to_bing_rss_when_duckduckgo_returns_202(monkeypatch):
+    monkeypatch.setattr(free_finder.shared, "_is_safe_public_url", lambda url: True)
+    session = FallbackSession(_page_html())
+    result = free_finder.search_free_web_for_product(
+        "Sunlight Jeruk 755 ml", session=session, delay_seconds=0,
+    )
+    assert len(result["references"]) == 1
+    assert result["references"][0]["market_price"] == "22900"
+    assert any(url == free_finder.BING_RSS_URL for url, _ in session.calls)
+
+
+def test_parse_bing_rss_result_urls_rejects_unsafe_or_malformed_urls(monkeypatch):
+    monkeypatch.setattr(free_finder.shared, "_is_safe_public_url", lambda url: url.startswith("https://"))
+    rss = """<rss version='2.0'><channel>
+    <item><title>Safe</title><link>https://example.com/item</link></item>
+    <item><title>Unsafe</title><link>javascript:alert(1)</link></item>
+    </channel></rss>"""
+    assert free_finder.parse_bing_rss_result_urls(rss) == ["https://example.com/item"]
+    assert free_finder.parse_bing_rss_result_urls("not rss") == []
+
+
 def test_free_finder_verifies_product_price_without_openai_api(monkeypatch):
     monkeypatch.setattr(free_finder.shared, "_is_safe_public_url", lambda url: True)
     session = FakeSession(_search_html(), _page_html())

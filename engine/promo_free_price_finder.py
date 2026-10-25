@@ -12,6 +12,7 @@ import json
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from datetime import date
 from typing import Iterable
 from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
@@ -29,6 +30,9 @@ FALLBACK_PRODUCTS_CSV = shared.FALLBACK_PRODUCTS_CSV
 MARKET_REFERENCE_CSV = shared.MARKET_REFERENCE_CSV
 SEARCH_CACHE_CSV = DATA_DIR / "free_price_search_cache.csv"
 SEARCH_URL = "https://html.duckduckgo.com/html/"
+# Bing RSS is an unofficial, no-key fallback. DuckDuckGo may return HTTP 202
+# anti-bot pages to ordinary requests clients even when a browser works.
+BING_RSS_URL = "https://www.bing.com/search"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
 DEFAULT_DELAY_SECONDS = 1.0
 DEFAULT_MAX_PAGES_PER_PRODUCT = 6
@@ -73,6 +77,86 @@ def parse_search_result_urls(html: str, limit: int = DEFAULT_MAX_PAGES_PER_PRODU
     return urls
 
 
+def parse_bing_rss_result_urls(xml_text: str, limit: int = DEFAULT_MAX_PAGES_PER_PRODUCT) -> list[str]:
+    """Extract public page URLs from Bing's RSS-formatted web search response."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    try:
+        root = ET.fromstring(xml_text or "")
+    except ET.ParseError:
+        return urls
+    for item in root.findall(".//item"):
+        link = (item.findtext("link") or "").strip()
+        url = _unwrap_search_url(link)
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            continue
+        if not shared._is_safe_public_url(url):
+            continue
+        normalized = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
+        if normalized not in seen:
+            seen.add(normalized)
+            urls.append(normalized)
+        if len(urls) >= max(0, int(limit)):
+            break
+    return urls
+
+
+def _try_search_provider(
+    provider: str,
+    query: str,
+    session: requests.Session,
+    timeout: int,
+    max_pages: int,
+) -> tuple[list[str], bool, str | None]:
+    """Return (URLs, response_usable, error). A 202 challenge is not a result."""
+    if provider == "duckduckgo":
+        url = SEARCH_URL
+        params = {"q": query, "kl": "id-id"}
+        parser = parse_search_result_urls
+    else:
+        url = BING_RSS_URL
+        params = {"q": query, "format": "rss", "mkt": "id-ID", "setlang": "id"}
+        parser = parse_bing_rss_result_urls
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.7,en;q=0.6",
+    }
+    try:
+        response = session.get(url, params=params, timeout=timeout, headers=headers)
+    except requests.RequestException as exc:
+        return [], False, f"{provider}: {type(exc).__name__}"
+
+    if response.status_code != 200:
+        return [], False, f"{provider}: HTTP {response.status_code}"
+    body = response.text or ""
+    urls = parser(body, limit=max_pages)
+    if urls:
+        return urls, True, None
+
+    # DuckDuckGo frequently responds with HTTP 202 or an HTTP 200 challenge page.
+    # Do not interpret those pages as a legitimate empty search result.
+    if provider == "duckduckgo":
+        lower_body = body.casefold()
+        challenge_markers = ("challenge-form", "anomaly-modal", "bots use duckduckgo", "captcha")
+        if any(marker in lower_body for marker in challenge_markers) or not body.strip():
+            return [], False, "duckduckgo: halaman challenge/hasil kosong tanpa tautan"
+        # A structurally valid page with no results can be a legitimate search miss.
+        soup = BeautifulSoup(body, "html.parser")
+        has_results_container = bool(soup.select(".result, .results, #links, .no-results"))
+        return [], has_results_container, None if has_results_container else "duckduckgo: format hasil tidak dikenali"
+
+    # Empty but valid RSS can mean that the query yielded no public results.
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return [], False, "bing-rss: respons bukan XML/RSS yang valid"
+    if root.tag.lower().endswith("rss") or root.find("channel") is not None:
+        return [], True, None
+    return [], False, "bing-rss: struktur RSS tidak dikenali"
+
+
 def _search_result_pages(
     product_text: str,
     session: requests.Session,
@@ -80,43 +164,45 @@ def _search_result_pages(
     max_pages: int,
     delay_seconds: float,
 ) -> list[str]:
+    # Keep the query set small; prefer DuckDuckGo, and fall back to Bing RSS if
+    # DDG returns a challenge (HTTP 202) or unparseable HTML. Both need no API key.
     queries = [f'"{product_text}" harga', f'"{product_text}" Rp']
     found: list[str] = []
     seen: set[str] = set()
-    successful_searches = 0
+    usable_searches = 0
     errors: list[str] = []
     for query in queries:
-        try:
-            response = session.get(
-                SEARCH_URL,
-                params={"q": query, "kl": "id-id"},
-                timeout=timeout,
-                headers={"User-Agent": USER_AGENT},
+        for provider in ("duckduckgo", "bing-rss"):
+            urls, usable, error = _try_search_provider(
+                provider, query, session, timeout, max_pages,
             )
-        except requests.RequestException as exc:
-            errors.append(type(exc).__name__)
-            continue
-        if response.status_code in {403, 429, 503}:
-            errors.append(f"HTTP {response.status_code}")
-            continue
-        if response.status_code != 200:
-            errors.append(f"HTTP {response.status_code}")
-            continue
-        successful_searches += 1
-        for url in parse_search_result_urls(response.text, limit=max_pages):
-            if url not in seen:
-                found.append(url)
-                seen.add(url)
+            if error:
+                errors.append(error)
+            if usable:
+                usable_searches += 1
+            for url in urls:
+                if url not in seen:
+                    found.append(url)
+                    seen.add(url)
+                if len(found) >= max_pages:
+                    break
             if len(found) >= max_pages:
                 break
+            # A result-bearing provider has done its job; query the next phrase
+            # only if we still need more candidate pages.
+            if usable and urls:
+                break
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
         if len(found) >= max_pages:
             break
         if delay_seconds > 0:
             time.sleep(delay_seconds)
-    if successful_searches == 0:
+    if usable_searches == 0:
         raise FreePriceSearchError(
-            "Pencarian web gratis tidak dapat diakses (" + ", ".join(errors or ["tidak ada hasil HTTP 200"]) + "). "
-            "Coba lagi nanti; hasil kosong tidak disimpan ke cache."
+            "Pencarian web gratis tidak dapat diakses (" + "; ".join(errors or ["tidak ada hasil yang dapat dibaca"]) + "). "
+            "DuckDuckGo bisa mengembalikan HTTP 202 karena pembatasan bot; fallback Bing RSS juga tidak tersedia. "
+            "Coba lagi nanti. Tidak ada hasil kosong yang disimpan ke cache."
         )
     return found
 
