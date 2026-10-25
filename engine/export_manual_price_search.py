@@ -5,12 +5,15 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
+from promo_price_reference import identity_key, load_reference_database
+from promo_names import product_name_size_signature, product_name_variant_signature
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "_internal" / "promo_multisource_products_all.csv"
 OUT = ROOT / "hasil" / "Daftar_Cari_Harga_Manual.xlsx"
 AI_QUEUE = ROOT / "hasil" / "Daftar_Produk_Untuk_AI.json"
 AI_PROMPT = ROOT / "hasil" / "PROMPT_AI_CARI_HARGA.txt"
+PRICE_DB = ROOT / "data" / "product_price_reference.csv"
 HEADERS = [
     "ID Produk", "Nama Produk", "Merchant Promo", "Harga Promo (Rp)",
     "Kata Kunci Pencarian (copy)", "Harga Referensi (Rp) - isi manual",
@@ -18,12 +21,38 @@ HEADERS = [
     "Tanggal Cek (YYYY-MM-DD)", "Jenis Referensi (pasar/normal)", "Status"
 ]
 
+def _product_slot(name: str):
+    """Stable exact identity used to avoid re-queueing products with saved AI estimates."""
+    return (
+        identity_key(name),
+        "|".join(product_name_size_signature(name)),
+        "|".join(sorted(product_name_variant_signature(name))),
+    )
+
+
+def _existing_estimate_slots():
+    """Load valid saved AI/user estimates, including older estimate records."""
+    if not PRICE_DB.exists():
+        return set()
+    try:
+        refs = load_reference_database(PRICE_DB)
+    except Exception:
+        return set()
+    return {
+        _product_slot(str(row.get("product_text") or ""))
+        for row in refs
+        if row.get("record_origin") == "user_supplied_estimate" and row.get("product_text")
+    }
+
+
 def read_products():
     if not SOURCE.exists():
         raise SystemExit(f"Data produk belum ada: {SOURCE}\nJalankan scraping terlebih dahulu.")
     with SOURCE.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
-    out, seen = [], set()
+    out, seen_source_rows, seen_products = [], set(), set()
+    known_estimates = _existing_estimate_slots()
+    stats = {"source_candidates": 0, "already_estimated": 0, "duplicate_products": 0}
     for r in rows:
         name = (r.get("product_text") or "").strip()
         promo = (r.get("promo_price") or "").strip()
@@ -31,12 +60,28 @@ def read_products():
         if not name or not promo:
             continue
         key = (name.casefold(), merchant.casefold(), promo)
-        if key in seen: continue
-        seen.add(key)
+        if key in seen_source_rows:
+            continue
+        seen_source_rows.add(key)
         normal = (r.get("normal_price") or "").strip()
-        # Queue products where normal price is missing, or market reference is not already recorded.
+        # We only need an AI task if the promo row lacks its own normal price.
         if normal:
             continue
+        stats["source_candidates"] += 1
+        slot = _product_slot(name)
+        # The previous exporter only checked normal_price in the scraped row. This
+        # made the same product return to the queue forever after its estimate had
+        # already been imported. Existing verified/curated entries are not altered;
+        # this filter specifically avoids re-asking AI for a saved estimate.
+        if slot in known_estimates:
+            stats["already_estimated"] += 1
+            continue
+        # Product estimates are general product-level values; don't queue identical
+        # product identities repeatedly just because two merchants have the offer.
+        if slot in seen_products:
+            stats["duplicate_products"] += 1
+            continue
+        seen_products.add(slot)
         q = f'"{name}" harga'
         out.append({
             "ID Produk": f"{len(out)+1:05d}",
@@ -52,10 +97,10 @@ def read_products():
             "Jenis Referensi (pasar/normal)": "pasar",
             "Status": "BELUM DICARI",
         })
-    return out
+    return out, stats
 
 def main():
-    products = read_products()
+    products, queue_stats = read_products()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     # Preserve any manually filled rows from an existing workbook; refresh/add only empty queue rows.
     existing = {}
@@ -118,40 +163,37 @@ def main():
         "search_query": row.get("Kata Kunci Pencarian (copy)", ""),
     } for row in merged]
     queue = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "instructions": "Daftar produk yang perlu dicari harga pembanding. Data di bagian products adalah identitas katalog; jangan mengubah product_name ketika membuat referensi.",
+        "instructions": "Buat estimasi harga normal/pasar yang masuk akal untuk setiap produk. Saat mengembalikan hasil, cukup gunakan product_name dan estimated_price. Jangan mengubah nama produk.",
         "products": ai_products,
     }
     AI_QUEUE.write_text(json.dumps(queue, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    AI_PROMPT.write_text("""Kamu bertugas mencari referensi harga produk dari file Daftar_Produk_Untuk_AI.json yang saya lampirkan.
+    AI_PROMPT.write_text("""Tugas: buat PREDIKSI harga normal/pasar di Indonesia untuk setiap produk dalam file Daftar_Produk_Untuk_AI.json.
 
-Kerjakan HANYA 10-20 produk per batch agar setiap hasil punya bukti yang memadai. Saya akan meminta batch berikutnya setelah ini. Cari harga yang benar-benar terlihat pada halaman produk/toko atau sumber yang dapat dibuka. Cocokkan merek, varian, ukuran/berat/volume, dan jumlah isi. Utamakan harga normal atau harga pasar yang dapat dibandingkan dengan harga promo.
+Saya tidak membutuhkan sumber, URL, bukti, tanggal, alasan, atau penjelasan. Gunakan pengetahuan yang kamu punya untuk memperkirakan harga retail biasa bagi produk dengan merek, varian, ukuran, dan isi yang paling cocok. Jangan sekadar menyalin Harga Promo (Rp) dari antrean sebagai harga normal. Jika produk langka atau informasi terbatas, tetap berikan tebakan terbaik yang masuk akal; jangan menghilangkan produk hanya karena tidak menemukan sumber web.
 
-Jangan mengarang harga, URL, tanggal, atau kutipan. Jangan gunakan URL hasil pencarian Google/Bing sebagai source_url; pakai URL halaman produk/harga langsung. Jika tidak menemukan kecocokan yang memadai, jangan masukkan produk itu ke references. Satu produk boleh punya beberapa referensi dari domain berbeda, tetapi tiap referensi harus memiliki URL dan bukti sendiri. Jangan menganggap harga promo katalog sebagai harga pasar.
+Kerjakan SEMUA produk dalam daftar. Jangan mengubah product_name. estimated_price harus berupa angka Rupiah bulat tanpa simbol Rp atau pemisah ribuan.
 
-Balas HANYA JSON valid tanpa markdown atau penjelasan di luar JSON, dengan skema berikut:
+Balas HANYA JSON valid, tanpa markdown/backtick dan tanpa teks lain, dengan format sesederhana ini:
 {
-  "references": [
-    {
-      "product_name": "nama persis dari product_name pada file antrean",
-      "reference_price": 16900,
-      "source_name": "nama toko/situs",
-      "source_url": "https://alamat-halaman-produk-langsung",
-      "evidence_text": "kutipan teks halaman yang menunjukkan produk dan harganya",
-      "checked_date": "2026-10-25",
-      "reference_type": "pasar",
-      "page_title": "judul halaman jika tersedia"
-    }
+  "estimates": [
+    {"product_name": "nama produk persis dari antrean", "estimated_price": 61500},
+    {"product_name": "nama produk persis berikutnya", "estimated_price": 38900}
   ]
 }
 
-Gunakan reference_type "pasar" untuk harga pasar/toko saat ini dan "normal" hanya jika sumber secara jelas menyatakan harga normal. reference_price harus angka Rupiah tanpa simbol/titik. checked_date format YYYY-MM-DD. Pertahankan product_name persis sama dengan antrean katalog, walaupun judul halaman sedikit berbeda. Bila tidak ada hasil yang bisa dibuktikan, kembalikan references kosong untuk produk tersebut.
+Keluarkan tepat satu estimasi untuk setiap produk pada file antrean. Tidak perlu menyertakan field lain.
 """, encoding="utf-8")
     print(f"Daftar pencarian dibuat: {OUT}")
     print(f"Antrean produk untuk AI: {AI_QUEUE}")
     print(f"Prompt AI siap salin: {AI_PROMPT}")
-    print(f"Produk tanpa harga normal: {len(merged)}")
-    print("Unggah Daftar_Produk_Untuk_AI.json ke AI, gunakan prompt di PROMPT_AI_CARI_HARGA.txt, simpan jawaban JSON sebagai hasil\\Referensi_Harga_AI.json, lalu jalankan importer.")
+    print(f"Produk yang masih perlu estimasi AI/referensi: {len(merged)}")
+    print(f"Produk tanpa harga normal yang dilewati karena estimasi sudah tersimpan: {queue_stats['already_estimated']}")
+    print(f"Produk duplikat antar-merchant yang digabung dari antrean: {queue_stats['duplicate_products']}")
+    if merged:
+        print("Unggah Daftar_Produk_Untuk_AI.json ke AI, gunakan prompt di PROMPT_AI_CARI_HARGA.txt, simpan jawaban JSON sebagai hasil\\Referensi_Harga_AI.json, lalu jalankan importer.")
+    else:
+        print("Antrean kosong: semua produk yang memenuhi syarat sudah punya estimasi tersimpan atau harga normal.")
 
 if __name__ == "__main__": main()

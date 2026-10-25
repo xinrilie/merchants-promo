@@ -1,6 +1,6 @@
 # Merchants Promo
 
-Pipeline Python untuk mengumpulkan promo produk dari tiga sumber agregator publik, memvalidasi data, mendeteksi duplikat, mengategorikan produk, menyimpan database harga referensi, opsional mencari harga pembanding dengan AI dan web search, lalu mengekspor katalog ke Excel dan CSV.
+Pipeline Python untuk mengumpulkan promo produk dari tiga sumber agregator publik, memvalidasi data, mendeteksi duplikat, mengategorikan produk, menyimpan referensi harga, menerima prediksi harga AI melalui JSON, lalu mengekspor katalog ke Excel dan CSV.
 
 ## Sumber aktif
 
@@ -41,17 +41,15 @@ merchants-promo-revisi-harga/
 │   ├── promo_multisource_collector.py
 │   ├── enrich_existing_promo_catalog_multisource.py
 │   ├── promo_price_reference.py
-│   ├── promo_ai_price_finder.py
-│   ├── promo_gemini_price_finder.py
-│   ├── promo_free_price_finder.py
+│   ├── export_manual_price_search.py
+│   ├── import_manual_price_references.py
 │   ├── seed_user_price_references.py
 │   └── test_*.py
 ├── input/
 │   └── category_review_list.csv
 ├── data/
-│   ├── product_price_reference.csv
-│   ├── product_market_price_reference.csv
-│   ├── ai_price_search_cache.csv
+│   ├── product_price_reference.csv          # referensi historis + estimasi AI/pengguna
+│   ├── product_market_price_reference.csv   # harga pasar yang disertai bukti sumber
 │   ├── user_product_price_ranges.csv
 │   └── user_product_price_reference_aliases.csv
 ├── hasil/       # workbook dan CSV final
@@ -113,29 +111,39 @@ Lalu ada `Basis Harga Asli`, `Harga Asli dari Sumber (Rp)`, `Harga Normal Refere
 
 Sheet yang terlihat di awal file: `Ringkasan`, `Promo`, `Perlu Diperiksa`, `Ringkasan Kategori`, `Peluang Harga`, dan `Kandidat Harga`. Sheet rinci `Mulai Di Sini`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` (jika ada perubahan klasifikasi), `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna` tetap disimpan tetapi disembunyikan agar workbook harian ringkas.
 
-`Referensi Harga` memuat rekaman harga normal historis/estimasi pengguna beserta sumber dan buktinya. `Referensi Harga Pasar` memuat setiap harga dari pencarian web (mode gratis atau AI berbayar) yang berhasil diverifikasi pada URL sumber. Kandidat yang belum lolos validasi disimpan terpisah di `data/product_market_price_candidates.csv` dan sheet `Kandidat Harga`. `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
+`Referensi Harga` memuat harga normal historis dan estimasi pengguna/AI; setiap estimasi diberi label non-verifikasi. `Referensi Harga Pasar` khusus untuk harga yang memiliki sumber dan bukti halaman yang dapat ditelusuri. Prediksi AI tanpa sumber tidak pernah masuk ke database harga pasar terverifikasi. `Rentang Referensi Pengguna` menampilkan acuan yang disimpan terpisah dari pengamatan harga sumber.
 
-## AI Price Reference Finder
+## Prediksi Harga AI Tanpa Sumber (JSON)
 
-Untuk opsi Google, gunakan `engine/promo_gemini_price_finder.py` dengan model default `gemini-3.8-flash` melalui Interactions API. API key disetel lewat variabel lingkungan `GEMINI_API_KEY`; jangan simpan key dalam kode atau commit GitHub. `--dry-run` tidak menghubungi API. Google saat ini menyatakan Google Search grounding untuk model ini tidak tersedia pada Free tier; mode live dilindungi flag persetujuan `--allow-billable-search`. Cek https://ai.google.dev/gemini-api/docs/pricing dan https://ai.google.dev/gemini-api/docs/google-search sebelum menggunakan.
+Kalau tujuanmu hanya membutuhkan perkiraan agar bisa membandingkan harga promo, AI tidak perlu mengembalikan URL, nama toko, bukti halaman, atau tanggal pengecekan. Setelah `Jalankan_Promo.bat` selesai, buka `hasil\Daftar_Produk_Untuk_AI.json` dan unggah ke AI bersama `hasil\PROMPT_AI_CARI_HARGA.txt`. Prompt itu meminta satu nilai estimasi per produk dan keluaran JSON ringkas:
 
-File `engine/promo_ai_price_finder.py` tetap tersedia secara opsional untuk OpenAI API berbayar. File `engine/promo_free_price_finder.py` tetap menjadi alternatif pencarian publik tanpa API, tetapi sumber DuckDuckGo/Bing bisa lambat, membatasi request, atau tidak memberikan petunjuk harga.
+```json
+{
+  "estimates": [
+    {"product_name": "nama produk persis dari antrean", "estimated_price": 61500}
+  ]
+}
+```
 
-Skrip Gemini menerima URL hanya jika URL tersebut ada pada metadata grounding Google. Harga yang disampaikan model tetap menjadi kandidat terlebih dahulu; harga hanya dimasukkan ke database pasar bila halaman sumber dapat dibaca dan nominal yang cocok terlihat pada halaman. Kandidat lain disimpan di `data/product_market_price_candidates.csv` dan sheet `Kandidat Harga`, bukan sebagai harga pasar terverifikasi.
+Simpan jawaban AI sebagai `hasil\Referensi_Harga_AI.json`, lalu jalankan:
 
-Database `data/product_market_price_reference.csv` sengaja dipisahkan dari `data/product_price_reference.csv`. Data ini adalah **pembanding harga pasar**, bukan harga normal resmi. Sistem hanya menghitung `Lebih Murah dari Median Pasar (%)` jika harga promo lebih rendah dari median hasil verifikasi pada minimal dua domain berbeda yang masih segar; angka itu tidak mengubah kolom `Diskon (%)`. Jika referensi tidak ditemukan, produk tetap ada di katalog dan statusnya dibiarkan tanpa potensi persentase.
+```cmd
+python engine\import_manual_price_references.py
+python engine\enrich_existing_promo_catalog_multisource.py
+```
 
-Skrip melewati produk yang sudah punya harga promo yang valid tetapi tidak memiliki identitas layak, harga normal sumber sudah tersedia, promo bersyarat/bundling, atau baris yang berisi beberapa pilihan ukuran dalam satu nama produk. Cache negatif dan positif mencegah pencarian berulang setiap hari. Semua hasil perlu tetap dibaca sebagai referensi pasar, karena halaman publik dapat berubah dan dua domain berbeda belum tentu merupakan dua pemilik usaha yang independen.
+Importer menerima format baru `estimates` dan juga format lama `references` yang pernah dibuat dengan prompt sebelumnya. Field `source_url`, `source_name`, serta `evidence_text` pada JSON lama akan diabaikan; angka hanya disimpan sebagai **estimasi AI**, bukan harga yang berhasil diverifikasi dari toko. Hasil masuk ke `data\product_price_reference.csv` sebagai `user_supplied_estimate`, bukan ke database harga pasar terverifikasi. Jika estimasi sebelumnya dibuat oleh workflow AI ini, impor berikutnya dapat memperbaruinya. Rentang asumsi ±20% dibuat otomatis di belakang layar, sedangkan rentang referensi pengguna yang sudah ada dipertahankan.
+
+Estimasi dapat membantu memperkirakan potensi diskon, tetapi akurasinya tidak dijamin. Pipeline tetap menandai perhitungan berdasarkan estimasi sebagai keyakinan rendah; jangan menyebutnya harga normal resmi. Untuk harga pasar yang benar-benar teramati, gunakan jalur Excel manual di bawah.
 
 ## File teknis utama
 
 - `engine/promo_multisource_collector.py` mengumpulkan data, mencatat bukti harga/diskon/periode, log request, dan status kesehatan sumber.
 - `engine/enrich_existing_promo_catalog_multisource.py` menggabungkan data, memvalidasi harga/periode, menjalankan quality gate, mengupdate database referensi, dan menghasilkan Excel/CSV serta audit.
 - `engine/promo_price_reference.py` menangani penyimpanan harga normal historis, prioritas merchant, batas umur referensi, pencocokan, dan penandaan asal referensi.
-- `engine/promo_gemini_price_finder.py` mencari harga dengan Gemini + Google Search grounding; kandidat hanya dipromosikan setelah halaman sumber memvalidasi produk dan harga.
-- `engine/promo_free_price_finder.py` adalah pencarian publik tanpa API yang dapat menyimpan kandidat untuk pemeriksaan manual.
-- `engine/promo_ai_price_finder.py` adalah alternatif opsional yang memakai OpenAI API berbayar.
-- `engine/seed_user_price_references.py` menyinkronkan 102 rentang manual dan alias katalog ke database sebelum proses.
+- `engine/export_manual_price_search.py` membuat daftar Excel, antrean produk JSON, dan prompt prediksi harga AI.
+- `engine/import_manual_price_references.py` mengimpor prediksi harga AI tanpa sumber ke database estimasi, atau referensi harga bersumber dari Excel ke database pasar.
+- `engine/seed_user_price_references.py` menyinkronkan rentang pengguna dan alias katalog ke database.
 
 ## Prinsip validasi dan batasan
 
@@ -163,7 +171,7 @@ Jika produk hanya memiliki harga promo dan harga normal tidak tercantum, buat da
 python engine\export_manual_price_search.py
 ```
 
-**Cara yang lebih cepat (AI + JSON):** setelah menjalankan pipeline, buka `hasil\Daftar_Produk_Untuk_AI.json` dan `hasil\PROMPT_AI_CARI_HARGA.txt`. Unggah JSON antrean produk ke AI yang dapat melakukan pencarian web, lalu kirim prompt tersebut. Kerjakan 10–20 produk per batch agar bukti dan kecocokan produk tetap bisa dicek. Minta AI membalas JSON valid sesuai skema prompt, tanpa markdown. Simpan jawaban AI sebagai `hasil\Referensi_Harga_AI.json` (pastikan ekstensi benar-benar `.json`, bukan `.json.txt`), kemudian jalankan `python engine\import_manual_price_references.py`. Jika file JSON ada, importer akan memprioritaskannya. Importer memeriksa kolom wajib, harga, tanggal, URL dasar, dan duplikasi; ia tidak dapat membuktikan sendiri bahwa kutipan AI benar-benar ada pada halaman, jadi jangan gunakan data tanpa URL halaman langsung dan bukti harga yang dapat ditelusuri.
+**Cara AI tanpa sumber (JSON):** setelah menjalankan pipeline, unggah `hasil\Daftar_Produk_Untuk_AI.json` ke AI dan berikan prompt dari `hasil\PROMPT_AI_CARI_HARGA.txt`. AI cukup menghasilkan `product_name` dan `estimated_price` untuk setiap produk. Simpan jawabannya sebagai `hasil\Referensi_Harga_AI.json`, lalu jalankan `python engine\import_manual_price_references.py` dan perbarui katalog dengan `python engine\enrich_existing_promo_catalog_multisource.py`. Nama produk harus dipertahankan persis agar pencocokan referensi berhasil. Estimasi AI tidak membutuhkan sumber, namun harus dibaca sebagai perkiraan berkeyakinan rendah.
 
 **Cara Excel tetap tersedia:** buka `hasil\Daftar_Cari_Harga_Manual.xlsx`, salin kolom **Kata Kunci Pencarian (copy)** ke Google/Google AI Mode. Untuk setiap sumber harga yang cocok, isi:
 - `Harga Referensi (Rp)`
@@ -180,6 +188,6 @@ python engine\import_manual_price_references.py hasil\Daftar_Cari_Harga_Manual.x
 python engine\enrich_existing_promo_catalog_multisource.py
 ```
 
-Referensi yang diimpor akan masuk ke `data\product_market_price_reference.csv` dan dapat dipakai oleh tab `Peluang Harga`. Satu sumber akan ditandai sebagai pembanding tunggal; perbandingan median/potensi lebih murah baru dihitung jika ada minimal dua domain independen yang cocok. Harga pembanding pasar tidak otomatis menjadi harga normal resmi atau diskon resmi.
+Referensi dari jalur Excel manual masuk ke `data\product_market_price_reference.csv` dan dapat dipakai oleh tab `Peluang Harga`. Satu domain akan ditandai sebagai pembanding tunggal; perbandingan median/potensi lebih murah baru dihitung jika ada minimal dua domain yang cocok. Prediksi dari jalur JSON masuk ke `data\product_price_reference.csv` sebagai estimasi berkeyakinan rendah dan tidak dihitung sebagai harga pasar terverifikasi.
 
 Daftar pencarian dibuat ulang berdasarkan produk terbaru. Jika file sudah ada, isian manual untuk produk yang sama dipertahankan. Untuk keamanan, lakukan salinan cadangan sebelum penggantian besar atau perubahan struktur kolom.

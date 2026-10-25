@@ -33,40 +33,90 @@ def test_incomplete_rows_are_not_imported(tmp_path, monkeypatch):
     rows=list(csv.DictReader(db.open(encoding="utf-8-sig")))
     assert len(rows)==0
 
-def test_import_ai_json_reference(tmp_path, monkeypatch):
+def test_import_ai_json_estimates_need_only_product_and_price(tmp_path, monkeypatch):
     import json
-    json_file = tmp_path / "references.json"
-    db = tmp_path / "market.csv"
-    json_file.write_text(json.dumps({"references": [{
+    from promo_price_reference import load_reference_database
+    json_file = tmp_path / "estimates.json"
+    db = tmp_path / "product_price_reference.csv"
+    json_file.write_text(json.dumps({"estimates": [{
         "product_name": "Sunlight Lime 910 ml",
-        "reference_price": 16900,
-        "source_name": "Toko Contoh",
-        "source_url": "https://shop.example/product/sunlight-lime",
-        "evidence_text": "Sunlight Lime 910 ml harga Rp16.900",
-        "checked_date": "2026-10-25",
-        "reference_type": "pasar",
-        "page_title": "Sunlight Lime 910 ml - Toko Contoh",
+        "estimated_price": 16900,
     }]}, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(importer, "JSON_IN", json_file)
-    monkeypatch.setattr(importer, "DB", db)
+    monkeypatch.setattr(importer, "PRICE_DB", db)
     importer.main([])
     rows = list(csv.DictReader(db.open(encoding="utf-8-sig")))
     assert len(rows) == 1
-    assert rows[0]["market_price"] == "16900"
-    assert rows[0]["confidence"] == "ai_assisted_needs_review"
-    assert rows[0]["source_kind"] == "ai_assisted_user_supplied"
+    assert rows[0]["normal_price"] == "16900"
+    assert rows[0]["record_origin"] == "user_supplied_estimate"
+    assert rows[0]["source_name"] == "Estimasi AI (tanpa sumber)"
+    assert rows[0]["source_url"] == ""
+    assert int(rows[0]["normal_price_low"]) < 16900 < int(rows[0]["normal_price_high"])
+    loaded = load_reference_database(db)
+    assert len(loaded) == 1
+    assert loaded[0]["record_origin"] == "user_supplied_estimate"
 
 
-def test_json_search_result_url_is_rejected(tmp_path):
+def test_legacy_ai_references_with_markdown_urls_become_estimates(tmp_path, monkeypatch):
     import json
     json_file = tmp_path / "references.json"
+    db = tmp_path / "product_price_reference.csv"
     json_file.write_text(json.dumps({"references": [{
-        "product_name": "Product X", "reference_price": 15000,
-        "source_name": "Google", "source_url": "https://www.google.com/search?q=product+x",
-        "evidence_text": "Product X Rp15.000", "checked_date": "2026-10-25",
+        "product_name": "Merries Pants Good Skin M32 32 pcs",
+        "reference_price": 61500,
+        "source_name": "Raja Susu ID",
+        "source_url": "[https://rajasusu.com/collections/merries](https://rajasusu.com/collections/merries)",
+        "evidence_text": "Merries Pants Good Skin 32 pcs Rp61.500",
+        "checked_date": "2026-10-25",
         "reference_type": "pasar",
+    }]}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(importer, "JSON_IN", json_file)
+    monkeypatch.setattr(importer, "PRICE_DB", db)
+    importer.main([])
+    rows = list(csv.DictReader(db.open(encoding="utf-8-sig")))
+    assert len(rows) == 1
+    assert rows[0]["normal_price"] == "61500"
+    assert rows[0]["record_origin"] == "user_supplied_estimate"
+    assert rows[0]["source_url"] == ""
+    assert "bukan harga terverifikasi" in rows[0]["evidence_text"].lower()
+
+
+def test_existing_user_range_is_not_overwritten_by_ai_estimate(tmp_path, monkeypatch):
+    import json
+    from promo_price_reference import REFERENCE_FIELDS, _normalize_record
+    json_file = tmp_path / "estimates.json"
+    db = tmp_path / "product_price_reference.csv"
+    original = _normalize_record({
+        "merchant_name": "Referensi Umum",
+        "product_text": "Product X 500 g",
+        "normal_price": "20000",
+        "observed_at": "2026-10-25",
+        "source_name": "Rentang referensi yang diberikan pengguna",
+        "source_url": "",
+        "evidence_text": "Rentang acuan pengguna Rp15.000–Rp25.000; titik tengah Rp20.000.",
+        "record_origin": "user_supplied_estimate",
+        "verification_status": "user_supplied_estimate",
+        "normal_price_low": "15000",
+        "normal_price_high": "25000",
+    })
+    with db.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=REFERENCE_FIELDS); w.writeheader(); w.writerow(original)
+    json_file.write_text(json.dumps({"estimates": [{
+        "product_name": "Product X 500 g", "estimated_price": 22000,
     }]}), encoding="utf-8")
-    entries, errors, total = importer._read_json(json_file)
+    monkeypatch.setattr(importer, "JSON_IN", json_file)
+    monkeypatch.setattr(importer, "PRICE_DB", db)
+    importer.main([])
+    rows = list(csv.DictReader(db.open(encoding="utf-8-sig")))
+    assert len(rows) == 1
+    assert rows[0]["normal_price"] == "20000"
+
+
+def test_json_estimate_without_price_is_rejected(tmp_path):
+    import json
+    json_file = tmp_path / "estimates.json"
+    json_file.write_text(json.dumps({"estimates": [{"product_name": "Product X"}]}), encoding="utf-8")
+    entries, errors, total = importer._read_json_estimates(json_file)
     assert total == 1
     assert entries == []
-    assert len(errors) == 1 and "URL hasil pencarian" in errors[0]
+    assert len(errors) == 1 and "harga estimasi tidak valid" in errors[0]

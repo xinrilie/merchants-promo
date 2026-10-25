@@ -4287,6 +4287,8 @@ def main():
     price_reference_records = load_reference_database(PRICE_REFERENCE_CSV)
     market_reference_records = load_market_reference_database(MARKET_REFERENCE_CSV)
     print("Observasi harga normal baru tersimpan:", price_reference_update.get("observations_added", 0))
+    ai_estimate_count = sum(r.get("record_origin") == "user_supplied_estimate" for r in price_reference_records)
+    print("Estimasi harga AI/pengguna tersedia:", ai_estimate_count)
     print("Referensi harga pasar tervalidasi tersedia:", len(market_reference_records))
     rejected_product_rows = [r for r in all_loaded_rows if r.get("product_validation_status") == "rejected"]
     input_rows = [r for r in all_loaded_rows if r.get("product_validation_status") != "rejected"]
