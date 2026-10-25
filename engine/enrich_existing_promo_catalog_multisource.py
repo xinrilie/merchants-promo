@@ -31,6 +31,9 @@ from promo_price_reference import (
     PRICE_REFERENCE_MAX_AGE_DAYS, load_reference_database, update_reference_database,
     find_reference_price, EXPLICIT_NORMAL_PRICE_LABEL_RE,
 )
+from promo_ai_price_finder import (
+    MARKET_REFERENCE_CSV, load_market_reference_database, compare_market_prices,
+)
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ENGINE_DIR.parent
@@ -64,7 +67,12 @@ FIELDS = [
     "reference_price_source_url", "reference_price_evidence_text", "reference_price_observed_at",
     "reference_price_age_days", "reference_price_match_status", "reference_price_record_origin",
     "reference_price_low", "reference_price_high", "reference_price_unit", "reference_price_note",
-    "reference_primary_display_allowed", "discount_percent", "discount_percent_basis",
+    "reference_primary_display_allowed",
+    "market_reference_price", "market_reference_low", "market_reference_high",
+    "market_reference_source_count", "market_reference_sources", "market_reference_source_urls",
+    "market_reference_observed_at", "market_reference_status", "market_reference_below_median_percent",
+    "market_reference_savings", "market_reference_confidence", "market_reference_note",
+    "discount_percent", "discount_percent_basis",
     "discount_percent_confidence", "discount_percent_calculated", "discount_savings_rp",
     "estimated_bundle_discount_percent", "campaign_discount_percent",
     "promo_price_evidence_text", "normal_price_evidence_text", "discount_evidence_text",
@@ -2172,6 +2180,20 @@ def reference_price_status_display(row):
     return status.replace("_", " ").capitalize() if status else "Belum diperiksa"
 
 
+def market_reference_status_display(row):
+    status = str(row.get("market_reference_status") or "").casefold()
+    labels = {
+        "not_checked": "Belum diperiksa",
+        "not_comparable": "Tidak dapat dibandingkan",
+        "no_market_reference": "Harga pembanding belum ditemukan",
+        "single_source_only": "Baru satu sumber; belum cukup untuk menilai pasar",
+        "below_market_median": "Lebih murah dari median harga pasar",
+        "not_below_market_median": "Tidak lebih murah dari median harga pasar",
+        "invalid_market_reference": "Referensi harga tidak valid",
+    }
+    return labels.get(status, status.replace("_", " ").capitalize() if status else "Belum diperiksa")
+
+
 def product_validation_display(row):
     """Expose product identity/price validation separately from promo date status."""
     status = str(row.get("product_validation_status") or "review").strip().casefold()
@@ -2548,6 +2570,16 @@ CLEAN_COLUMNS = [
     ("Tanggal Observasi Referensi", "reference_price_observed_at"),
     ("Sumber Referensi Harga", "reference_price_source_name"),
     ("URL Referensi Harga", "reference_price_source_url"),
+    ("Median Harga Pasar (Rp)", "market_reference_price"),
+    ("Rentang Harga Pasar (Rp)", "market_reference_range_display"),
+    ("Lebih Murah dari Median Pasar (%)", "market_reference_below_median_percent"),
+    ("Selisih terhadap Median Pasar (Rp)", "market_reference_savings"),
+    ("Jumlah Domain Pembanding", "market_reference_source_count"),
+    ("Status Pembanding Pasar", "market_reference_status_display"),
+    ("Sumber Pembanding Pasar", "market_reference_sources"),
+    ("URL Pembanding Pasar", "market_reference_source_urls"),
+    ("Observasi Pembanding Pasar", "market_reference_observed_at"),
+    ("Keyakinan Pembanding Pasar", "market_reference_confidence"),
     ("Hemat / Selisih Referensi (Rp)", "discount_savings_rp"),
     ("Subkategori", "product_subcategory"),
     ("Kesegaran Data", "freshness_display"),
@@ -2654,6 +2686,13 @@ def make_clean_row(row, review=False):
         item["reference_price_range_display"] = f"Rp{low:,}–Rp{high:,}".replace(",", ".")
     else:
         item["reference_price_range_display"] = None
+    market_low = as_int(row.get("market_reference_low"))
+    market_high = as_int(row.get("market_reference_high"))
+    if market_low is not None and market_high is not None:
+        item["market_reference_range_display"] = f"Rp{market_low:,}–Rp{market_high:,}".replace(",", ".")
+    else:
+        item["market_reference_range_display"] = None
+    item["market_reference_status_display"] = market_reference_status_display(row)
     out = {label: item.get(key) for label, key in CLEAN_COLUMNS}
     if review and not str(out.get("Nama Produk") or "").strip():
         # The review sheet should be readable, while the full audit retains the
@@ -3447,12 +3486,71 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
     _write_simple_worksheet(wb, "Promo", simple_current, header_fill, title_fill)
     _write_simple_worksheet(wb, "Perlu Diperiksa", combined_review, header_fill, title_fill)
 
+    # Separate market-price opportunities from official discount claims.
+    market_rows = [
+        row for row in current_rows
+        if as_int(row.get("market_reference_source_count")) is not None
+        and as_int(row.get("market_reference_source_count")) > 0
+    ]
+    market_rows.sort(
+        key=lambda row: (
+            as_decimal(row.get("market_reference_below_median_percent")) is not None,
+            float(as_decimal(row.get("market_reference_below_median_percent")) or 0),
+            as_int(row.get("market_reference_source_count")) or 0,
+        ),
+        reverse=True,
+    )
+    market_sheet = wb.create_sheet("Peluang Harga")
+    market_headers = [
+        "Nama Produk", "Merchant Promo", "Harga Promo (Rp)", "Median Harga Pasar (Rp)",
+        "Rentang Harga Pasar (Rp)", "Lebih Murah dari Median (%)", "Potensi Selisih (Rp)",
+        "Jumlah Domain Pembanding", "Status Pembanding", "Harga per Domain / Jenis Harga", "URL Bukti Harga",
+        "Observasi Terbaru", "Tingkat Keyakinan",
+    ]
+    market_sheet.append(market_headers)
+    for row in market_rows:
+        low = as_int(row.get("market_reference_low"))
+        high = as_int(row.get("market_reference_high"))
+        range_text = f"Rp{low:,}–Rp{high:,}".replace(",", ".") if low is not None and high is not None else "—"
+        market_sheet.append([
+            row.get("product_text") or "Produk belum teridentifikasi", row.get("merchant_name") or "—",
+            as_int(row.get("promo_price")), as_int(row.get("market_reference_price")), range_text,
+            as_decimal(row.get("market_reference_below_median_percent")),
+            as_int(row.get("market_reference_savings")), as_int(row.get("market_reference_source_count")) or 0,
+            market_reference_status_display(row), row.get("market_reference_sources") or "—",
+            row.get("market_reference_source_urls") or "—", row.get("market_reference_observed_at") or "—",
+            row.get("market_reference_confidence") or "—",
+        ])
+    from openpyxl.utils import get_column_letter
+    for cell in market_sheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    market_widths = [42, 22, 18, 23, 24, 23, 20, 16, 42, 52, 72, 24, 20]
+    for col_idx, width in enumerate(market_widths, start=1):
+        market_sheet.column_dimensions[get_column_letter(col_idx)].width = width
+    for row_idx in range(2, market_sheet.max_row + 1):
+        for col_idx, header in enumerate(market_headers, start=1):
+            cell = market_sheet.cell(row_idx, col_idx)
+            cell.alignment = Alignment(vertical="top", wrap_text=header in {"Nama Produk", "Status Pembanding", "Harga per Domain / Jenis Harga", "URL Bukti Harga"})
+            if header in {"Harga Promo (Rp)", "Median Harga Pasar (Rp)", "Potensi Selisih (Rp)"} and isinstance(cell.value, (int, float)):
+                cell.number_format = '"Rp" #,##0'
+            elif header == "Lebih Murah dari Median (%)" and isinstance(cell.value, (int, float)):
+                cell.number_format = '0.0"%"'
+    market_sheet.freeze_panes = "A2"
+    market_sheet.auto_filter.ref = market_sheet.dimensions
+    market_sheet.sheet_view.showGridLines = False
+    market_sheet.row_dimensions[1].height = 38
+
     # Simple summary as the initial tab.
     summary = wb.create_sheet("Ringkasan", 0)
     today_text = TODAY.isoformat()
     numeric_discounts = [r["Diskon (%)"] for r in simple_current if isinstance(r.get("Diskon (%)"), (int, float))]
     not_calculated = sum(not isinstance(r.get("Diskon (%)"), (int, float)) for r in simple_current)
     estimated = sum("Estimasi" in str(r.get("Status Diskon", "")) for r in simple_current)
+    market_reference_count = sum((as_int(r.get("market_reference_source_count")) or 0) > 0 for r in current_rows)
+    below_market_count = sum(r.get("market_reference_status") == "below_market_median" for r in current_rows)
+    single_market_source_count = sum(r.get("market_reference_status") == "single_source_only" for r in current_rows)
     summary_rows = [
         ["KATALOG PROMO", ""],
         ["Tanggal referensi", today_text],
@@ -3460,9 +3558,12 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
         ["Diskon bisa dihitung", len(numeric_discounts)],
         ["Diskon belum bisa dihitung", not_calculated],
         ["Diskon berbasis estimasi", estimated],
+        ["Produk dengan pembanding harga pasar", market_reference_count],
+        ["Promo di bawah median harga pasar", below_market_count],
+        ["Pembanding hanya satu domain (belum kuat)", single_market_source_count],
         ["Baris perlu diperiksa", len(combined_review)],
         ["Kolom utama", "Nama Produk · Kategori · Merchant · Harga Normal/Acuan · Harga Promo · Hemat · Diskon · Masa Berlaku"],
-        ["Cara membaca", "Diskon numerik dari harga tertulis diberi status hitungan; rentang pengguna/historis diberi status estimasi. 'Belum bisa dihitung' berarti bukti pembanding tidak cukup atau basis harga berbeda."],
+        ["Cara membaca", "Diskon resmi dihitung dari bukti harga normal yang relevan. Tab Peluang Harga membandingkan harga promo terhadap median harga pembanding di minimal dua domain berbeda; persentasenya bukan diskon resmi retailer."],
         ["Verifikasi", "Sumber agregator bukan verifikasi resmi retailer. Periksa sumber URL sebelum menganggap harga berlaku di semua toko/wilayah."],
         ["Riwayat", "Sheet audit teknis disimpan tersembunyi agar file utama sederhana. Data mentah dan log tetap ada di folder _internal."],
     ]
@@ -3483,7 +3584,7 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
 
     # Keep only useful daily tabs visible. Detailed audit sheets still exist for
     # project diagnostics and tests but do not clutter normal spreadsheet use.
-    visible = {"Ringkasan", "Promo", "Perlu Diperiksa", "Ringkasan Kategori"}
+    visible = {"Ringkasan", "Promo", "Perlu Diperiksa", "Ringkasan Kategori", "Peluang Harga"}
     for ws in wb.worksheets:
         ws.sheet_state = "visible" if ws.title in visible else "hidden"
     wb.active = wb.sheetnames.index("Promo")
@@ -3647,6 +3748,9 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
             "Nama Produk": 38, "Kategori Produk": 31, "Subkategori": 28,
             "Harga Asli (Rp)": 16, "Basis Harga Asli": 40, "Harga Asli dari Sumber (Rp)": 18, "Harga Normal Referensi (Rp)": 20, "Rentang Referensi Harga (Rp)": 24, "Harga Promo (Rp)": 15,
             "Diskon (%)": 12, "Dasar Diskon": 38, "Status Referensi Harga": 42, "Merchant": 22, "Merchant Acuan Referensi": 24,
+            "Median Harga Pasar (Rp)": 20, "Rentang Harga Pasar (Rp)": 24, "Lebih Murah dari Median Pasar (%)": 22,
+            "Selisih terhadap Median Pasar (Rp)": 22, "Jumlah Domain Pembanding": 18, "Status Pembanding Pasar": 42,
+            "Sumber Pembanding Pasar": 44, "URL Pembanding Pasar": 60, "Observasi Pembanding Pasar": 24, "Keyakinan Pembanding Pasar": 20,
             "Hemat / Selisih Referensi (Rp)": 22, "Umur Referensi (hari)": 16,
             "Tanggal Observasi Referensi": 24, "Sumber Referensi Harga": 24, "URL Referensi Harga": 52,
             "Status Promo": 22, "Kepastian Periode": 20, "Verifikasi Sumber": 34, "Kesegaran Data": 34,
@@ -3665,7 +3769,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
             field = headers[idx - 1]
             for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
                 cell = col_cells[0]
-                cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Kesegaran Data", "Klaim Diskon Sumber (Review) (%)", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "URL Referensi Harga", "Dasar Diskon", "Sumber Referensi Harga", "Alasan Review"})
+                cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Kesegaran Data", "Klaim Diskon Sumber (Review) (%)", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "URL Referensi Harga", "URL Pembanding Pasar", "Sumber Pembanding Pasar", "Dasar Diskon", "Sumber Referensi Harga", "Alasan Review"})
                 if field in {"Harga Asli (Rp)", "Harga Asli dari Sumber (Rp)", "Harga Normal Referensi (Rp)", "Harga Promo (Rp)", "Hemat / Selisih Referensi (Rp)"}:
                     cell.number_format = '#,##0'
                 elif field == "Diskon (%)":
@@ -3889,6 +3993,38 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
 
+    # Technical market references stay auditable separately from retailer normal-price records.
+    market_records = load_market_reference_database(MARKET_REFERENCE_CSV)
+    ws = wb.create_sheet("Referensi Harga Pasar")
+    market_headers = [
+        "Produk Kunci", "Nama Produk Query", "Harga Pembanding (Rp)", "Tanggal Observasi",
+        "Nama Sumber", "Domain", "URL Sumber", "Judul Halaman", "Bukti Harga yang Diverifikasi",
+        "Jenis Harga", "Jenis Sumber", "Metode Verifikasi", "Keyakinan", "Kunci Referensi",
+    ]
+    ws.append(market_headers)
+    for record in sorted(market_records, key=lambda r: (r.get("product_key", ""), r.get("source_domain", ""), r.get("observed_at", ""))):
+        ws.append([
+            record.get("product_key"), record.get("product_text"), _price_as_integer(record.get("market_price")),
+            record.get("observed_at"), record.get("source_name"), record.get("source_domain"),
+            record.get("source_url"), record.get("page_title"), record.get("evidence_text"),
+            record.get("price_kind"), record.get("source_kind"), record.get("verification_method"),
+            record.get("confidence"), record.get("reference_key"),
+        ])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for col, width in {"A": 42, "B": 48, "C": 20, "D": 22, "E": 28, "F": 28, "G": 60, "H": 48, "I": 70, "J": 16, "K": 18, "L": 24, "M": 18, "N": 28}.items():
+        ws.column_dimensions[col].width = width
+    for row_cells in ws.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    for cell in ws["C"][1:]:
+        cell.number_format = '#,##0'
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
+
     _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, title_fill)
     wb.save(path)
     return True
@@ -4094,7 +4230,9 @@ def main():
     all_loaded_rows = multisource_rows
     price_reference_update = update_reference_database(PRICE_REFERENCE_CSV, all_loaded_rows, TODAY)
     price_reference_records = load_reference_database(PRICE_REFERENCE_CSV)
+    market_reference_records = load_market_reference_database(MARKET_REFERENCE_CSV)
     print("Observasi harga normal baru tersimpan:", price_reference_update.get("observations_added", 0))
+    print("Referensi harga pasar tervalidasi tersedia:", len(market_reference_records))
     rejected_product_rows = [r for r in all_loaded_rows if r.get("product_validation_status") == "rejected"]
     input_rows = [r for r in all_loaded_rows if r.get("product_validation_status") != "rejected"]
     # Fuzzy matching belongs here, after all source outputs are loaded and bad
@@ -4104,6 +4242,7 @@ def main():
     consolidated, consolidated_groups, consolidated_rows = consolidate_overlapping_offers(merged_raw)
     consolidated, equivalent_offer_groups, equivalent_offer_rows_absorbed = merge_equivalent_cross_source_offers(consolidated)
     price_reference_apply_summary = apply_price_reference(consolidated, price_reference_records, today=TODAY)
+    market_price_apply_summary = compare_market_prices(consolidated, market_reference_records, today=TODAY)
 
     # Quality gate: a row can have an active period and still be unfit for the
     # public-facing catalog. Quarantine identity, merchant, category, source-link,
@@ -4230,6 +4369,12 @@ def main():
         ),
         "discount_basis_counts_current": dict(discount_basis),
         "merchant_counts_current": dict(merchant_counts),
+        "market_price_comparison": market_price_apply_summary,
+        "market_price_comparison_policy": (
+            "Harga pembanding pasar berasal dari URL publik yang harganya telah diverifikasi pada halaman. "
+            "Median dihitung dari domain berbeda yang cocok identitas/ukuran/varian dan berumur maksimal 14 hari. "
+            "Minimal dua domain diperlukan untuk menampilkan persentase lebih murah; hasilnya bukan diskon resmi retailer."
+        ),
         "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_SIMPLE_CSV.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
         "output_contracts": {
             OUT_ACTIVE.name: "Katalog bersih dengan kolom provenance lebih lengkap dan nilai numerik kosong bila tidak tersedia; cocok untuk pengolahan data.",
@@ -4268,6 +4413,9 @@ def main():
     print("rows with product discount:", report["rows_with_product_discount"])
     print("recent price references matched:", price_reference_apply_summary["exact_recent_references_found"])
     print("discounts calculated from references:", price_reference_apply_summary["reference_calculated_discounts"])
+    print("market references attached:", market_price_apply_summary["rows_with_market_reference"])
+    print("promos below market median:", market_price_apply_summary["below_market_median"])
+    print("market reference database:", MARKET_REFERENCE_CSV.relative_to(ROOT_DIR))
     print("price reference database:", PRICE_REFERENCE_CSV.relative_to(ROOT_DIR))
     print("clean catalog columns:", ", ".join(label for label, _ in CLEAN_COLUMNS))
     print("KATALOG UTAMA:", OUT_XLSX.relative_to(ROOT_DIR))

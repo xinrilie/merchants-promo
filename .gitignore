@@ -18,3 +18,6 @@ _internal/*
 .pytest_cache/
 .coverage
 htmlcov/
+
+# AI price finder cache (operational; no secrets)
+data/ai_price_search_cache.csv

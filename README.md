@@ -1,6 +1,6 @@
 # Merchants Promo
 
-Pipeline Python untuk mengumpulkan promo produk dari tiga sumber agregator publik, memvalidasi data, mendeteksi duplikat, mengategorikan produk, menyimpan database harga referensi, lalu mengekspor katalog ke Excel dan CSV.
+Pipeline Python untuk mengumpulkan promo produk dari tiga sumber agregator publik, memvalidasi data, mendeteksi duplikat, mengategorikan produk, menyimpan database harga referensi, opsional mencari harga pembanding dengan AI dan web search, lalu mengekspor katalog ke Excel dan CSV.
 
 ## Sumber aktif
 
@@ -24,7 +24,7 @@ Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebag
    python -m pytest -q engine
    ```
 
-4. Sebelum scraping, sinkronkan rentang referensi manual dengan database. Jalankan pipeline:
+4. Sebelum scraping, sinkronkan rentang referensi manual dengan database. Jalankan pipeline reguler:
 
    ```cmd
    python engine\seed_user_price_references.py
@@ -32,7 +32,18 @@ Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebag
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
-5. Buka `hasil/Katalog_Promo_Final.xlsx` atau `hasil/Katalog_Promo_Final.csv`.
+5. **Opsional — cari referensi harga pasar dengan AI.** Tahap ini memerlukan API key OpenAI dan menggunakan Responses API dengan `web_search`; pemanggilan API dapat dikenai biaya. Fitur ini tidak dijalankan otomatis oleh `Jalankan_Promo.bat` agar tidak ada pencarian berbayar tanpa persetujuan. Jalankan setelah collector, tetapi sebelum enhancer:
+
+   ```cmd
+   set OPENAI_API_KEY=ISI_API_KEY_MILIKMU
+   python engine\promo_ai_price_finder.py --dry-run --limit 5
+   python engine\promo_ai_price_finder.py --limit 20
+   python engine\enrich_existing_promo_catalog_multisource.py
+   ```
+
+   `--dry-run` hanya menampilkan antrean tanpa memanggil API. `--limit 20` membatasi pencarian maksimal 20 produk per run; pencarian berikutnya melanjutkan antrean produk lain. Cache pencarian berlaku 7 hari, sedangkan referensi pasar hanya dipakai untuk perbandingan selama maksimal 14 hari. Untuk mengulang produk yang baru dicari, tambahkan `--force`. Model dapat diubah melalui `set OPENAI_MODEL=nama-model`. Hapus variabel API key dari terminal setelah selesai jika komputer digunakan bersama.
+
+6. Buka `hasil/Katalog_Promo_Final.xlsx` atau `hasil/Katalog_Promo_Final.csv`.
 
    - `hasil/Katalog_Promo_Final.xlsx` — workbook ringkas untuk pemakaian harian dan sheet audit.
    - `hasil/Katalog_Promo_Final_Ringkas.csv` — kolom dan nilai tampilan sama dengan sheet `Promo` di Excel; cocok untuk dibagikan atau dipakai aplikasi yang membutuhkan tampilan ringkas.
@@ -49,12 +60,15 @@ merchants-promo-revisi-harga/
 │   ├── promo_multisource_collector.py
 │   ├── enrich_existing_promo_catalog_multisource.py
 │   ├── promo_price_reference.py
+│   ├── promo_ai_price_finder.py
 │   ├── seed_user_price_references.py
 │   └── test_*.py
 ├── input/
 │   └── category_review_list.csv
 ├── data/
 │   ├── product_price_reference.csv
+│   ├── product_market_price_reference.csv
+│   ├── ai_price_search_cache.csv
 │   ├── user_product_price_ranges.csv
 │   └── user_product_price_reference_aliases.csv
 ├── hasil/       # workbook dan CSV final
@@ -69,12 +83,13 @@ Sheet yang ditampilkan di awal workbook disederhanakan menjadi:
 - `Promo` — katalog utama dengan 13 kolom yang ringkas.
 - `Perlu Diperiksa` — daftar promo yang membutuhkan pemeriksaan harga, satuan, diskon, atau masa berlaku.
 - `Ringkasan Kategori` — jumlah promo per kategori.
+- `Peluang Harga` — produk yang harga promonya dapat dibandingkan dengan harga pasar dari minimal dua domain berbeda; persentase menunjukkan posisi terhadap median pasar, **bukan diskon resmi retailer**. Referensi dari satu domain tetap ditampilkan tetapi tidak diberi persentase potensi lebih murah.
 
 Di sheet `Promo`, urutan kolom harga adalah `Harga Normal/Acuan (Rp)` → `Harga Promo (Rp)` → `Hemat (Rp)` → `Diskon (%)` → `Masa Berlaku`. Jadi, `Masa Berlaku` langsung mengikuti `Diskon (%)`.
 
 Sel `Diskon (%)` pada sheet `Promo` selalu diisi angka jika dasar hitungnya memadai, atau teks `Belum bisa dihitung` bila bukti harga/satuan tidak cukup. Sel tidak dibiarkan kosong dan sistem tidak mengarang persentase. Estimasi dari rentang harga pengguna atau bundling diberi penanda di `Status Diskon`. File `Katalog_Promo_Final_Ringkas.csv` menggunakan transformasi baris yang sama agar hasil tampilannya identik dengan sheet tersebut. CSV utama `Katalog_Promo_Final.csv` tetap mempertahankan nilai numerik kosong untuk field yang tidak tersedia dan kolom provenance yang lebih lengkap.
 
-Sheet teknis seperti `Aktif`, `Periode Pasti`, `Perlu Review`, `Referensi Harga`, `Kemungkinan Duplikat`, dan audit lainnya tetap tersedia di workbook dalam keadaan tersembunyi untuk pemeriksaan mendalam; tampilan harian tidak dipenuhi sheet teknis.
+Sheet teknis seperti `Aktif`, `Periode Pasti`, `Perlu Review`, `Referensi Harga`, `Referensi Harga Pasar`, `Kemungkinan Duplikat`, dan audit lainnya tetap tersedia di workbook dalam keadaan tersembunyi untuk pemeriksaan mendalam; tampilan harian tidak dipenuhi sheet teknis.
 
 ## Urutan kolom pada sheet audit
 
@@ -114,13 +129,24 @@ Lalu ada `Basis Harga Asli`, `Harga Asli dari Sumber (Rp)`, `Harga Normal Refere
 
 Sheet yang terlihat di awal file: `Ringkasan`, `Promo`, `Perlu Diperiksa`, dan `Ringkasan Kategori`. Sheet rinci `Mulai Di Sini`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` (jika ada perubahan klasifikasi), `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna` tetap disimpan tetapi disembunyikan agar workbook harian ringkas.
 
-`Referensi Harga` memuat rekaman database beserta rentang, satuan, asal rekaman, sumber, tanggal, bukti, dan URL bila tersedia. `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
+`Referensi Harga` memuat rekaman harga normal historis/estimasi pengguna beserta sumber dan buktinya. `Referensi Harga Pasar` memuat setiap harga dari pencarian AI yang berhasil diverifikasi ulang pada URL sumber, sementara `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
+
+## AI Price Reference Finder
+
+File tambahan `engine/promo_ai_price_finder.py` digunakan hanya saat kamu meminta pencarian harga. Skrip mencari kandidat melalui web search, lalu mencoba membuka URL produk dan memastikan dua hal secara lokal: identitas/ukuran/varian cocok dan nominal harganya memang terlihat di halaman atau JSON-LD Product/Offer. Kandidat yang hanya diklaim oleh jawaban AI tetapi tidak terbukti di halaman sumber akan ditolak.
+
+Database `data/product_market_price_reference.csv` sengaja dipisahkan dari `data/product_price_reference.csv`. Data ini adalah **pembanding harga pasar**, bukan harga normal resmi. Sistem hanya menghitung `Lebih Murah dari Median Pasar (%)` jika harga promo lebih rendah dari median hasil verifikasi pada minimal dua domain berbeda yang masih segar; angka itu tidak mengubah kolom `Diskon (%)`. Jika referensi tidak ditemukan, produk tetap ada di katalog dan statusnya dibiarkan tanpa potensi persentase.
+
+Skrip melewati produk yang sudah punya harga promo yang valid tetapi tidak memiliki identitas layak, harga normal sumber sudah tersedia, promo bersyarat/bundling, atau baris yang berisi beberapa pilihan ukuran dalam satu nama produk. Cache negatif dan positif mencegah pencarian berulang setiap hari. Semua hasil perlu tetap dibaca sebagai referensi pasar, karena halaman publik dapat berubah dan dua domain berbeda belum tentu merupakan dua pemilik usaha yang independen.
+
+Pencarian memakai [OpenAI Responses API web search](https://developers.openai.com/api/docs/guides/tools-web-search). Tanpa `OPENAI_API_KEY`, pipeline reguler tetap bekerja dan hanya pemanggilan fitur pencarian yang memerlukan API key. Jangan simpan API key ke file kode atau commit GitHub.
 
 ## File teknis utama
 
 - `engine/promo_multisource_collector.py` mengumpulkan data, mencatat bukti harga/diskon/periode, log request, dan status kesehatan sumber.
 - `engine/enrich_existing_promo_catalog_multisource.py` menggabungkan data, memvalidasi harga/periode, menjalankan quality gate, mengupdate database referensi, dan menghasilkan Excel/CSV serta audit.
-- `engine/promo_price_reference.py` menangani penyimpanan harga terbaru, prioritas merchant, batas umur referensi, pencocokan, dan penandaan asal referensi.
+- `engine/promo_price_reference.py` menangani penyimpanan harga normal historis, prioritas merchant, batas umur referensi, pencocokan, dan penandaan asal referensi.
+- `engine/promo_ai_price_finder.py` mencari kandidat harga pasar dengan web search, memverifikasi nominal pada halaman sumber, menyimpan cache, dan tidak mengubah diskon resmi.
 - `engine/seed_user_price_references.py` menyinkronkan 102 rentang manual dan alias katalog ke database sebelum proses.
 
 ## Prinsip validasi dan batasan
