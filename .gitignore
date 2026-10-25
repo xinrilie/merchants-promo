@@ -21,3 +21,5 @@ htmlcov/
 
 # AI price finder cache (operational; no secrets)
 data/ai_price_search_cache.csv
+# Free public-web price search cache (operational; generated locally)
+data/free_price_search_cache.csv

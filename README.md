@@ -32,16 +32,24 @@ Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebag
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
-5. **Opsional — cari referensi harga pasar dengan AI.** Tahap ini memerlukan API key OpenAI dan menggunakan Responses API dengan `web_search`; pemanggilan API dapat dikenai biaya. Fitur ini tidak dijalankan otomatis oleh `Jalankan_Promo.bat` agar tidak ada pencarian berbayar tanpa persetujuan. Jalankan setelah collector, tetapi sebelum enhancer:
+5. **Opsional — cari referensi harga pasar tanpa API berbayar.** Jalankan pencarian web publik gratis setelah collector dan sebelum enhancer:
 
    ```cmd
-   set OPENAI_API_KEY=ISI_API_KEY_MILIKMU
-   python engine\promo_ai_price_finder.py --dry-run --limit 5
-   python engine\promo_ai_price_finder.py --limit 20
+   python engine\promo_free_price_finder.py --dry-run --limit 5
+   python engine\promo_free_price_finder.py --limit 5
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
-   `--dry-run` hanya menampilkan antrean tanpa memanggil API. `--limit 20` membatasi pencarian maksimal 20 produk per run; pencarian berikutnya melanjutkan antrean produk lain. Cache pencarian berlaku 7 hari, sedangkan referensi pasar hanya dipakai untuk perbandingan selama maksimal 14 hari. Untuk mengulang produk yang baru dicari, tambahkan `--force`. Model dapat diubah melalui `set OPENAI_MODEL=nama-model`. Hapus variabel API key dari terminal setelah selesai jika komputer digunakan bersama.
+   `--dry-run` hanya menampilkan antrean, tanpa mengakses internet. Mode gratis memakai halaman hasil pencarian publik dan validasi HTML/JSON-LD, bukan model AI berbayar. Tidak memerlukan API key; hasil dapat lebih terbatas, dan layanan pencarian publik dapat membatasi request atau mengubah format halaman. Mulai dengan `--limit 5` dan jangan menaikkan frekuensi pencarian secara agresif. Jika mesin pencari tidak bisa diakses, pencarian ditandai gagal dan tidak disimpan sebagai hasil kosong.
+
+   **Alternatif berbayar:** `engine\promo_ai_price_finder.py` tetap tersedia secara opsional dan menggunakan OpenAI Responses API dengan `web_search`. API key dan penagihannya terpisah dari langganan ChatGPT. Jangan jalankan mode ini kecuali kamu memang bersedia menggunakan API berbayar:
+
+   ```cmd
+   python engine\promo_ai_price_finder.py --dry-run --limit 5
+   set OPENAI_API_KEY=ISI_API_KEY_MILIKMU
+   python engine\promo_ai_price_finder.py --limit 20
+   python engine\enrich_existing_promo_catalog_multisource.py
+   ```
 
 6. Buka `hasil/Katalog_Promo_Final.xlsx` atau `hasil/Katalog_Promo_Final.csv`.
 
@@ -129,7 +137,7 @@ Lalu ada `Basis Harga Asli`, `Harga Asli dari Sumber (Rp)`, `Harga Normal Refere
 
 Sheet yang terlihat di awal file: `Ringkasan`, `Promo`, `Perlu Diperiksa`, dan `Ringkasan Kategori`. Sheet rinci `Mulai Di Sini`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` (jika ada perubahan klasifikasi), `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna` tetap disimpan tetapi disembunyikan agar workbook harian ringkas.
 
-`Referensi Harga` memuat rekaman harga normal historis/estimasi pengguna beserta sumber dan buktinya. `Referensi Harga Pasar` memuat setiap harga dari pencarian AI yang berhasil diverifikasi ulang pada URL sumber, sementara `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
+`Referensi Harga` memuat rekaman harga normal historis/estimasi pengguna beserta sumber dan buktinya. `Referensi Harga Pasar` memuat setiap harga dari pencarian web (mode gratis atau AI berbayar) yang berhasil diverifikasi pada URL sumber, sementara `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
 
 ## AI Price Reference Finder
 
@@ -146,7 +154,8 @@ Pencarian memakai [OpenAI Responses API web search](https://developers.openai.co
 - `engine/promo_multisource_collector.py` mengumpulkan data, mencatat bukti harga/diskon/periode, log request, dan status kesehatan sumber.
 - `engine/enrich_existing_promo_catalog_multisource.py` menggabungkan data, memvalidasi harga/periode, menjalankan quality gate, mengupdate database referensi, dan menghasilkan Excel/CSV serta audit.
 - `engine/promo_price_reference.py` menangani penyimpanan harga normal historis, prioritas merchant, batas umur referensi, pencocokan, dan penandaan asal referensi.
-- `engine/promo_ai_price_finder.py` mencari kandidat harga pasar dengan web search, memverifikasi nominal pada halaman sumber, menyimpan cache, dan tidak mengubah diskon resmi.
+- `engine/promo_free_price_finder.py` mencari harga pembanding tanpa API berbayar, memeriksa HTML/JSON-LD dari halaman hasil pencarian, menyimpan sumber yang lolos validasi, dan tidak mengubah diskon resmi.
+- `engine/promo_ai_price_finder.py` adalah alternatif opsional yang memakai OpenAI API berbayar.
 - `engine/seed_user_price_references.py` menyinkronkan 102 rentang manual dan alias katalog ke database sebelum proses.
 
 ## Prinsip validasi dan batasan
