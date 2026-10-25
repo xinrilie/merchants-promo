@@ -23,3 +23,6 @@ htmlcov/
 data/ai_price_search_cache.csv
 # Free public-web price search cache (operational; generated locally)
 data/free_price_search_cache.csv
+
+# Gemini + Google Search grounding cache (operational; generated locally)
+data/gemini_price_search_cache.csv

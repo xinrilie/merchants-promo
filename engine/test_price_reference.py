@@ -382,3 +382,45 @@ def test_excel_exports_reference_database_and_clearly_labels_reference_discount(
         assert reference_sheet.cell(2, 3).value == 20000
     finally:
         workbook.close()
+
+
+def test_excel_shows_unverified_search_leads_in_separate_candidate_sheet(tmp_path, monkeypatch):
+    import csv
+    from openpyxl import load_workbook
+
+    candidate_db = tmp_path / "data" / "product_market_price_candidates.csv"
+    candidate_db.parent.mkdir(parents=True, exist_ok=True)
+    with candidate_db.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=[
+            "product_text", "product_key", "merchant_name", "promo_price", "candidate_title",
+            "candidate_url", "candidate_domain", "candidate_snippet", "candidate_price_hint",
+            "observed_at", "search_provider", "candidate_status", "rejection_reason",
+        ])
+        writer.writeheader()
+        writer.writerow({
+            "product_text": "Sunlight Jeruk 755 ml", "product_key": "sunlight-jeruk-755",
+            "merchant_name": "Yogya", "promo_price": "12500",
+            "candidate_title": "Sunlight Jeruk 755 ml - Rp22.900",
+            "candidate_url": "https://shop.example/sunlight", "candidate_domain": "shop.example",
+            "candidate_snippet": "Sunlight Jeruk 755 ml harga Rp22.900",
+            "candidate_price_hint": "22900", "observed_at": "2026-10-25",
+            "search_provider": "bing-rss", "candidate_status": "needs_manual_review",
+            "rejection_reason": "Validator belum dapat memastikan ukuran/varian.",
+        })
+    monkeypatch.setattr(enhancer, "MARKET_CANDIDATES_CSV", candidate_db)
+    workbook_path = tmp_path / "catalog_with_candidates.xlsx"
+    row = _promo_without_normal()
+    assert enhancer.write_excel_catalog(workbook_path, [row], [row], [], [], [], [], {"status": "passed"})
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        assert "Kandidat Harga" in workbook.sheetnames
+        sheet = workbook["Kandidat Harga"]
+        headers = [cell.value for cell in sheet[1]]
+        assert "Harga dari Cuplikan (Rp) - BELUM TERVERIFIKASI" in headers
+        assert sheet.max_row == 2
+        assert sheet.cell(2, headers.index("Harga dari Cuplikan (Rp) - BELUM TERVERIFIKASI") + 1).value == 22900
+        status = sheet.cell(2, headers.index("Status Bukti") + 1).value
+        assert status == "needs_manual_review"
+        assert sheet.sheet_state == "visible"
+    finally:
+        workbook.close()

@@ -56,6 +56,7 @@ OUT_SIMPLE_CSV = OUTPUT_DIR / "Katalog_Promo_Final_Ringkas.csv"
 OUT_REJECTED_PRODUCTS = INTERNAL_DIR / "promo_product_rows_rejected.csv"
 CATEGORY_REVIEW_LIST_CSV = INPUT_DIR / "category_review_list.csv"
 PRICE_REFERENCE_CSV = ROOT_DIR / "data" / "product_price_reference.csv"
+MARKET_CANDIDATES_CSV = ROOT_DIR / "data" / "product_market_price_candidates.csv"
 
 FIELDS = [
     "product_text", "original_product_text", "product_name_variants", "product_category", "product_subcategory",
@@ -3542,6 +3543,59 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
     market_sheet.sheet_view.showGridLines = False
     market_sheet.row_dimensions[1].height = 38
 
+    # Unverified search leads are useful for discovering possible bargains but
+    # must stay separate from verified market medians and official discount data.
+    candidate_sheet = wb.create_sheet("Kandidat Harga")
+    candidate_headers = [
+        "Produk Dicari", "Merchant Promo", "Harga Promo (Rp)",
+        "Harga dari Cuplikan (Rp) - BELUM TERVERIFIKASI",
+        "Selisih Indikatif vs Promo (Rp) - BUKAN DISKON RESMI",
+        "Judul Kandidat", "Domain", "URL untuk Diperiksa", "Status Bukti", "Catatan Validasi", "Tanggal Dicari",
+    ]
+    candidate_sheet.append(candidate_headers)
+    candidate_records = []
+    if MARKET_CANDIDATES_CSV.exists():
+        try:
+            with MARKET_CANDIDATES_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+                candidate_records = list(csv.DictReader(handle))
+        except (OSError, csv.Error):
+            candidate_records = []
+    candidate_records.sort(key=lambda item: (item.get("observed_at", ""), item.get("product_text", "")), reverse=True)
+    for item in candidate_records[:1000]:
+        promo_price = as_int(item.get("promo_price"))
+        candidate_price = as_int(item.get("candidate_price_hint"))
+        indicative_delta = candidate_price - promo_price if candidate_price is not None and promo_price is not None else None
+        candidate_sheet.append([
+            item.get("product_text") or "—", item.get("merchant_name") or "—", promo_price,
+            candidate_price, indicative_delta, item.get("candidate_title") or "—",
+            item.get("candidate_domain") or "—", item.get("candidate_url") or "—",
+            item.get("candidate_status") or "Belum diketahui", item.get("rejection_reason") or "—",
+            item.get("observed_at") or "—",
+        ])
+    for cell in candidate_sheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    candidate_widths = [42, 22, 18, 34, 38, 48, 28, 64, 28, 72, 16]
+    for col_idx, width in enumerate(candidate_widths, start=1):
+        candidate_sheet.column_dimensions[get_column_letter(col_idx)].width = width
+    for row_idx in range(2, candidate_sheet.max_row + 1):
+        for col_idx, header in enumerate(candidate_headers, start=1):
+            cell = candidate_sheet.cell(row_idx, col_idx)
+            cell.alignment = Alignment(vertical="top", wrap_text=header in {
+                "Produk Dicari", "Judul Kandidat", "URL untuk Diperiksa", "Status Bukti", "Catatan Validasi",
+            })
+            if header in {"Harga Promo (Rp)", "Harga dari Cuplikan (Rp) - BELUM TERVERIFIKASI", "Selisih Indikatif vs Promo (Rp) - BUKAN DISKON RESMI"} and isinstance(cell.value, (int, float)):
+                cell.number_format = '"Rp" #,##0;[Red]-"Rp" #,##0'
+        url_cell = candidate_sheet.cell(row_idx, 8)
+        if isinstance(url_cell.value, str) and url_cell.value.startswith(("https://", "http://")):
+            url_cell.hyperlink = url_cell.value
+            url_cell.style = "Hyperlink"
+    candidate_sheet.freeze_panes = "A2"
+    candidate_sheet.auto_filter.ref = candidate_sheet.dimensions
+    candidate_sheet.sheet_view.showGridLines = False
+    candidate_sheet.row_dimensions[1].height = 48
+
     # Simple summary as the initial tab.
     summary = wb.create_sheet("Ringkasan", 0)
     today_text = TODAY.isoformat()
@@ -3561,9 +3615,10 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
         ["Produk dengan pembanding harga pasar", market_reference_count],
         ["Promo di bawah median harga pasar", below_market_count],
         ["Pembanding hanya satu domain (belum kuat)", single_market_source_count],
+        ["Kandidat harga belum terverifikasi", len(candidate_records)],
         ["Baris perlu diperiksa", len(combined_review)],
         ["Kolom utama", "Nama Produk · Kategori · Merchant · Harga Normal/Acuan · Harga Promo · Hemat · Diskon · Masa Berlaku"],
-        ["Cara membaca", "Diskon resmi dihitung dari bukti harga normal yang relevan. Tab Peluang Harga membandingkan harga promo terhadap median harga pembanding di minimal dua domain berbeda; persentasenya bukan diskon resmi retailer."],
+        ["Cara membaca", "Diskon resmi dihitung dari bukti harga normal yang relevan. Tab Peluang Harga hanya berisi pembanding pasar terverifikasi dari minimal dua domain. Tab Kandidat Harga berisi petunjuk pencarian yang belum terverifikasi dan bukan dasar diskon."],
         ["Verifikasi", "Sumber agregator bukan verifikasi resmi retailer. Periksa sumber URL sebelum menganggap harga berlaku di semua toko/wilayah."],
         ["Riwayat", "Sheet audit teknis disimpan tersembunyi agar file utama sederhana. Data mentah dan log tetap ada di folder _internal."],
     ]
@@ -3584,7 +3639,7 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
 
     # Keep only useful daily tabs visible. Detailed audit sheets still exist for
     # project diagnostics and tests but do not clutter normal spreadsheet use.
-    visible = {"Ringkasan", "Promo", "Perlu Diperiksa", "Ringkasan Kategori", "Peluang Harga"}
+    visible = {"Ringkasan", "Promo", "Perlu Diperiksa", "Ringkasan Kategori", "Peluang Harga", "Kandidat Harga"}
     for ws in wb.worksheets:
         ws.sheet_state = "visible" if ws.title in visible else "hidden"
     wb.active = wb.sheetnames.index("Promo")

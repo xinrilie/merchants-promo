@@ -32,17 +32,18 @@ Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebag
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
-5. **Opsional — cari referensi harga pasar tanpa API berbayar.** Jalankan pencarian web publik gratis setelah collector dan sebelum enhancer:
+5. **Opsional — cari harga dengan Gemini + Google Search grounding (disarankan untuk pencarian berbantuan AI).** Gunakan API key Google AI Studio yang project-nya masih berada di Free tier. Google saat ini mendokumentasikan grounding Google Search untuk `gemini-2.5-flash` hingga 500 grounded prompts/hari pada Free tier, dibagi dengan Flash-Lite. Akses/limit aktual bergantung pada project. Jangan tautkan billing jika tidak ingin risiko tagihan; pada Free tier, input/output dapat digunakan Google untuk meningkatkan produk sesuai ketentuan mereka. Periksa halaman harga resmi sebelum pemakaian: https://ai.google.dev/gemini-api/docs/pricing
 
    ```cmd
-   python engine\promo_free_price_finder.py --dry-run --limit 5
-   python engine\promo_free_price_finder.py --limit 5
+   python engine\promo_gemini_price_finder.py --dry-run --limit 5
+   set GEMINI_API_KEY=ISI_API_KEY_GOOGLE_AI_STUDIO
+   python engine\promo_gemini_price_finder.py --limit 5
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
-   `--dry-run` hanya menampilkan antrean, tanpa mengakses internet. Mode gratis memakai halaman hasil pencarian publik dan validasi HTML/JSON-LD, bukan model AI berbayar. Tidak memerlukan API key. DuckDuckGo dicoba lebih dulu; bila mengembalikan HTTP 202/halaman challenge, program beralih ke Bing RSS publik tanpa API key. Hasil tetap dapat lebih terbatas, dan kedua layanan dapat membatasi request atau mengubah format halaman. Mulai dengan `--limit 5` dan jangan menaikkan frekuensi pencarian secara agresif. Jika kedua penyedia tidak bisa diakses, pencarian ditandai gagal dan tidak disimpan sebagai hasil kosong.
+   `--dry-run` hanya menampilkan antrean, tanpa API atau internet. Script otomatis memakai Google Search grounding melalui model `gemini-2.5-flash`. URL dari model hanya diterima jika URL tersebut muncul di metadata sumber grounding Google. Harga dari jawaban AI tetap disimpan sebagai kandidat terlebih dahulu; harga baru masuk database median pasar setelah halaman yang dikutip dapat dibaca dan nama/varian/ukuran serta nominal harga terdeteksi di halaman tersebut. Batas awal 5 produk per run dan batas keras 20 produk per run sengaja dipasang untuk mengendalikan penggunaan. Kalau kuota tidak tersedia atau API menolak request, script berhenti dan tidak mengulang batch secara otomatis.
 
-   **Alternatif berbayar:** `engine\promo_ai_price_finder.py` tetap tersedia secara opsional dan menggunakan OpenAI Responses API dengan `web_search`. API key dan penagihannya terpisah dari langganan ChatGPT. Jangan jalankan mode ini kecuali kamu memang bersedia menggunakan API berbayar:
+   **Alternatif tanpa API:** `engine\promo_free_price_finder.py` masih tersedia, tetapi mengandalkan hasil pencarian publik DuckDuckGo/Bing yang dapat membatasi request dan hasilnya belum tentu lengkap. `engine\promo_ai_price_finder.py` tetap tersedia sebagai opsi OpenAI API, tetapi bersifat opsional dan berpotensi berbayar.
 
    ```cmd
    python engine\promo_ai_price_finder.py --dry-run --limit 5
@@ -69,6 +70,8 @@ merchants-promo-revisi-harga/
 │   ├── enrich_existing_promo_catalog_multisource.py
 │   ├── promo_price_reference.py
 │   ├── promo_ai_price_finder.py
+│   ├── promo_gemini_price_finder.py
+│   ├── promo_free_price_finder.py
 │   ├── seed_user_price_references.py
 │   └── test_*.py
 ├── input/
@@ -92,6 +95,7 @@ Sheet yang ditampilkan di awal workbook disederhanakan menjadi:
 - `Perlu Diperiksa` — daftar promo yang membutuhkan pemeriksaan harga, satuan, diskon, atau masa berlaku.
 - `Ringkasan Kategori` — jumlah promo per kategori.
 - `Peluang Harga` — produk yang harga promonya dapat dibandingkan dengan harga pasar dari minimal dua domain berbeda; persentase menunjukkan posisi terhadap median pasar, **bukan diskon resmi retailer**. Referensi dari satu domain tetap ditampilkan tetapi tidak diberi persentase potensi lebih murah.
+- `Kandidat Harga` — judul, URL, cuplikan, dan petunjuk nominal dari halaman pencarian yang belum lolos verifikasi otomatis. Angkanya hanya petunjuk untuk diperiksa manual, bukan harga normal terverifikasi dan bukan dasar menghitung diskon.
 
 Di sheet `Promo`, urutan kolom harga adalah `Harga Normal/Acuan (Rp)` → `Harga Promo (Rp)` → `Hemat (Rp)` → `Diskon (%)` → `Masa Berlaku`. Jadi, `Masa Berlaku` langsung mengikuti `Diskon (%)`.
 
@@ -135,26 +139,31 @@ Lalu ada `Basis Harga Asli`, `Harga Asli dari Sumber (Rp)`, `Harga Normal Refere
 
 ## Sheet workbook
 
-Sheet yang terlihat di awal file: `Ringkasan`, `Promo`, `Perlu Diperiksa`, dan `Ringkasan Kategori`. Sheet rinci `Mulai Di Sini`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` (jika ada perubahan klasifikasi), `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna` tetap disimpan tetapi disembunyikan agar workbook harian ringkas.
+Sheet yang terlihat di awal file: `Ringkasan`, `Promo`, `Perlu Diperiksa`, `Ringkasan Kategori`, `Peluang Harga`, dan `Kandidat Harga`. Sheet rinci `Mulai Di Sini`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` (jika ada perubahan klasifikasi), `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna` tetap disimpan tetapi disembunyikan agar workbook harian ringkas.
 
-`Referensi Harga` memuat rekaman harga normal historis/estimasi pengguna beserta sumber dan buktinya. `Referensi Harga Pasar` memuat setiap harga dari pencarian web (mode gratis atau AI berbayar) yang berhasil diverifikasi pada URL sumber, sementara `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
+`Referensi Harga` memuat rekaman harga normal historis/estimasi pengguna beserta sumber dan buktinya. `Referensi Harga Pasar` memuat setiap harga dari pencarian web (mode gratis atau AI berbayar) yang berhasil diverifikasi pada URL sumber. Kandidat yang belum lolos validasi disimpan terpisah di `data/product_market_price_candidates.csv` dan sheet `Kandidat Harga`. `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
 
 ## AI Price Reference Finder
 
-File tambahan `engine/promo_ai_price_finder.py` digunakan hanya saat kamu meminta pencarian harga. Skrip mencari kandidat melalui web search, lalu mencoba membuka URL produk dan memastikan dua hal secara lokal: identitas/ukuran/varian cocok dan nominal harganya memang terlihat di halaman atau JSON-LD Product/Offer. Kandidat yang hanya diklaim oleh jawaban AI tetapi tidak terbukti di halaman sumber akan ditolak.
+Untuk opsi Google, gunakan `engine/promo_gemini_price_finder.py` dengan model `gemini-2.5-flash` dan Google Search grounding. API key disetel lewat variabel lingkungan `GEMINI_API_KEY`; jangan simpan key dalam kode atau commit GitHub. `--dry-run` tidak menghubungi API. Jalankan pencarian aktual dengan `--limit 5` setelah memastikan project di Google AI Studio masih berada pada Free tier dan billing tidak diaktifkan.
+
+Google saat ini mendokumentasikan batas Free tier sampai 500 grounded prompts per hari untuk Gemini 2.5 Flash/Flash-Lite (batas berbagi), tetapi ketersediaan akun/project dapat berbeda dan limit/harga dapat berubah. Pada Free tier, konten dapat digunakan Google untuk meningkatkan produk sesuai ketentuan. Cek harga dan syarat terbaru di https://ai.google.dev/gemini-api/docs/pricing. Jika project memiliki billing atau menggunakan tier berbayar, penggunaan token dapat menimbulkan tagihan.
+
+File `engine/promo_ai_price_finder.py` tetap tersedia secara opsional untuk OpenAI API berbayar. File `engine/promo_free_price_finder.py` tetap menjadi alternatif pencarian publik tanpa API, tetapi sumber DuckDuckGo/Bing bisa lambat, membatasi request, atau tidak memberikan petunjuk harga.
+
+Skrip Gemini menerima URL hanya jika URL tersebut ada pada metadata grounding Google. Harga yang disampaikan model tetap menjadi kandidat terlebih dahulu; harga hanya dimasukkan ke database pasar bila halaman sumber dapat dibaca dan nominal yang cocok terlihat pada halaman. Kandidat lain disimpan di `data/product_market_price_candidates.csv` dan sheet `Kandidat Harga`, bukan sebagai harga pasar terverifikasi.
 
 Database `data/product_market_price_reference.csv` sengaja dipisahkan dari `data/product_price_reference.csv`. Data ini adalah **pembanding harga pasar**, bukan harga normal resmi. Sistem hanya menghitung `Lebih Murah dari Median Pasar (%)` jika harga promo lebih rendah dari median hasil verifikasi pada minimal dua domain berbeda yang masih segar; angka itu tidak mengubah kolom `Diskon (%)`. Jika referensi tidak ditemukan, produk tetap ada di katalog dan statusnya dibiarkan tanpa potensi persentase.
 
 Skrip melewati produk yang sudah punya harga promo yang valid tetapi tidak memiliki identitas layak, harga normal sumber sudah tersedia, promo bersyarat/bundling, atau baris yang berisi beberapa pilihan ukuran dalam satu nama produk. Cache negatif dan positif mencegah pencarian berulang setiap hari. Semua hasil perlu tetap dibaca sebagai referensi pasar, karena halaman publik dapat berubah dan dua domain berbeda belum tentu merupakan dua pemilik usaha yang independen.
-
-Pencarian memakai [OpenAI Responses API web search](https://developers.openai.com/api/docs/guides/tools-web-search). Tanpa `OPENAI_API_KEY`, pipeline reguler tetap bekerja dan hanya pemanggilan fitur pencarian yang memerlukan API key. Jangan simpan API key ke file kode atau commit GitHub.
 
 ## File teknis utama
 
 - `engine/promo_multisource_collector.py` mengumpulkan data, mencatat bukti harga/diskon/periode, log request, dan status kesehatan sumber.
 - `engine/enrich_existing_promo_catalog_multisource.py` menggabungkan data, memvalidasi harga/periode, menjalankan quality gate, mengupdate database referensi, dan menghasilkan Excel/CSV serta audit.
 - `engine/promo_price_reference.py` menangani penyimpanan harga normal historis, prioritas merchant, batas umur referensi, pencocokan, dan penandaan asal referensi.
-- `engine/promo_free_price_finder.py` mencari harga pembanding tanpa API berbayar, memeriksa HTML/JSON-LD dari halaman hasil pencarian, menyimpan sumber yang lolos validasi, dan tidak mengubah diskon resmi.
+- `engine/promo_gemini_price_finder.py` mencari harga dengan Gemini + Google Search grounding; kandidat hanya dipromosikan setelah halaman sumber memvalidasi produk dan harga.
+- `engine/promo_free_price_finder.py` adalah pencarian publik tanpa API yang dapat menyimpan kandidat untuk pemeriksaan manual.
 - `engine/promo_ai_price_finder.py` adalah alternatif opsional yang memakai OpenAI API berbayar.
 - `engine/seed_user_price_references.py` menyinkronkan 102 rentang manual dan alias katalog ke database sebelum proses.
 
