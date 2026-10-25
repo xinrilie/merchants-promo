@@ -1,6 +1,6 @@
 # Merchants Promo
 
-Pipeline Python untuk mengumpulkan promo produk dari tiga sumber agregator publik, memvalidasi data, mendeteksi duplikat, mengategorikan produk, lalu mengekspor katalog ke Excel dan CSV.
+Pipeline Python untuk mengumpulkan promo produk dari tiga sumber agregator publik, memvalidasi data, mendeteksi duplikat, mengategorikan produk, menyimpan database harga referensi, lalu mengekspor katalog ke Excel dan CSV.
 
 ## Sumber aktif
 
@@ -8,13 +8,13 @@ Pipeline Python untuk mengumpulkan promo produk dari tiga sumber agregator publi
 - **Katalogpromosi.com** — artikel katalog, teks penawaran, dan referensi brosur.
 - **Scanharga.com** — artikel promo dan referensi brosur.
 
-Pipeline ini hanya menggunakan tiga sumber tersebut. Data historis yang tidak berasal dari tiga sumber aktif tidak dimasukkan otomatis ke katalog final.
+Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebagai sumber promo.
 
-## Menjalankan di Windows
+## Menjalankan di Windows (langsung dari CMD)
 
-1. Ekstrak seluruh proyek ke satu folder dan buka CMD di folder tersebut.
+1. Ekstrak proyek dan buka CMD di folder utama proyek.
 2. Pastikan Python 3.10 atau lebih baru tersedia di PATH.
-3. Pasang dependensi dan jalankan pemeriksaan offline langsung dari CMD:
+3. Pasang dependensi dan jalankan pemeriksaan offline:
 
    ```cmd
    python -m pip install -r requirements-dev.txt
@@ -24,106 +24,98 @@ Pipeline ini hanya menggunakan tiga sumber tersebut. Data historis yang tidak be
    python -m pytest -q engine
    ```
 
-4. Jika tes lulus, jalankan scraping dan ekspor:
+4. Sebelum scraping, sinkronkan rentang referensi manual dengan database. Jalankan pipeline:
 
    ```cmd
+   python engine\seed_user_price_references.py
    python engine\promo_multisource_collector.py
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
 5. Buka `hasil/Katalog_Promo_Final.xlsx` atau `hasil/Katalog_Promo_Final.csv`.
 
-Jangan menjalankan enhancer ekspor sebelum collector selesai. Enhancer sengaja berhenti jika file hasil collector tidak ada atau kosong agar katalog final sebelumnya tidak tertimpa oleh ekspor kosong.
+Jangan menjalankan enhancer sebelum collector selesai. Enhancer berhenti jika hasil collector tidak ada atau kosong agar katalog lama tidak tertimpa oleh ekspor kosong.
 
 ## Struktur proyek
 
 ```text
-merchants-promo/
+merchants-promo-revisi-harga/
 ├── engine/
 │   ├── promo_multisource_collector.py
 │   ├── enrich_existing_promo_catalog_multisource.py
-│   ├── promo_campaign_utils.py
-│   ├── promo_categories.py
-│   ├── promo_evidence.py
-│   ├── promo_merchant_utils.py
-│   ├── promo_names.py
-│   ├── promo_product_validation.py
+│   ├── promo_price_reference.py
+│   ├── seed_user_price_references.py
 │   └── test_*.py
 ├── input/
 │   └── category_review_list.csv
 ├── data/
-│   └── product_price_reference.csv  # referensi harga normal terkini
+│   ├── product_price_reference.csv
+│   ├── user_product_price_ranges.csv
+│   └── user_product_price_reference_aliases.csv
 ├── hasil/       # workbook dan CSV final
-├── _internal/   # log, data antara, laporan kualitas dan audit
-├── Install_Dependency.bat
-├── Jalankan_Promo.bat
-└── Jalankan_Tes.bat
+└── _internal/   # log, data antara, laporan kualitas dan audit
 ```
 
-## File utama
+## Urutan kolom harga di Excel
 
-- `engine/promo_multisource_collector.py` mengumpulkan data tiga sumber, menyimpan bukti teks untuk harga/diskon/periode, mencatat request log dan status kesehatan sumber, serta mempertahankan baris sumber sebelumnya jika sumber gagal menghasilkan data baru.
-- `engine/enrich_existing_promo_catalog_multisource.py` menggabungkan baris antar-sumber, menormalisasi nama, memeriksa periode/harga/diskon, mengidentifikasi merchant, menjalankan quality gate, dan membuat laporan Excel/CSV.
-- `engine/promo_campaign_utils.py` berisi utilitas umum untuk normalisasi teks, tipe kampanye, parsing periode, status promo, serta aturan diskon. Modul ini tidak melakukan request web.
-- `engine/promo_categories.py` berisi taksonomi 29 kategori produk.
-- `engine/promo_product_validation.py` menolak kandidat non-produk dan menandai data ambigu.
-- `engine/promo_price_reference.py` menyimpan harga acuan terbaru yang punya bukti eksplisit. Harga baru menggantikan nilai sebelumnya untuk kombinasi produk, merchant, kanal, dan asal rekaman yang sama; database bukan lagi arsip historis harian.
+Di sheet `Aktif`, `Periode Pasti`, dan `Perlu Review`, kolom harga diawali dengan urutan:
 
-## Hasil dan laporan
+1. `Harga Asli (Rp)`
+2. `Harga Promo (Rp)`
+3. `Diskon (%)`
 
-Workbook final memiliki sheet `Mulai Di Sini`, `Ringkasan Kategori`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Kemungkinan Duplikat`, `Variasi Nama`, dan sheet audit kategori apabila perubahan kategori terdeteksi.
+Lalu ada `Basis Harga Asli`, `Harga Asli dari Sumber (Rp)`, `Harga Normal Referensi (Rp)`, `Rentang Referensi Harga (Rp)`, dan `Dasar Diskon`.
 
-Database referensi harga:
+- `Harga Asli (Rp)` memakai harga asli yang disebut sumber promo jika tersedia. Jika tidak ada, kolom dapat memakai titik tengah dari rentang referensi **hanya jika** identitas/SKU dan satuan cocok serta nilai promo masuk akal terhadap rentang.
+- `Harga Asli dari Sumber (Rp)` hanya menandai nominal asli yang memang tercantum atau berhasil diekstrak dari teks detail penawaran; kolom ini tetap kosong untuk nilai estimasi referensi.
+- `Harga Normal Referensi (Rp)` berisi titik tengah estimasi. `Rentang Referensi Harga (Rp)` mempertahankan batas minimum–maksimum agar titik tengah tidak dianggap angka pasti.
+- `Basis Harga Asli`, `Status Referensi Harga`, `Merchant Acuan Referensi`, dan `Dasar Diskon` menandai apakah nilai berasal dari sumber promo atau hanya perbandingan estimasi.
+- Klaim diskon dari sumber yang berbeda cukup jauh dari hitungan harga dipindah ke `Klaim Diskon Sumber (Review) (%)`; nilainya tidak dibuang.
+- Penawaran bersyarat seperti beli beberapa item, promo member/pembayaran, bundling, harga di luar rentang, rentang terlalu lebar, atau indikasi beda SKU/satuan tidak dipaksakan menjadi diskon per item.
 
-- `data/product_price_reference.csv` adalah basis data referensi harga normal terkini. Harga normal eksplisit, valid, dan segar dari hasil scrape memperbarui harga sebelumnya untuk produk + ukuran/varian + merchant + kanal yang sama. Database menyimpan nilai terbaru, bukan riwayat harga harian; observasi dengan waktu sama tetapi harga konflik tetap ditahan agar tidak dipilih secara sembarang.
-- Sumber otomatis yang direkam tetap berstatus `aggregator_only`. Harga referensi historis **bukan** bukti bahwa retailer resmi menetapkan harga itu saat ini.
-- Sistem lebih dahulu memakai referensi produk + ukuran/varian dari merchant yang sama, dengan kanal yang sama dan usia maksimal 30 hari. Jika referensi terbaru yang layak untuk merchant tersebut tidak tersedia, sistem boleh memakai produk persis dari merchant lain pada kanal yang sama. Kolom `Merchant Acuan Referensi`, `Status Referensi Harga`, dan `Dasar Diskon` menandai fallback tersebut secara eksplisit.
-- Jika harga promo saat ini tidak menyertakan harga normal dan diskon, tetapi ada referensi yang cocok serta lebih tinggi dari harga promo, Excel menampilkan `Harga Normal Referensi (Rp)` dan diskon hasil hitung dengan `Dasar Diskon = Hitungan dari referensi harga historis`. Jika acuan berasal dari merchant lain, label secara eksplisit menyebut merchant lain dan nama toko acuan juga ditampilkan. Kolom `Harga Asli dari Sumber (Rp)` tetap kosong supaya tidak terkesan harga itu tertulis pada promo sekarang.
-- Harga baru hanya dipelajari dari baris yang lolos validasi produk, mempunyai `Harga Normal` eksplisit dalam bukti teks, sumber URL, timestamp segar, merchant dan produk jelas, serta bukan katalog lama yang dipertahankan. Harga scrape yang lebih baru langsung memperbarui nilai lama sehingga harga naik maupun turun dapat diikuti.
-- Database awal sudah disemai dengan observasi eksplisit dari run live terakhir yang tersedia. Saat pindah ke folder proyek baru untuk upgrade mendatang, salin `data/product_price_reference.csv` agar nilai acuan terbaru yang telah terkumpul tetap tersedia.
-- Opsional: harga manual dapat ditambahkan ke CSV dengan `record_origin=manual_verified`, `verification_status=retailer_official`, URL halaman retailer, tanggal observasi, harga, serta potongan bukti yang secara eksplisit mencantumkan harga normal. Rekaman manual yang tidak memenuhi syarat ini tidak dipakai.
+## Database harga referensi
 
-File teknis di `_internal/` meliputi:
+### File sumber referensi manual
 
-- `promo_multisource_products_all.csv` — hasil collector yang menjadi masukan enhancer.
-- `promo_multisource_products_active.csv` — kandidat aktif dari tahap collector.
-- `promo_multisource_products_review.csv` — kandidat yang memerlukan pemeriksaan.
-- `promo_multisource_articles.csv` — halaman/artikel yang diperiksa.
-- `promo_multisource_catalog_images.csv` — referensi gambar katalog; OCR tidak dijalankan otomatis.
-- `promo_multisource_rejected_candidates.csv` — kandidat mentah yang ditolak.
-- `promo_multisource_runlog.json` — request log dan kesehatan per sumber.
-- `promo_catalog_multisource_quality_report.json` — kesegaran data, validasi, duplikasi, dan hasil quality gate ekspor.
-- `promo_export_quality_gate_report.json` — ringkasan keputusan gerbang kualitas.
-- `promo_possible_duplicate_candidates.csv` — pasangan duplikat yang belum aman digabung otomatis.
-- `promo_product_rows_rejected.csv` — baris non-produk yang ditolak enhancer.
+- `data/user_product_price_ranges.csv` berisi **102 rentang harga** yang dikumpulkan pengguna. Harga ini adalah acuan perkiraan dan tidak diklaim sebagai harga pasar yang telah diverifikasi.
+- `data/user_product_price_reference_aliases.csv` berisi variasi nama katalog yang telah diaudit agar dapat dicocokkan secara presisi. Perubahan/penghapusan alias tersinkron saat skrip seeder dijalankan.
+- `engine/seed_user_price_references.py` memasukkan rentang manual dan alias yang aktif ke `data/product_price_reference.csv`. Skrip ini membangun ulang rekaman `user_supplied_estimate` dari file sumber, sekaligus mempertahankan rekaman hasil pengamatan sumber yang berdiri sendiri.
 
-## Prinsip validasi
+### Aturan pemilihan dan pembaruan
 
-- Status `Aktif` bukan bukti resmi retailer; status periode, status validasi produk, dan status verifikasi sumber dipisahkan.
-- Harga promo diambil hanya jika dapat ditelusuri ke teks penawaran yang relevan. Harga normal yang hilang dari promo saat ini tidak diisi ke kolom harga sumber; bila cocok, referensi historis ditampilkan terpisah. Nominal QRIS/cashback, syarat minimum belanja, teks judul editorial, serta nama produk kosong tidak diperlakukan sebagai harga SKU.
-- Diskon yang tidak cocok dengan harga sebanding dipindahkan ke review; diskon kampanye tidak otomatis diwariskan ke setiap produk. Diskon yang dihitung dari referensi historis diberi dasar tersendiri serta sumber/tanggal observasi.
-- Bundling beli-gratis hanya merupakan estimasi jika nilai barang gratis tidak diketahui. Hadiah lintas-SKU tidak disamakan dengan diskon harga barang utama.
-- Periode bulan atau tanggal yang diinferensikan berstatus estimasi, bukan periode pasti.
-- Duplikasi persis/fuzzy tidak boleh menyatukan variasi ukuran, rasa, syarat kuantitas, periode, atau harga yang berbeda.
-- Baris sumber yang dipertahankan setelah kegagalan ditandai sebagai data lama; timestamp kosong tidak dihitung sebagai kesegaran baru.
-- Jika log sumber tidak menyertakan hasil validasi konten secara eksplisit, `validation_passed` ditulis `null` dengan `validation_status=not_reported`, bukan `false`. Status `fresh` atau `updated` hanya menyatakan kondisi pengambilan/output, bukan validasi produk.
-- Status Quality Gate `passed` berarti tidak ada isu pemblokir yang tersisa pada baris yang diterima; kandidat bermasalah tetap dialihkan ke `Perlu Review`.
-- Judul editorial seperti “Jangan Sampai Kelewatan Promo ...” ditolak sebagai SKU meskipun teksnya berisi nominal harga.
-- Prioritas kandidat duplikat memperhitungkan kecocokan penawaran. Tingkat beli berbeda, varian berbeda, atau barang hadiah berbeda diberi instruksi untuk tetap dipisahkan dan tidak digabung otomatis.
-- Situs yang membalas 401/403/429 tidak dicoba untuk dilewati.
+- **Merchant yang sama diprioritaskan.** Jika tidak ada referensi baru yang layak pada merchant tersebut, sistem dapat menggunakan referensi dari merchant lain atau acuan umum, dan menandainya sebagai fallback.
+- Harga normal eksplisit terbaru dari sumber yang memenuhi validasi menggantikan harga sebelumnya untuk kombinasi produk/ukuran/varian + merchant + kanal + asal rekaman yang sama. Harga naik maupun turun akan diterapkan; database bukan arsip harga harian.
+- Referensi scrape terbaru yang memenuhi syarat diprioritaskan dibanding rentang manual. Rentang manual hanya menjadi fallback dan titik tengahnya digunakan sebagai estimasi.
+- Harga hasil agregator berstatus `aggregator_only`, bukan bukti harga resmi retailer. Rentang yang diberikan pengguna berstatus `user_supplied_estimate`.
+- Harga referensi sumber otomatis maksimal berumur 30 hari untuk perhitungan. Harga lama, konflik nominal pada waktu yang sama, transaksi bersyarat, bundling, hadiah lintas-SKU, atau perbedaan ukuran/satuan tidak digunakan untuk menghitung diskon normal per unit.
+- Detail penawaran yang secara eksplisit menyebut “harga normal/asli/reguler” dapat dipakai memulihkan harga asli ketika parser awal melewatkannya, kecuali konteksnya mengindikasikan bundling atau syarat transaksi.
 
-## Tes lokal
+## Sheet workbook
 
-```powershell
-python -m pip install -r requirements-dev.txt
+Workbook memuat `Mulai Di Sini`, `Ringkasan Kategori`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` jika ada perubahan klasifikasi, `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna`.
+
+`Referensi Harga` memuat rekaman database beserta rentang, satuan, asal rekaman, sumber, tanggal, bukti, dan URL bila tersedia. `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
+
+## File teknis utama
+
+- `engine/promo_multisource_collector.py` mengumpulkan data, mencatat bukti harga/diskon/periode, log request, dan status kesehatan sumber.
+- `engine/enrich_existing_promo_catalog_multisource.py` menggabungkan data, memvalidasi harga/periode, menjalankan quality gate, mengupdate database referensi, dan menghasilkan Excel/CSV serta audit.
+- `engine/promo_price_reference.py` menangani penyimpanan harga terbaru, prioritas merchant, batas umur referensi, pencocokan, dan penandaan asal referensi.
+- `engine/seed_user_price_references.py` menyinkronkan 102 rentang manual dan alias katalog ke database sebelum proses.
+
+## Prinsip validasi dan batasan
+
+- Status `Aktif` bukan bukti resmi retailer; status periode, validasi produk, dan verifikasi sumber dipisahkan.
+- Harga promo hanya diambil jika dapat ditelusuri ke teks penawaran yang relevan. Nominal QRIS/cashback, cashback pembayaran, syarat minimum belanja, judul editorial, dan nama produk kosong tidak dianggap harga SKU.
+- Diskon kampanye tidak otomatis diwariskan ke semua produk; harga referensi hanya alat pembanding dan tetap diberi label estimasi.
+- Bundling beli-gratis dan hadiah lintas-SKU tidak disamakan dengan diskon produk tunggal. Periode yang diinferensikan tetap berstatus estimasi.
+- Situs dapat mengubah struktur, membatasi request, atau mengembalikan data tidak lengkap. Verifikasi resmi langsung pada retailer dan OCR brosur tidak dijalankan otomatis.
+
+## Pengujian
+
+```cmd
 python -m compileall -q engine
-python engine/promo_names.py
-python engine/promo_multisource_collector.py --self-test
+python engine\promo_names.py
+python engine\promo_multisource_collector.py --self-test
 python -m pytest -q engine
 ```
-
-CI juga menjalankan kompilasi dan suite tes regresi.
-
-## Batasan
-
-Situs dapat mengubah struktur, membatasi request, atau mengembalikan data yang tidak lengkap. OCR gambar dan verifikasi langsung otomatis ke situs resmi retailer belum termasuk. Database harga referensi bersifat self-learning dari bukti harga normal yang terlihat pada sumber aktif, jadi tidak akan mengisi semua produk sejak run pertama. Kandidat review dan diskon dari referensi historis tetap perlu dicek bila akan digunakan untuk publikasi atau keputusan pembelian.

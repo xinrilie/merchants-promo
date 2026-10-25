@@ -251,6 +251,34 @@ def test_price_reference_calculation_passes_gate_only_with_source_and_evidence(t
     assert "reference_discount_without_valid_reference" in issues
 
 
+def test_missing_normal_price_is_recovered_from_explicit_offer_text_and_discount_calculated():
+    row = _promo_without_normal(
+        offer_text="Harga Promo Rp15.000 dari harga normalnya Rp20.000",
+        raw_line="Susu UHT: Harga Promo Rp15.000 dari harga normalnya Rp20.000",
+    )
+    summary = enhancer.apply_price_reference([row], [], today=TODAY)
+    assert row["normal_price"] == 20000
+    assert row["normal_price_provenance"] == "current_offer_evidence"
+    assert row["normal_price_evidence_text"]
+    assert row["discount_percent"] == 25.0
+    assert row["discount_percent_basis"] == "calculated_from_unit_prices"
+    assert row["discount_savings_rp"] == 5000
+    assert summary["normal_prices_recovered_from_offer_text"] == 1
+    assert summary["discounts_calculated_from_recovered_source_prices"] == 1
+
+
+def test_explicit_normal_price_recovery_is_blocked_for_bundle_offer():
+    row = _promo_without_normal(
+        offer_text="Beli 3 lebih hemat Rp11.200 dari harga normal Rp12.600",
+        raw_line="Beli 3 lebih hemat Rp11.200 dari harga normal Rp12.600",
+        price_basis="bundle_offer_amount",
+        purchase_condition="Beli 3",
+    )
+    enhancer.apply_price_reference([row], [], today=TODAY)
+    assert row["normal_price"] is None
+    assert row["discount_percent"] is None
+
+
 def test_expired_reference_is_not_used_to_infer_discount(tmp_path):
     path = tmp_path / "reference.csv"
     _write_reference(path, [_reference_dict(observed_at="2026-08-01T10:00:00+07:00")])
@@ -341,7 +369,8 @@ def test_excel_exports_reference_database_and_clearly_labels_reference_discount(
         assert "Harga Normal Referensi (Rp)" in headers
         assert "Dasar Diskon" in headers
         assert "URL Referensi Harga" in headers
-        assert headers[:6] == ["Nama Produk", "Kategori Produk", "Merchant", "Harga Promo (Rp)", "Harga Asli dari Sumber (Rp)", "Harga Normal Referensi (Rp)"]
+        assert headers[:7] == ["Nama Produk", "Kategori Produk", "Merchant", "Harga Asli (Rp)", "Harga Promo (Rp)", "Diskon (%)", "Basis Harga Asli"]
+        assert headers[7:11] == ["Harga Asli dari Sumber (Rp)", "Harga Normal Referensi (Rp)", "Rentang Referensi Harga (Rp)", "Dasar Diskon"]
         assert headers.index("Merchant Acuan Referensi") < headers.index("Sumber Referensi Harga")
         values = list(active.iter_rows(min_row=2, max_row=2, values_only=True))[0]
         row_values = dict(zip(headers, values))

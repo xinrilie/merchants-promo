@@ -26,8 +26,9 @@ REFERENCE_FIELDS = [
     "size_signature", "variant_signature", "normal_price", "observed_at",
     "source_name", "source_url", "evidence_text", "record_origin",
     "verification_status", "region_or_channel", "campaign_title", "reference_key",
+    "normal_price_low", "normal_price_high", "price_unit", "reference_note",
 ]
-ALLOWED_ORIGINS = {"observed_scrape", "manual_verified"}
+ALLOWED_ORIGINS = {"observed_scrape", "manual_verified", "user_supplied_estimate"}
 EXPLICIT_NORMAL_PRICE_LABEL_RE = re.compile(
     r"\b(?:harga\s+(?:normal|asli|reguler|sebelum\s+promo)|normal\s+price|regular\s+price)\b",
     re.I,
@@ -125,9 +126,21 @@ def load_reference_database(path: str | Path) -> list[dict]:
         origin = row.get("record_origin", "").casefold()
         if (
             not row.get("merchant_key") or not row.get("product_key") or price is None or price <= 0
-            or not observed or not row.get("source_url") or not row.get("evidence_text")
-            or origin not in ALLOWED_ORIGINS
+            or not observed or origin not in ALLOWED_ORIGINS or not row.get("evidence_text")
         ):
+            continue
+        if origin == "user_supplied_estimate":
+            low = _price_int(row.get("normal_price_low"))
+            high = _price_int(row.get("normal_price_high"))
+            # This is a user-provided approximate range, not a source-verified price.
+            # No fabricated URL or official-retailer claim is required.
+            if low is None or high is None or low <= 0 or high < low or not (low <= price <= high):
+                continue
+            row["normal_price_low"] = str(low)
+            row["normal_price_high"] = str(high)
+            result.append(row)
+            continue
+        if not row.get("source_url"):
             continue
         if origin == "manual_verified" and row.get("verification_status", "").casefold() != "retailer_official":
             continue
@@ -136,6 +149,8 @@ def load_reference_database(path: str | Path) -> list[dict]:
         evidence = find_amount_evidence(row["evidence_text"], price, "normal")
         if not evidence:
             continue
+        row["normal_price_low"] = str(price)
+        row["normal_price_high"] = str(price)
         row["normal_price"] = str(price)
         row["evidence_text"] = evidence
         result.append(row)
@@ -376,6 +391,18 @@ def find_reference_price(
     def choose(candidates: list[dict], scope: str) -> dict | None:
         if not candidates:
             return None
+        # Prefer a recent observed price over a manual estimate, even if the estimate
+        # was entered more recently. Fall back to the user-supplied range only when
+        # no observed price in this merchant scope is fresh enough.
+        fresh_candidates = [
+            row for row in candidates
+            if (today - _parse_date(row.get("observed_at"))).days <= max_age_days
+        ]
+        observed_fresh = [row for row in fresh_candidates if row.get("record_origin", "") != "user_supplied_estimate"]
+        if observed_fresh:
+            candidates = observed_fresh
+        elif fresh_candidates:
+            candidates = fresh_candidates
         latest_sort = max(_timestamp_sort_key(row.get("observed_at")) for row in candidates)
         latest = [row for row in candidates if _timestamp_sort_key(row.get("observed_at")) == latest_sort]
         latest_date = max(_parse_date(row.get("observed_at")) for row in latest if _parse_date(row.get("observed_at")))
@@ -408,6 +435,10 @@ def find_reference_price(
             "evidence_text": chosen.get("evidence_text"),
             "verification_status": chosen.get("verification_status"),
             "record_origin": chosen.get("record_origin"),
+            "normal_price_low": _price_int(chosen.get("normal_price_low")) or chosen_price,
+            "normal_price_high": _price_int(chosen.get("normal_price_high")) or chosen_price,
+            "price_unit": chosen.get("price_unit", ""),
+            "reference_note": chosen.get("reference_note", ""),
             "max_age_days": max_age_days,
         }
 

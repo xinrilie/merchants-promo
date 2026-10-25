@@ -1,26 +1,43 @@
-# Ringkasan Revisi Database Referensi Harga
+# Ringkasan Revisi — Referensi Harga & Kolom Excel
 
 ## Perubahan
 
-- Database `data/product_price_reference.csv` menyimpan nilai referensi terbaru untuk kombinasi produk/ukuran/varian, merchant, kanal, dan asal rekaman. Harga normal baru yang lebih mutakhir langsung menggantikan harga sebelumnya; kenaikan maupun penurunan harga diterapkan.
-- Database tidak dimaksudkan sebagai arsip historis harian. Rekaman lama per slot diringkas ke observasi terbaru yang tersedia. Jika beberapa bukti memiliki timestamp yang sama persis tetapi nominal berbeda, keduanya dipertahankan agar pencocokan menandai konflik.
-- Referensi untuk merchant promo yang sama selalu menjadi prioritas, dengan pencocokan nama/ukuran/varian persis dan kanal yang sama.
-- Jika tidak ada referensi terbaru yang layak untuk merchant tersebut, sistem dapat memakai referensi produk persis dari merchant lain. Keluaran menampilkan `Merchant Acuan Referensi`, status fallback, dan dasar diskon yang menyebut bahwa acuannya dari merchant lain.
-- Harga dari referensi tidak pernah ditulis ke kolom `Harga Asli dari Sumber (Rp)`. Nilainya tetap di `Harga Normal Referensi (Rp)` dan diskon hasilnya tetap ditandai sebagai estimasi pembanding.
-- Urutan kolom utama workbook sekarang memprioritaskan nama produk, kategori, merchant, harga promo, harga asli dari sumber, harga acuan, diskon, status/periode promo, validasi, dan informasi sumber. Detail audit berada lebih ke kanan.
+- Memasukkan **102 rentang harga referensi manual** dari daftar yang diberikan pengguna, termasuk batas minimum, maksimum, titik tengah estimasi, satuan, kategori, asal referensi, tanggal input, dan catatan.
+- Menambahkan **89 alias katalog terpilih** untuk variasi nama di CSV promo agar dapat dicocokkan tanpa fuzzy matching saat runtime. Alias penawaran kondisional “Nestle … Beli 2 Lebih” dikeluarkan agar tidak diperlakukan sebagai identitas SKU biasa.
+- Database `data/product_price_reference.csv` kini berisi **394 rekaman**: 228 observasi scrape dan 166 estimasi dari referensi pengguna/alias. Seeder membangun ulang slot `user_supplied_estimate` dari daftar rentang dan alias aktif, tetapi mempertahankan observasi sumber.
+- Referensi pada merchant yang sama diprioritaskan. Jika tidak tersedia, acuan umum/merchant lain dapat menjadi fallback yang ditandai di Excel.
+- Harga promo dengan harga asli kosong kini dapat memakai titik tengah rentang sebagai `Harga Asli (Rp)` jika SKU/satuan cocok, transaksi tidak bersyarat, nilai promo masih dalam rentang yang masuk akal, dan rentang tidak terlalu lebar. Harga asli dari sumber tetap terpisah dan tidak dipalsukan oleh estimasi.
+- Diskon dihitung dari harga asli sumber atau dari titik tengah referensi saat layak. Klaim diskon sumber yang berbeda dari hitungan disimpan dalam `Klaim Diskon Sumber (Review) (%)`; promo paket/beli banyak dan harga tidak sebanding tidak dihitung otomatis.
+- Harga normal yang secara eksplisit disebut dalam detail penawaran dapat dipulihkan bila parser awal melewatkannya, kecuali penawaran tampak seperti bundling/syarat transaksi.
+- Urutan kolom utama diubah menjadi `Harga Asli (Rp)` → `Harga Promo (Rp)` → `Diskon (%)`, kemudian basis harga asli, nilai asli dari sumber, referensi tengah/rentang, dan dasar diskon.
+- Workbook menampilkan sheet `Referensi Harga` untuk seluruh database dan `Rentang Referensi Pengguna` untuk 102 rentang kanonis.
 
-## Syarat penggunaan referensi
+## Hasil pengolahan CSV/XLSX yang dilampirkan
 
-- Harga baru tetap harus berasal dari baris produk valid, sumber URL aktif, bukti teks yang jelas menyebut harga normal/asli/reguler, timestamp segar, serta tidak terkena flag harga yang perlu review.
-- Pencocokan hanya exact identity; variasi rasa, ukuran, dan SKU yang tidak sama tidak dipaksakan cocok.
-- Harga referensi maksimal berumur 30 hari untuk perhitungan diskon. Referensi tua, harga yang konflik pada timestamp yang sama, penawaran bundling, hadiah lintas-SKU, pembayaran, cashback, serta penawaran bersyarat tidak digunakan untuk menghitung diskon SKU biasa.
-- Harga yang berasal dari agregator tetap `aggregator_only`, bukan bukti harga resmi retailer.
+- 457 baris katalog promo diproses ulang.
+- 98 baris memiliki kecocokan ke salah satu rentang/alias referensi.
+- 54 baris diisi `Harga Asli (Rp)` dengan titik tengah referensi pengguna.
+- 51 diskon dihitung dari titik tengah rentang referensi.
+- 27 harga normal yang sudah tertulis eksplisit di detail penawaran dipulihkan ke kolom harga asli sumber.
+- 14 penawaran bersyarat/paket dan 9 harga di luar rentang tidak dipaksakan menjadi diskon estimasi; rentang lebar juga ditahan dari perhitungan otomatis.
+
+Angka di atas berlaku untuk katalog yang diunggah pada sesi ini, bukan jaminan jumlah pada scraping berikutnya. Rentang harga adalah acuan perkiraan dari pengguna, bukan verifikasi harga retailer.
+
+## Perubahan file utama
+
+- `engine/promo_price_reference.py`
+- `engine/enrich_existing_promo_catalog_multisource.py`
+- `engine/seed_user_price_references.py`
+- `engine/test_price_reference.py`
+- `data/product_price_reference.csv`
+- `data/user_product_price_ranges.csv`
+- `data/user_product_price_reference_aliases.csv`
 
 ## Verifikasi
 
 - `python -m compileall -q engine`: lulus.
-- `python -m pytest -q engine`: 89 tes lulus setelah perubahan fallback merchant dan pembaruan harga.
+- `python -m pytest -q engine`: **91 tes lulus**.
 
 ## Batasan
 
-Fallback lintas merchant adalah pembanding, bukan jaminan harga normal toko promo yang sedang berjalan. Sebelum dipakai untuk publikasi, periksa tanggal observasi, merchant acuan, URL, dan bukti harga yang ditampilkan.
+Harga dari daftar rentang dan hasil fallback tidak dinyatakan sebagai harga resmi retailer. Referensi tidak digunakan untuk menghitung diskon ketika transaksi bersyarat, harga promo di luar rentang, satuan tidak sebanding, atau rentang terlalu lebar. Cek kolom `Basis Harga Asli`, `Merchant Acuan Referensi`, `Status Referensi Harga`, `Dasar Diskon`, dan `Catatan` sebelum mempublikasikan diskon estimasi.

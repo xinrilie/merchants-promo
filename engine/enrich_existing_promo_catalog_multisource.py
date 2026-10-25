@@ -55,8 +55,9 @@ FIELDS = [
     "promo_price", "normal_price", "normal_price_provenance", "reference_normal_price",
     "reference_price_source_name", "reference_price_merchant_name", "reference_price_match_scope",
     "reference_price_source_url", "reference_price_evidence_text", "reference_price_observed_at",
-    "reference_price_age_days", "reference_price_match_status",
-    "discount_percent", "discount_percent_basis",
+    "reference_price_age_days", "reference_price_match_status", "reference_price_record_origin",
+    "reference_price_low", "reference_price_high", "reference_price_unit", "reference_price_note",
+    "reference_primary_display_allowed", "discount_percent", "discount_percent_basis",
     "discount_percent_confidence", "discount_percent_calculated", "discount_savings_rp",
     "estimated_bundle_discount_percent", "campaign_discount_percent",
     "promo_price_evidence_text", "normal_price_evidence_text", "discount_evidence_text",
@@ -1804,8 +1805,64 @@ def _reference_block_reason(row):
     return None
 
 
+EXPLICIT_NORMAL_PRICE_TEXT_RE = re.compile(
+    r"(?:harga\s+(?:normal|asli|reguler)(?:nya)?)\s*(?:adalah\s*)?(?:[:=]\s*)?(?:rp\.?\s*)?(\d[\d.,]*\d|\d)",
+    re.I,
+)
+CONDITIONAL_PRICE_TEXT_RE = re.compile(
+    r"\b(?:beli|buy)\s*\d+.*?(?:gratis|get)\s*\d+|"
+    r"\b(?:cashback|cash\s*back|qris|voucher|kupon|minimum|minimal|min\.?\s*belanja|"
+    r"pembayaran|transaksi|kartu\s+kredit|tebus\s+murah|harga\s+member|"
+    r"khusus\s+member|maksimal\s+\d+\s*pcs)\b|"
+    r"\b(?:bonus|free\s+gift|hadiah)\b|\b(?:bundling|bundle|paket)\b",
+    re.I,
+)
+
+
+def recover_explicit_normal_price_from_offer(row):
+    """Recover a clearly labelled source normal price missed by the initial parser.
+
+    Do not recover amounts from buy-X/get-Y, bundle, payment, member, or minimum-
+    purchase offers, because those may not be comparable single-item prices.
+    """
+    if as_int(row.get("normal_price")) is not None:
+        return False
+    text = " ".join(str(row.get(k) or "") for k in (
+        "offer_text", "normal_price_evidence_text", "raw_line"
+    )).strip()
+    if not text or CONDITIONAL_PRICE_TEXT_RE.search(text):
+        return False
+    if str(row.get("price_basis") or "").casefold() != "offer_price":
+        return False
+    match = EXPLICIT_NORMAL_PRICE_TEXT_RE.search(text)
+    if not match:
+        return False
+    amount = as_int(match.group(1))
+    if amount is None or amount <= 0:
+        return False
+    evidence = find_amount_evidence(text, amount, "normal")
+    if not evidence:
+        return False
+    row["normal_price"] = amount
+    row["normal_price_provenance"] = "current_offer_evidence"
+    row["normal_price_evidence_text"] = evidence
+    row["normal_price_recovered_from_offer_text"] = True
+    flags = [part.strip() for part in str(row.get("price_quality_flag") or "").split("|") if part.strip()]
+    flags = [part for part in flags if part not in {
+        "normal_price_parse_failed_or_unverified", "normal_price_without_matching_offer_evidence"
+    }]
+    row["price_quality_flag"] = " | ".join(flags) or None
+    return True
+
+
 def apply_price_reference(rows, references, today=TODAY, max_age_days=PRICE_REFERENCE_MAX_AGE_DAYS):
-    """Attach exact, recent historical normal-price references without fabricating source prices."""
+    """Attach price references and calculate discounts where product prices are comparable.
+
+    If the current offer has no original price, a user-supplied range reference may
+    populate the display original price using its midpoint. The source original-price
+    field remains blank and the estimate is clearly labelled. Real observed merchant
+    prices are preferred to manual ranges by ``find_reference_price``.
+    """
     summary = {
         "rows_checked": 0,
         "exact_recent_references_found": 0,
@@ -1816,6 +1873,10 @@ def apply_price_reference(rows, references, today=TODAY, max_age_days=PRICE_REFE
         "stale_reference_not_used": 0,
         "ambiguous_reference_not_used": 0,
         "not_comparable_offer_rows": 0,
+        "user_range_reference_matches": 0,
+        "reference_matches_not_used_due_price_sanity": 0,
+        "normal_prices_recovered_from_offer_text": 0,
+        "discounts_calculated_from_recovered_source_prices": 0,
     }
     for row in rows:
         row.setdefault("reference_normal_price", None)
@@ -1827,13 +1888,40 @@ def apply_price_reference(rows, references, today=TODAY, max_age_days=PRICE_REFE
         row.setdefault("reference_price_observed_at", None)
         row.setdefault("reference_price_age_days", None)
         row.setdefault("reference_price_match_status", "not_checked")
+        row.setdefault("reference_price_record_origin", None)
+        row.setdefault("reference_price_low", None)
+        row.setdefault("reference_price_high", None)
+        row.setdefault("reference_price_unit", None)
+        row.setdefault("reference_price_note", None)
+        row.setdefault("reference_primary_display_allowed", False)
+        recovered_normal_price = recover_explicit_normal_price_from_offer(row)
         if as_int(row.get("normal_price")) is not None:
             row["normal_price_provenance"] = "current_offer_evidence"
             row["reference_price_match_status"] = "not_needed_current_normal_price_available"
-            continue
-        promo = as_int(row.get("promo_price"))
-        if promo is None or promo <= 0:
-            row["reference_price_match_status"] = "not_requested_no_valid_promo_price"
+            row["reference_primary_display_allowed"] = True
+            if recovered_normal_price:
+                promo = as_int(row.get("promo_price"))
+                normal = as_int(row.get("normal_price"))
+                if promo is not None and promo > 0 and normal is not None and normal > promo:
+                    calculated = round((normal - promo) / normal * 100, 1)
+                    existing_discount = as_decimal(row.get("discount_percent"))
+                    if existing_discount is None or abs(float(existing_discount) - calculated) > float(DISCOUNT_PRICE_MATH_TOLERANCE):
+                        if existing_discount is not None and row.get("source_discount_claim_percent") in (None, ""):
+                            row["source_discount_claim_percent"] = float(existing_discount)
+                        row["discount_percent"] = calculated
+                        row["discount_percent_calculated"] = calculated
+                        row["discount_percent_basis"] = "calculated_from_unit_prices"
+                        row["discount_percent_confidence"] = "medium"
+                        row["discount_savings_rp"] = normal - promo
+                        row["discount_evidence_text"] = (
+                            f"Harga promo Rp{promo:,} dibanding harga normal Rp{normal:,} yang tertulis di detail penawaran"
+                        )
+                        row["discount_mismatch_note"] = "Diskon dihitung dari harga normal yang tertulis eksplisit; klaim sumber lama disimpan untuk pemeriksaan" if existing_discount is not None else None
+                        summary["discounts_calculated_from_recovered_source_prices"] += 1
+                    else:
+                        row["discount_percent_calculated"] = calculated
+                        row["discount_savings_rp"] = normal - promo
+                summary["normal_prices_recovered_from_offer_text"] += 1
             continue
         if row.get("product_validation_status") != "eligible" or not row.get("merchant_name") or not row.get("product_text"):
             row["reference_price_match_status"] = "identity_not_eligible"
@@ -1866,25 +1954,68 @@ def apply_price_reference(rows, references, today=TODAY, max_age_days=PRICE_REFE
         row["reference_price_evidence_text"] = ref.get("evidence_text")
         row["reference_price_observed_at"] = ref.get("observed_at")
         row["reference_price_age_days"] = ref.get("age_days")
-        row["normal_price_provenance"] = "recent_price_reference"
+        row["reference_price_record_origin"] = ref.get("record_origin")
+        row["reference_price_low"] = as_int(ref.get("normal_price_low")) or ref_price
+        row["reference_price_high"] = as_int(ref.get("normal_price_high")) or ref_price
+        row["reference_price_unit"] = ref.get("price_unit")
+        row["reference_price_note"] = ref.get("reference_note")
+        row["normal_price_provenance"] = (
+            "user_supplied_reference_estimate" if ref.get("record_origin") == "user_supplied_estimate"
+            else "recent_price_reference"
+        )
         summary["exact_recent_references_found"] += 1
         if ref.get("match_scope") == "cross_merchant":
             summary["cross_merchant_references_found"] += 1
+        if ref.get("record_origin") == "user_supplied_estimate":
+            summary["user_range_reference_matches"] += 1
 
-        # Keep an explicit source discount claim intact. The database is only used
-        # to calculate a discount if the current offer has no SKU-level discount.
-        if row.get("discount_percent") not in (None, "") or row.get("estimated_bundle_discount_percent") not in (None, ""):
-            row["reference_price_match_status"] = (
-                "matched_cross_merchant_reference_discount_claim_already_present"
-                if ref.get("match_scope") == "cross_merchant"
-                else "matched_reference_discount_claim_already_present"
-            )
+        promo = as_int(row.get("promo_price"))
+        # A missing offer price does not prevent the reference from being displayed,
+        # but a discount can only be calculated when a numeric promo price exists.
+        if promo is None or promo <= 0:
+            row["reference_primary_display_allowed"] = True
+            row["reference_price_match_status"] = "matched_recent_user_range_no_promo_price" if ref.get("record_origin") == "user_supplied_estimate" else row["reference_price_match_status"]
             continue
+
         blocked = _reference_block_reason(row)
         if blocked:
             row["reference_price_match_status"] = blocked
             summary["not_comparable_offer_rows"] += 1
             continue
+
+        ref_low = as_int(ref.get("normal_price_low")) or ref_price
+        ref_high = as_int(ref.get("normal_price_high")) or ref_price
+        # Avoid filling an alleged original price if the promo amount is implausibly
+        # outside the supplied range, which often signals a pack/unit mismatch.
+        if promo > ref_high or promo < ref_low * 0.25:
+            row["reference_price_match_status"] = "promo_price_outside_reference_range"
+            row["reference_primary_display_allowed"] = False
+            summary["reference_matches_not_used_due_price_sanity"] += 1
+            continue
+        row["reference_primary_display_allowed"] = promo <= ref_price
+
+        # For user ranges, calculate from the midpoint and keep any source discount
+        # claim in its dedicated review column. Bundles and conditional offers were
+        # already excluded above.
+        if row.get("discount_percent") not in (None, "") or row.get("estimated_bundle_discount_percent") not in (None, ""):
+            origin = ref.get("record_origin")
+            basis = str(row.get("discount_percent_basis") or "").casefold()
+            if origin == "user_supplied_estimate" and basis in {"explicit_offer", "explicit_max"}:
+                if row.get("source_discount_claim_percent") in (None, ""):
+                    row["source_discount_claim_percent"] = row.get("discount_percent")
+                row["discount_percent"] = None
+                row["discount_percent_calculated"] = None
+                row["discount_savings_rp"] = None
+                row["discount_percent_basis"] = None
+                row["discount_percent_confidence"] = None
+            else:
+                row["reference_price_match_status"] = (
+                    "matched_cross_merchant_reference_discount_claim_already_present"
+                    if ref.get("match_scope") == "cross_merchant"
+                    else "matched_reference_discount_claim_already_present"
+                )
+                continue
+
         if ref_price <= promo:
             row["reference_price_match_status"] = (
                 "matched_cross_merchant_reference_not_higher_than_promo"
@@ -1900,14 +2031,17 @@ def apply_price_reference(rows, references, today=TODAY, max_age_days=PRICE_REFE
         row["discount_percent_calculated"] = percent
         row["discount_savings_rp"] = savings
         row["discount_percent_basis"] = "calculated_from_price_reference"
-        row["discount_percent_confidence"] = "medium"
+        row["discount_percent_confidence"] = "low" if ref.get("record_origin") == "user_supplied_estimate" else "medium"
         row["discount_evidence_text"] = (
+            f"Harga promo Rp{promo:,} dibanding rentang acuan Rp{ref_low:,}–Rp{ref_high:,}; "
+            f"titik tengah Rp{ref_price:,} dari {ref.get('source_name')} (bukan harga normal terverifikasi retailer)"
+            if ref.get("record_origin") == "user_supplied_estimate" else
             f"Harga promo Rp{promo:,} dibanding referensi harga normal Rp{ref_price:,}; "
             f"observasi {ref.get('observed_at')} dari {ref.get('source_name')}"
         )
         row["data_quality_flags"] = " | ".join(pipe_unique([
             row.get("data_quality_flags") or "",
-            "discount_calculated_from_recent_historical_price_reference",
+            "discount_calculated_from_user_supplied_reference_range" if ref.get("record_origin") == "user_supplied_estimate" else "discount_calculated_from_recent_historical_price_reference",
         ])) or None
         if ref.get("match_scope") == "cross_merchant":
             row["reference_price_match_status"] = "matched_cross_merchant_and_discount_calculated_from_reference"
@@ -1922,6 +2056,9 @@ def apply_price_reference(rows, references, today=TODAY, max_age_days=PRICE_REFE
 def discount_basis_display(row):
     basis = str(row.get("discount_percent_basis") or "").casefold()
     if basis == "calculated_from_price_reference":
+        if row.get("reference_price_record_origin") == "user_supplied_estimate":
+            scope_text = " dari acuan merchant lain" if row.get("reference_price_match_scope") == "cross_merchant" else ""
+            return "Estimasi dari titik tengah rentang referensi pengguna" + scope_text
         age = row.get("reference_price_age_days")
         age_text = f" ({age} hari)" if age not in (None, "") else ""
         scope_text = " merchant lain" if row.get("reference_price_match_scope") == "cross_merchant" else ""
@@ -1942,6 +2079,21 @@ def discount_basis_display(row):
 
 def reference_price_status_display(row):
     status = str(row.get("reference_price_match_status") or "").casefold()
+    if row.get("reference_price_record_origin") == "user_supplied_estimate":
+        if status == "matched_and_discount_calculated_from_reference":
+            return "Diskon estimasi dari rentang acuan pengguna (titik tengah)"
+        if status == "matched_cross_merchant_and_discount_calculated_from_reference":
+            return "Diskon estimasi dari rentang acuan pengguna; fallback merchant lain"
+        if status == "matched_recent_user_range_no_promo_price":
+            return "Rentang acuan pengguna; belum ada harga promo numerik"
+        if status == "promo_price_outside_reference_range":
+            return "Referensi pengguna ada; harga promo di luar rentang, perlu cek SKU/satuan"
+        if status in {"matched_recent_exact", "matched_recent_cross_merchant"}:
+            return "Rentang acuan dari pengguna; bukan harga retailer terverifikasi"
+        if status == "matched_reference_not_higher_than_promo":
+            return "Referensi pengguna tidak lebih tinggi dari harga promo"
+        if status == "matched_cross_merchant_reference_not_higher_than_promo":
+            return "Referensi pengguna/merchant lain tidak lebih tinggi dari harga promo"
     labels = {
         "not_checked": "Belum diperiksa",
         "not_needed_current_normal_price_available": "Harga normal ada pada penawaran saat ini",
@@ -1955,6 +2107,8 @@ def reference_price_status_display(row):
         "matched_cross_merchant_reference_not_higher_than_promo": "Referensi merchant lain tidak lebih tinggi dari harga promo",
         "matched_reference_discount_claim_already_present": "Referensi cocok; memakai klaim diskon sumber",
         "matched_reference_not_higher_than_promo": "Referensi merchant sama tidak lebih tinggi dari harga promo",
+        "matched_recent_user_range_no_promo_price": "Estimasi referensi pengguna; harga promo tidak tersedia",
+        "promo_price_outside_reference_range": "Harga promo di luar rentang referensi; tidak dipakai untuk hitung diskon",
         "reference_too_old": "Referensi terlalu lama; tidak digunakan",
         "conflicting_prices_same_day": "Harga referensi konflik; tidak digunakan",
         "no_exact_match": "Belum ada referensi yang cocok persis",
@@ -2116,14 +2270,27 @@ def export_quality_gate_issues(row):
         promo_price = as_int(row.get("promo_price"))
         ref_evidence = str(row.get("reference_price_evidence_text") or "").strip()
         age = as_int(row.get("reference_price_age_days"))
-        ref_valid = (
-            ref_price is not None and ref_price > 0 and promo_price is not None and 0 < promo_price < ref_price
-            and bool(row.get("reference_price_source_url"))
-            and bool(EXPLICIT_NORMAL_PRICE_LABEL_RE.search(ref_evidence))
-            and bool(find_amount_evidence(ref_evidence, ref_price, "normal"))
-            and row.get("reference_price_match_status") == "matched_and_discount_calculated_from_reference"
-            and age is not None and 0 <= age <= PRICE_REFERENCE_MAX_AGE_DAYS
-        )
+        user_estimate = row.get("reference_price_record_origin") == "user_supplied_estimate"
+        calculated_statuses = {"matched_and_discount_calculated_from_reference", "matched_cross_merchant_and_discount_calculated_from_reference"}
+        if user_estimate:
+            low = as_int(row.get("reference_price_low"))
+            high = as_int(row.get("reference_price_high"))
+            ref_valid = (
+                ref_price is not None and low is not None and high is not None and low <= ref_price <= high
+                and promo_price is not None and 0 < promo_price < ref_price
+                and bool(row.get("reference_price_source_name"))
+                and "rentang acuan pengguna" in ref_evidence.casefold()
+                and row.get("reference_price_match_status") in calculated_statuses
+            )
+        else:
+            ref_valid = (
+                ref_price is not None and ref_price > 0 and promo_price is not None and 0 < promo_price < ref_price
+                and bool(row.get("reference_price_source_url"))
+                and bool(EXPLICIT_NORMAL_PRICE_LABEL_RE.search(ref_evidence))
+                and bool(find_amount_evidence(ref_evidence, ref_price, "normal"))
+                and row.get("reference_price_match_status") == "matched_and_discount_calculated_from_reference"
+                and age is not None and 0 <= age <= PRICE_REFERENCE_MAX_AGE_DAYS
+            )
         if not ref_valid:
             issues.append("reference_discount_without_valid_reference")
         elif discount is not None:
@@ -2314,10 +2481,13 @@ CLEAN_COLUMNS = [
     ("Nama Produk", "product_text"),
     ("Kategori Produk", "product_category"),
     ("Merchant", "merchant_name"),
+    ("Harga Asli (Rp)", "display_normal_price"),
     ("Harga Promo (Rp)", "promo_price"),
+    ("Diskon (%)", "discount_percent"),
+    ("Basis Harga Asli", "display_normal_price_basis"),
     ("Harga Asli dari Sumber (Rp)", "normal_price"),
     ("Harga Normal Referensi (Rp)", "reference_normal_price"),
-    ("Diskon (%)", "discount_percent"),
+    ("Rentang Referensi Harga (Rp)", "reference_price_range_display"),
     ("Dasar Diskon", "discount_basis_label"),
     ("Status Promo", "display_status"),
     ("Mulai Berlaku", "valid_from"),
@@ -2415,6 +2585,28 @@ def make_clean_row(row, review=False):
     item["discount_basis_label"] = discount_basis_display(row)
     item["reference_price_status_display"] = reference_price_status_display(row)
     item["freshness_display"] = freshness_display_label(row.get("freshness_status"))
+    actual_normal = as_int(row.get("normal_price"))
+    reference_normal = as_int(row.get("reference_normal_price"))
+    if actual_normal is not None:
+        item["display_normal_price"] = actual_normal
+        item["display_normal_price_basis"] = "Harga asli yang tercantum pada sumber promo"
+    elif reference_normal is not None and row.get("reference_primary_display_allowed"):
+        item["display_normal_price"] = reference_normal
+        if row.get("reference_price_record_origin") == "user_supplied_estimate":
+            item["display_normal_price_basis"] = "Estimasi dari titik tengah rentang referensi pengguna"
+        elif row.get("reference_price_match_scope") == "cross_merchant":
+            item["display_normal_price_basis"] = "Estimasi dari harga referensi merchant lain"
+        else:
+            item["display_normal_price_basis"] = "Referensi harga historis; bukan harga asli pada promo saat ini"
+    else:
+        item["display_normal_price"] = None
+        item["display_normal_price_basis"] = "Belum ada harga asli/referensi yang layak digunakan"
+    low = as_int(row.get("reference_price_low"))
+    high = as_int(row.get("reference_price_high"))
+    if low is not None and high is not None:
+        item["reference_price_range_display"] = f"Rp{low:,}–Rp{high:,}".replace(",", ".")
+    else:
+        item["reference_price_range_display"] = None
     out = {label: item.get(key) for label, key in CLEAN_COLUMNS}
     if review and not str(out.get("Nama Produk") or "").strip():
         # The review sheet should be readable, while the full audit retains the
@@ -2840,7 +3032,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
             ws.append([row.get(h) for h in headers])
         width_by_header = {
             "Nama Produk": 38, "Kategori Produk": 31, "Subkategori": 28,
-            "Harga Asli dari Sumber (Rp)": 18, "Harga Normal Referensi (Rp)": 20, "Harga Promo (Rp)": 15,
+            "Harga Asli (Rp)": 16, "Basis Harga Asli": 40, "Harga Asli dari Sumber (Rp)": 18, "Harga Normal Referensi (Rp)": 20, "Rentang Referensi Harga (Rp)": 24, "Harga Promo (Rp)": 15,
             "Diskon (%)": 12, "Dasar Diskon": 38, "Status Referensi Harga": 42, "Merchant": 22, "Merchant Acuan Referensi": 24,
             "Hemat / Selisih Referensi (Rp)": 22, "Umur Referensi (hari)": 16,
             "Tanggal Observasi Referensi": 24, "Sumber Referensi Harga": 24, "URL Referensi Harga": 52,
@@ -2861,7 +3053,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
             for col_cells in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
                 cell = col_cells[0]
                 cell.alignment = Alignment(vertical="top", wrap_text=field in {"Nama Produk", "Kategori Produk", "Subkategori", "Kesegaran Data", "Klaim Diskon Sumber (Review) (%)", "Detail Penawaran", "Kampanye", "Catatan", "Sumber URL", "URL Referensi Harga", "Dasar Diskon", "Sumber Referensi Harga", "Alasan Review"})
-                if field in {"Harga Asli dari Sumber (Rp)", "Harga Normal Referensi (Rp)", "Harga Promo (Rp)", "Hemat / Selisih Referensi (Rp)"}:
+                if field in {"Harga Asli (Rp)", "Harga Asli dari Sumber (Rp)", "Harga Normal Referensi (Rp)", "Harga Promo (Rp)", "Hemat / Selisih Referensi (Rp)"}:
                     cell.number_format = '#,##0'
                 elif field == "Diskon (%)":
                     cell.number_format = '0.0"%"'
@@ -3005,36 +3197,81 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
 
-    # A visible, auditable view of the persistent reference-price database.
+    # A visible, auditable view of the persistent reference-price database,
+    # including user-provided ranges and the provenance of every estimate.
     reference_records = load_reference_database(PRICE_REFERENCE_CSV)
     ws = wb.create_sheet("Referensi Harga")
     reference_headers = [
-        "Merchant", "Nama Produk", "Harga Normal (Rp)", "Tanggal Observasi", "Sumber",
-        "URL Sumber", "Bukti Harga Normal", "Asal Rekaman", "Status Verifikasi", "Wilayah/Kanal",
+        "Merchant Acuan", "Nama Produk Referensi / Alias", "Harga Normal Referensi (Rp)",
+        "Harga Minimum (Rp)", "Harga Maksimum (Rp)", "Satuan / Basis Harga", "Asal Rekaman",
+        "Status Verifikasi", "Tanggal Observasi/Referensi", "Sumber / Provenans", "URL Sumber",
+        "Bukti / Rationale", "Kampanye / Catatan Sumber", "Catatan Referensi", "Kanal / Wilayah", "Kunci Produk",
     ]
     ws.append(reference_headers)
     for record in sorted(reference_records, key=lambda r: (
         str(r.get("merchant_name") or "").casefold(),
         str(r.get("product_text") or "").casefold(),
+        str(r.get("record_origin") or ""),
         str(r.get("observed_at") or ""),
     )):
+        midpoint = _price_as_integer(record.get("normal_price"))
+        low = _price_as_integer(record.get("normal_price_low")) or midpoint
+        high = _price_as_integer(record.get("normal_price_high")) or midpoint
         ws.append([
-            record.get("merchant_name"), record.get("product_text"), _price_as_integer(record.get("normal_price")),
+            record.get("merchant_name"), record.get("product_text"), midpoint, low, high,
+            record.get("price_unit"), record.get("record_origin"), record.get("verification_status"),
             record.get("observed_at"), record.get("source_name"), record.get("source_url"),
-            record.get("evidence_text"), record.get("record_origin"), record.get("verification_status"),
-            record.get("region_or_channel"),
+            record.get("evidence_text"), record.get("campaign_title"), record.get("reference_note"),
+            record.get("region_or_channel"), record.get("product_key"),
         ])
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for col, width in {"A": 24, "B": 40, "C": 18, "D": 26, "E": 24, "F": 58, "G": 48, "H": 20, "I": 28, "J": 22}.items():
+    for col, width in {"A": 22, "B": 42, "C": 20, "D": 18, "E": 18, "F": 18, "G": 22, "H": 25, "I": 28, "J": 48, "K": 54, "L": 60, "M": 54, "N": 50, "O": 20, "P": 45}.items():
         ws.column_dimensions[col].width = width
     for row_cells in ws.iter_rows(min_row=2):
         for cell in row_cells:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
-    for cell in ws["C"][1:]:
-        cell.number_format = '#,##0'
+    for col in ("C", "D", "E"):
+        for cell in ws[col][1:]:
+            cell.number_format = '#,##0'
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
+
+    # Canonical user-provided ranges remain separate from retailer/source observations.
+    range_path = ROOT_DIR / "data" / "user_product_price_ranges.csv"
+    ws = wb.create_sheet("Rentang Referensi Pengguna")
+    user_range_headers = [
+        "Kategori", "Produk / SKU Acuan", "Harga Minimum (Rp)", "Harga Maksimum (Rp)",
+        "Titik Tengah Estimasi (Rp)", "Satuan / Basis Harga", "Merchant Prioritas",
+        "Sumber / Provenans", "Tanggal Input", "Catatan",
+    ]
+    ws.append(user_range_headers)
+    if range_path.exists():
+        with range_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for item in csv.DictReader(handle):
+                ws.append([
+                    item.get("category"), item.get("product_text"),
+                    _price_as_integer(item.get("normal_price_low")),
+                    _price_as_integer(item.get("normal_price_high")),
+                    _price_as_integer(item.get("normal_price")), item.get("price_unit"),
+                    item.get("merchant_name"), item.get("reference_source"),
+                    item.get("observed_at"), item.get("note"),
+                ])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for col, width in {"A": 40, "B": 60, "C": 19, "D": 19, "E": 22, "F": 18, "G": 22, "H": 56, "I": 16, "J": 62}.items():
+        ws.column_dimensions[col].width = width
+    for row_cells in ws.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    for col in ("C", "D", "E"):
+        for cell in ws[col][1:]:
+            cell.number_format = '#,##0'
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
