@@ -32,34 +32,6 @@ Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebag
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
-5. **Opsional — cari harga dengan Gemini + Google Search grounding (disarankan untuk pencarian berbantuan AI).** Gunakan API key Google AI Studio yang project-nya masih berada di Free tier. Google saat ini mendokumentasikan grounding Google Search untuk `gemini-2.5-flash` hingga 500 grounded prompts/hari pada Free tier, dibagi dengan Flash-Lite. Akses/limit aktual bergantung pada project. Jangan tautkan billing jika tidak ingin risiko tagihan; pada Free tier, input/output dapat digunakan Google untuk meningkatkan produk sesuai ketentuan mereka. Periksa halaman harga resmi sebelum pemakaian: https://ai.google.dev/gemini-api/docs/pricing
-
-   ```cmd
-   python engine\promo_gemini_price_finder.py --dry-run --limit 5
-   set GEMINI_API_KEY=ISI_API_KEY_GOOGLE_AI_STUDIO
-   python engine\promo_gemini_price_finder.py --limit 5
-   python engine\enrich_existing_promo_catalog_multisource.py
-   ```
-
-   `--dry-run` hanya menampilkan antrean, tanpa API atau internet. Script otomatis memakai Google Search grounding melalui model `gemini-2.5-flash`. URL dari model hanya diterima jika URL tersebut muncul di metadata sumber grounding Google. Harga dari jawaban AI tetap disimpan sebagai kandidat terlebih dahulu; harga baru masuk database median pasar setelah halaman yang dikutip dapat dibaca dan nama/varian/ukuran serta nominal harga terdeteksi di halaman tersebut. Batas awal 5 produk per run dan batas keras 20 produk per run sengaja dipasang untuk mengendalikan penggunaan. Kalau kuota tidak tersedia atau API menolak request, script berhenti dan tidak mengulang batch secara otomatis.
-
-   **Alternatif tanpa API:** `engine\promo_free_price_finder.py` masih tersedia, tetapi mengandalkan hasil pencarian publik DuckDuckGo/Bing yang dapat membatasi request dan hasilnya belum tentu lengkap. `engine\promo_ai_price_finder.py` tetap tersedia sebagai opsi OpenAI API, tetapi bersifat opsional dan berpotensi berbayar.
-
-   ```cmd
-   python engine\promo_ai_price_finder.py --dry-run --limit 5
-   set OPENAI_API_KEY=ISI_API_KEY_MILIKMU
-   python engine\promo_ai_price_finder.py --limit 20
-   python engine\enrich_existing_promo_catalog_multisource.py
-   ```
-
-6. Buka `hasil/Katalog_Promo_Final.xlsx` atau `hasil/Katalog_Promo_Final.csv`.
-
-   - `hasil/Katalog_Promo_Final.xlsx` — workbook ringkas untuk pemakaian harian dan sheet audit.
-   - `hasil/Katalog_Promo_Final_Ringkas.csv` — kolom dan nilai tampilan sama dengan sheet `Promo` di Excel; cocok untuk dibagikan atau dipakai aplikasi yang membutuhkan tampilan ringkas.
-   - `hasil/Katalog_Promo_Final.csv` — CSV yang lebih rinci dan tetap menyimpan kolom provenance/referensi; nilai numerik yang belum tersedia dibiarkan kosong agar tetap mudah diolah sebagai data.
-
-Jangan menjalankan enhancer sebelum collector selesai. Enhancer berhenti jika hasil collector tidak ada atau kosong agar katalog lama tidak tertimpa oleh ekspor kosong.
-Jika salah satu URL artikel mengembalikan HTTP 404/410, URL itu dicatat sebagai tidak ditemukan/dihapus dan URL lain tetap diproses. HTTP 401/403/429, error server 5xx, timeout/kegagalan request, atau redirect keluar domain tetap menjadi kondisi penghentian sumber untuk menjaga keamanan dan kualitas data.
 
 ## Struktur proyek
 
@@ -145,9 +117,7 @@ Sheet yang terlihat di awal file: `Ringkasan`, `Promo`, `Perlu Diperiksa`, `Ring
 
 ## AI Price Reference Finder
 
-Untuk opsi Google, gunakan `engine/promo_gemini_price_finder.py` dengan model `gemini-2.5-flash` dan Google Search grounding. API key disetel lewat variabel lingkungan `GEMINI_API_KEY`; jangan simpan key dalam kode atau commit GitHub. `--dry-run` tidak menghubungi API. Jalankan pencarian aktual dengan `--limit 5` setelah memastikan project di Google AI Studio masih berada pada Free tier dan billing tidak diaktifkan.
-
-Google saat ini mendokumentasikan batas Free tier sampai 500 grounded prompts per hari untuk Gemini 2.5 Flash/Flash-Lite (batas berbagi), tetapi ketersediaan akun/project dapat berbeda dan limit/harga dapat berubah. Pada Free tier, konten dapat digunakan Google untuk meningkatkan produk sesuai ketentuan. Cek harga dan syarat terbaru di https://ai.google.dev/gemini-api/docs/pricing. Jika project memiliki billing atau menggunakan tier berbayar, penggunaan token dapat menimbulkan tagihan.
+Untuk opsi Google, gunakan `engine/promo_gemini_price_finder.py` dengan model default `gemini-3.8-flash` melalui Interactions API. API key disetel lewat variabel lingkungan `GEMINI_API_KEY`; jangan simpan key dalam kode atau commit GitHub. `--dry-run` tidak menghubungi API. Google saat ini menyatakan Google Search grounding untuk model ini tidak tersedia pada Free tier; mode live dilindungi flag persetujuan `--allow-billable-search`. Cek https://ai.google.dev/gemini-api/docs/pricing dan https://ai.google.dev/gemini-api/docs/google-search sebelum menggunakan.
 
 File `engine/promo_ai_price_finder.py` tetap tersedia secara opsional untuk OpenAI API berbayar. File `engine/promo_free_price_finder.py` tetap menjadi alternatif pencarian publik tanpa API, tetapi sumber DuckDuckGo/Bing bisa lambat, membatasi request, atau tidak memberikan petunjuk harga.
 
@@ -183,3 +153,31 @@ python engine\promo_names.py
 python engine\promo_multisource_collector.py --self-test
 python -m pytest -q engine
 ```
+
+
+## Pencarian harga manual (tanpa API)
+
+Jika produk hanya memiliki harga promo dan harga normal tidak tercantum, buat daftar produk yang mudah dicari:
+
+```cmd
+python engine\export_manual_price_search.py
+```
+
+Buka `hasil\Daftar_Cari_Harga_Manual.xlsx`, salin kolom **Kata Kunci Pencarian (copy)** ke Google/Google AI Mode. Untuk setiap sumber harga yang cocok, isi:
+- `Harga Referensi (Rp)`
+- `Nama Sumber`
+- `URL Halaman Harga` (URL halaman produk/harga, bukan URL halaman hasil pencarian)
+- `Bukti Harga pada Halaman` (teks yang terlihat pada halaman, termasuk nama/ukuran dan nominal)
+- `Tanggal Cek (YYYY-MM-DD)`
+- `Jenis Referensi (pasar/normal)`
+
+Kalau ingin membandingkan harga dari beberapa toko, duplikasi baris produk lalu isi satu sumber berbeda per baris. Jangan masukkan perkiraan tanpa bukti. Simpan dan tutup Excel, kemudian impor:
+
+```cmd
+python engine\import_manual_price_references.py
+python engine\enrich_existing_promo_catalog_multisource.py
+```
+
+Referensi yang diimpor akan masuk ke `data\product_market_price_reference.csv` dan dapat dipakai oleh tab `Peluang Harga`. Satu sumber akan ditandai sebagai pembanding tunggal; perbandingan median/potensi lebih murah baru dihitung jika ada minimal dua domain independen yang cocok. Harga pembanding pasar tidak otomatis menjadi harga normal resmi atau diskon resmi.
+
+Daftar pencarian dibuat ulang berdasarkan produk terbaru. Jika file sudah ada, isian manual untuk produk yang sama dipertahankan. Untuk keamanan, lakukan salinan cadangan sebelum penggantian besar atau perubahan struktur kolom.

@@ -26,3 +26,6 @@ data/free_price_search_cache.csv
 
 # Gemini + Google Search grounding cache (operational; generated locally)
 data/gemini_price_search_cache.csv
+
+# Manual price search queue (generated and locally edited)
+/hasil/Daftar_Cari_Harga_Manual.xlsx

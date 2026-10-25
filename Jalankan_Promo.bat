@@ -91,6 +91,11 @@ echo [LIVE 2/2] Menggabungkan sumber, memvalidasi, fuzzy matching, dan ekspor...
 if errorlevel 1 goto :error
 
 echo.
+echo [MANUAL PRICE SEARCH] Membuat daftar produk tanpa harga normal...
+%PYTHON_CMD% -u "%~dp0engine\export_manual_price_search.py"
+if errorlevel 1 goto :error
+
+echo.
 echo Verifikasi file hasil...
 %PYTHON_CMD% -c "from pathlib import Path; from openpyxl import load_workbook; x=Path(r'%~dp0hasil\Katalog_Promo_Final.xlsx'); c=Path(r'%~dp0hasil\Katalog_Promo_Final.csv'); assert x.is_file() and x.stat().st_size>0, 'Workbook tidak ditemukan/kosong'; assert c.is_file() and c.stat().st_size>0, 'CSV tidak ditemukan/kosong'; w=load_workbook(x, read_only=True, data_only=True); print('Workbook OK:', x.name); print('Sheet:', ', '.join(w.sheetnames)); w.close(); print('CSV OK:', c.name, '(' + str(c.stat().st_size) + ' bytes)')"
 if errorlevel 1 goto :error
