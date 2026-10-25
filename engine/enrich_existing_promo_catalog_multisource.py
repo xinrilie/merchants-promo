@@ -16,7 +16,11 @@ from promo_names import (
     product_name_size_signature, product_name_variant_signature,
 )
 from promo_product_validation import PRODUCT_SPEC_RE, product_candidate_rejection_reason, product_candidate_review_reason
-from promo_multisource_collector import infer_merchant_dynamic
+from promo_multisource_collector import (
+    infer_merchant_dynamic,
+    parse_explicit_discount_amount,
+    has_explicit_price_pair,
+)
 from promo_evidence import find_amount_evidence, find_discount_evidence, extract_period_evidence, period_certainty, source_verification_label
 from promo_categories import CATEGORY_TAXONOMY, CATEGORY_NAMES, classify_promo_category
 from promo_campaign_utils import (
@@ -43,6 +47,9 @@ OUT_REPORT = INTERNAL_DIR / "promo_catalog_multisource_quality_report.json"
 OUT_GATE_REPORT = INTERNAL_DIR / "promo_export_quality_gate_report.json"
 OUT_POSSIBLE_DUPES = INTERNAL_DIR / "promo_possible_duplicate_candidates.csv"
 OUT_XLSX = OUTPUT_DIR / "Katalog_Promo_Final.xlsx"
+# Mirrors the simple 13-column "Promo" sheet exactly; the existing main CSV
+# intentionally remains the wider machine-readable catalog with provenance.
+OUT_SIMPLE_CSV = OUTPUT_DIR / "Katalog_Promo_Final_Ringkas.csv"
 OUT_REJECTED_PRODUCTS = INTERNAL_DIR / "promo_product_rows_rejected.csv"
 CATEGORY_REVIEW_LIST_CSV = INPUT_DIR / "category_review_list.csv"
 PRICE_REFERENCE_CSV = ROOT_DIR / "data" / "product_price_reference.csv"
@@ -701,7 +708,26 @@ def load_source(path, source_label):
         normal = as_int(raw.get("normal_price"))
         basis = (raw.get("price_basis") or "").strip()
         purchase_condition = (raw.get("purchase_condition") or "").strip() or None
-        deal_type = derive_deal_type(offer, raw.get("deal_type"))
+        # Older collector output sometimes stored "Diskon RpX" as if it were
+        # the selling price. Repair such rows at ingestion, before price gates.
+        explicit_savings = parse_explicit_discount_amount(offer)
+        is_explicit_amount_discount = bool(
+            explicit_savings is not None
+            and not has_explicit_price_pair(offer)
+            and len(re.findall(r"\\brp\\.?\\s*[0-9][0-9.,]*", offer, re.I)) == 1
+        )
+        if is_explicit_amount_discount:
+            promo = None
+            normal = None
+            basis = "discount_amount_offer"
+            if not purchase_condition:
+                condition_match = re.search(
+                    r"\\bbeli\\s*\\d+(?:\\s+(?:pcs?|pack|item|pc))?",
+                    offer,
+                    re.I,
+                )
+                purchase_condition = clean_product_name(condition_match.group(0)) if condition_match else None
+        deal_type = "Potongan Nominal" if is_explicit_amount_discount else derive_deal_type(offer, raw.get("deal_type"))
 
         start, end, precision, period_flags, matched = period_meta(raw, title)
         period_flags_list = pipe_unique([period_flags or ""])
@@ -713,6 +739,15 @@ def load_source(path, source_label):
 
         # Calculate product-level discount from the SKU's offer text only.
         quality_flags = pipe_unique([raw.get("price_quality_flag") or ""])
+        if is_explicit_amount_discount:
+            quality_flags = [
+                flag for flag in quality_flags
+                if flag not in {
+                    "bundle_total_not_unit_price",
+                    "promo_price_parse_failed_or_unverified",
+                    "promo_price_without_matching_offer_evidence",
+                }
+            ]
         provenance_review_reasons = []
         evidence_fallbacks = [offer, raw_line]
         promo_evidence, promo_evidence_issue = _validated_value_evidence(
@@ -733,7 +768,7 @@ def load_source(path, source_label):
             normal = None
             quality_flags = pipe_unique([*quality_flags, "normal_price_without_matching_offer_evidence"])
             provenance_review_reasons.append("Harga normal tidak memiliki bukti teks yang cocok")
-        if raw.get("promo_price") not in (None, "") and promo is None:
+        if raw.get("promo_price") not in (None, "") and promo is None and not is_explicit_amount_discount:
             quality_flags = pipe_unique([*quality_flags, "promo_price_parse_failed_or_unverified"])
         if raw.get("normal_price") not in (None, "") and normal is None:
             quality_flags = pipe_unique([*quality_flags, "normal_price_parse_failed_or_unverified"])
@@ -751,6 +786,13 @@ def load_source(path, source_label):
             original_product_text=original_product,
             raw_line=raw_line,
         )
+        if is_explicit_amount_discount:
+            discount["discount_percent"] = None
+            discount["discount_percent_calculated"] = None
+            discount["discount_percent_basis"] = "explicit_amount_discount"
+            discount["discount_percent_confidence"] = "unknown"
+            discount["discount_savings_rp"] = explicit_savings
+            discount["discount_evidence_text"] = offer
         campaign_disc, campaign_disc_basis = campaign_discount(title)
         discount_evidence = str(raw.get("discount_evidence_text") or "").strip() or None
         if discount["discount_percent"] not in (None, ""):
@@ -796,6 +838,8 @@ def load_source(path, source_label):
         retained_value = truthy(raw.get("retained_from_previous_run"))
         row_freshness = classify_row_freshness(scraped_at_value, retained_value)
         price_method = (raw.get("price_parse_method") or "").strip()
+        if is_explicit_amount_discount:
+            price_method = "explicit_discount_amount_not_product_price"
         if not price_method:
             if promo is not None and normal is not None:
                 price_method = "source_prices_with_discount_recalculated"
@@ -845,6 +889,7 @@ def load_source(path, source_label):
             "campaign_discount_basis": campaign_disc_basis,
             "price_parse_method": price_method,
             "price_basis": basis or None,
+            "explicit_discount_amount_only": is_explicit_amount_discount,
             "purchase_condition": purchase_condition,
             "deal_type": deal_type,
             "offer_text": offer or None,
@@ -2073,6 +2118,8 @@ def discount_basis_display(row):
         return "Estimasi bundling; bukan diskon terkonfirmasi"
     if basis == "cross_sku_bundle_review":
         return "Hadiah lintas produk; perlu review"
+    if basis == "explicit_amount_discount":
+        return "Potongan nominal tertulis; persentase hanya dihitung bila pembanding sebanding"
     if basis == "discount_price_mismatch_review":
         return "Klaim diskon berbeda dari hitungan; review"
     return "Belum diketahui"
@@ -2879,6 +2926,572 @@ def _price_as_integer(value):
     return as_int(value)
 
 
+
+# Simplified everyday workbook: keep the operational sheet short, with
+# "Masa Berlaku" immediately after "Diskon (%)". The detailed audit sheets
+# remain available as hidden tabs for troubleshooting and regression tests.
+SIMPLE_EXCEL_COLUMNS = [
+    "Nama Produk",
+    "Kategori",
+    "Merchant",
+    "Harga Normal/Acuan (Rp)",
+    "Harga Promo (Rp)",
+    "Hemat (Rp)",
+    "Diskon (%)",
+    "Masa Berlaku",
+    "Status Diskon",
+    "Penawaran",
+    "Status Promo",
+    "Verifikasi Sumber",
+    "Sumber URL",
+]
+
+
+def _simple_rupiah_matches(text):
+    return list(re.finditer(r"\brp\.?\s*([0-9][0-9.,]*)", str(text or ""), re.I))
+
+
+def _simple_parse_amount(raw):
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        try:
+            return int(round(float(raw)))
+        except (ValueError, TypeError, OverflowError):
+            return None
+    digits = re.sub(r"\D", "", str(raw))
+    return int(digits) if digits else None
+
+
+def _simple_explicit_price_pair(row):
+    """Recover a comparable promo/normal pair only when both prices are explicit."""
+    text = " ".join(str(row.get(k) or "") for k in (
+        "offer_text", "raw_line", "promo_price_evidence_text", "normal_price_evidence_text"
+    ))
+    if not text.strip():
+        return None
+
+    normal_match = re.search(
+        r"\bharga\s+(?:normal|asli|reguler)(?:nya)?\b.{0,45}?\brp\.?\s*([0-9][0-9.,]*)",
+        text, re.I
+    )
+    promo_match = re.search(
+        r"\bharga\s+(?:promo|spesial|setelah\s+diskon)\b.{0,45}?\brp\.?\s*([0-9][0-9.,]*)",
+        text, re.I
+    )
+    if normal_match and promo_match:
+        promo = _simple_parse_amount(promo_match.group(1))
+        normal = _simple_parse_amount(normal_match.group(1))
+        if promo is not None and normal is not None and promo > 0 and normal > 0:
+            return promo, normal
+
+    # Common aggregator phrasing: "Rp10.900 dari harga normalnya Rp12.700".
+    pair_match = re.search(
+        r"\brp\.?\s*([0-9][0-9.,]*)\s+dari\s+harga\s+(?:normal|asli|reguler)(?:nya)?\b.{0,20}?\brp\.?\s*([0-9][0-9.,]*)",
+        text, re.I
+    )
+    if pair_match:
+        promo = _simple_parse_amount(pair_match.group(1))
+        normal = _simple_parse_amount(pair_match.group(2))
+        if promo is not None and normal is not None and promo > 0 and normal > 0:
+            return promo, normal
+
+    return None
+
+
+def _simple_explicit_savings(row):
+    # Prefer the dedicated offer field; raw_line often repeats the same offer,
+    # which must not make one explicit nominal saving look like two amounts.
+    offer = str(row.get("offer_text") or row.get("raw_line") or "")
+    stored = _simple_parse_amount(row.get("discount_savings_rp"))
+    basis = str(row.get("discount_percent_basis") or row.get("discount_basis") or "").casefold()
+    if basis == "explicit_amount_discount" and stored is not None:
+        return stored
+    # Legacy repair: prior collectors sometimes put "Diskon RpX" in promo_price.
+    pair = _simple_explicit_price_pair(row)
+    if pair is None and len(_simple_rupiah_matches(offer)) == 1:
+        match = re.search(
+            r"\b(?:diskon|potongan(?:\s+harga)?|hemat)\s*(?:nominal\s*)?rp\.?\s*([0-9][0-9.,]*)",
+            offer, re.I
+        )
+        if match:
+            return _simple_parse_amount(match.group(1))
+    return None
+
+
+def _simple_quantity(row, text):
+    all_text = " ".join(str(row.get(k) or "") for k in (
+        "purchase_condition", "offer_text", "raw_line", "product_text"
+    ))
+    # "/pck", "/bdd", "/karton", etc. means the stated price is per package;
+    # do not reinterpret "Beli 2" as one total package amount in that case.
+    per_package_price = bool(re.search(
+        r"(?:/\s*(?:pck|pack|bdd|karton|dus|set|btl|botol|box)|\bper\s+(?:pack|pak|karton|dus|botol|box)\b)",
+        text, re.I
+    ))
+    quantity = None
+    match = re.search(r"\bbeli\s*(\d+)\s*(?:pcs?|pc|potong|pack|item|bungkus|buah)?\b", all_text, re.I)
+    if match:
+        quantity = int(match.group(1))
+    else:
+        match = re.search(r"\bdapat\s*(\d+)\s*(?:produk|pcs?|item|bungkus|buah)\b", all_text, re.I)
+        if match:
+            quantity = int(match.group(1))
+    if per_package_price:
+        return None
+    return quantity if quantity and quantity > 0 else None
+
+
+def _simple_reference_value(row, field):
+    value = _simple_parse_amount(row.get(field))
+    if value is not None and value > 0:
+        return value
+    return None
+
+
+def _simple_reference_unit_compatible(row, text):
+    unit = str(row.get("reference_price_unit") or "").casefold()
+    condition = str(row.get("purchase_condition") or "").casefold()
+    source = str(text or "").casefold()
+    if not unit:
+        return False
+    if "potong" in unit:
+        return bool(re.search(r"\b(?:pcs?|pc|potong)\b", condition + " " + source))
+    if "porsi" in unit:
+        # "pcs" and "porsi" are not assumed to be equivalent.
+        return bool(re.search(r"\bporsi\b", condition + " " + source))
+    if "bungkus" in unit:
+        return bool(re.search(r"\bbungkus\b", condition + " " + source)) or "beli" in condition
+    if any(term in unit for term in ("pack", "bottle", "btl", "botol", "sachet", "saset", "bag", "karton", "dus", "roll", "box")):
+        return True
+    return False
+
+
+def _simple_format_period(start_value, end_value):
+    def parsed(value):
+        try:
+            return date.fromisoformat(str(value)[:10]) if value else None
+        except (TypeError, ValueError):
+            return None
+
+    start = parsed(start_value)
+    end = parsed(end_value)
+    months = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+    if start and end:
+        if start == end:
+            return f"{start.day} {months[start.month - 1]} {start.year}"
+        if start.year == end.year and start.month == end.month:
+            return f"{start.day}–{end.day} {months[end.month - 1]} {end.year}"
+        if start.year == end.year:
+            return f"{start.day} {months[start.month - 1]}–{end.day} {months[end.month - 1]} {end.year}"
+        return f"{start.day} {months[start.month - 1]} {start.year}–{end.day} {months[end.month - 1]} {end.year}"
+    if start:
+        return f"Mulai {start.day} {months[start.month - 1]} {start.year}"
+    if end:
+        return f"s.d. {end.day} {months[end.month - 1]} {end.year}"
+    return "Belum terkonfirmasi"
+
+
+def make_simple_excel_row(row):
+    """Return a concise, nonblank-discount display row without inventing prices."""
+    clean = make_clean_row(row, review=False)
+    product = str(row.get("product_text") or clean.get("Nama Produk") or "").strip()
+    category, _subcategory = classify_promo_category(row)
+    merchant = str(row.get("merchant_name") or "").strip() or "Belum diketahui"
+    offer = str(row.get("offer_text") or row.get("raw_line") or "").strip()
+    text = " ".join(str(row.get(k) or "") for k in (
+        "offer_text", "raw_line", "purchase_condition", "product_text"
+    ))
+
+    explicit_savings = _simple_explicit_savings(row)
+    pair = _simple_explicit_price_pair(row)
+
+    source_promo = _simple_parse_amount(row.get("promo_price"))
+    source_normal = _simple_parse_amount(row.get("normal_price"))
+    ref_normal = _simple_reference_value(row, "reference_normal_price")
+    ref_low = _simple_reference_value(row, "reference_price_low")
+    ref_high = _simple_reference_value(row, "reference_price_high")
+    reference_origin = str(row.get("reference_price_record_origin") or "").casefold()
+    reference_unit = str(row.get("reference_price_unit") or "").casefold()
+    quality_flags = str(row.get("price_quality_flag") or "")
+    existing_discount = row.get("discount_percent")
+    existing_basis = str(row.get("discount_percent_basis") or "").casefold()
+    existing_confidence = str(row.get("discount_percent_confidence") or "").casefold()
+
+    promo_display = source_promo
+    normal_display = source_normal if source_normal is not None else ref_normal
+    savings_display = _simple_parse_amount(row.get("discount_savings_rp"))
+    discount_value = None
+    discount_status = ""
+    calculation_basis = ""
+
+    # Price pair explicitly stated in the same source offer outranks estimates.
+    if pair:
+        pair_promo, pair_normal = pair
+        if pair_promo <= pair_normal and pair_normal > 0:
+            promo_display = pair_promo
+            normal_display = pair_normal
+            savings_display = pair_normal - pair_promo
+            discount_value = round((pair_normal - pair_promo) / pair_normal * 100, 1)
+            calculation_basis = "direct_source_pair"
+            discount_status = "Hitung dari harga promo dan normal yang tertulis"
+        else:
+            discount_status = "Harga promo tidak lebih rendah dari harga normal sumber"
+
+    elif explicit_savings is not None:
+        # A nominal saving isn't a product selling price.
+        promo_display = None
+        savings_display = explicit_savings
+        quantity = _simple_quantity(row, text)
+        unit_compatible = _simple_reference_unit_compatible(row, text)
+        if (
+            quantity
+            and unit_compatible
+            and ref_normal
+            and reference_origin == "user_supplied_estimate"
+            and ref_normal > 0
+        ):
+            normal_total = ref_normal * quantity
+            discount_value = round(explicit_savings / normal_total * 100, 1)
+            normal_display = normal_total
+            calculation_basis = "estimate_nominal_saving_against_user_reference"
+            discount_status = "Estimasi: potongan nominal dibanding nilai acuan per unit"
+        else:
+            discount_status = "Potongan nominal tertulis; persentase belum bisa dihitung dari harga pembanding"
+
+    elif (
+        source_promo is not None
+        and source_normal is not None
+        and source_normal > source_promo > 0
+        and not row.get("purchase_condition")
+        and str(row.get("price_basis") or "").casefold() == "offer_price"
+    ):
+        savings_display = source_normal - source_promo
+        normal_display = source_normal
+        discount_value = round(savings_display / source_normal * 100, 1)
+        calculation_basis = "direct_source_pair"
+        discount_status = "Hitung dari harga promo dan normal sumber"
+
+    elif (
+        existing_discount not in (None, "")
+        and isinstance(existing_discount, (int, float, str))
+        and str(existing_discount).strip() not in {"", "None"}
+    ):
+        try:
+            discount_value = round(float(existing_discount), 1)
+        except (ValueError, TypeError):
+            discount_value = None
+        if discount_value is not None:
+            if existing_basis == "calculated_from_price_reference" or reference_origin == "user_supplied_estimate":
+                discount_status = "Estimasi dari rentang referensi pengguna" if reference_origin == "user_supplied_estimate" else "Hitung dari referensi harga historis"
+            elif existing_basis in {"explicit_offer", "explicit_max"}:
+                discount_status = "Klaim diskon tertulis pada penawaran"
+            elif existing_basis == "calculated_from_unit_prices":
+                discount_status = "Hitung dari dua harga dalam penawaran"
+            elif existing_basis in {"bundle_estimate_same_item_value", "bundle_estimate"}:
+                discount_status = "Estimasi bundling; nilai tiap produk diasumsikan sama"
+            else:
+                discount_status = "Diskon tersedia dalam hasil validasi"
+            if savings_display is None and normal_display is not None and source_promo is not None:
+                # If normal is a per-unit reference and this row is not a bundle,
+                # estimate the difference against the midpoint shown.
+                if not row.get("purchase_condition") and normal_display > source_promo:
+                    savings_display = normal_display - source_promo
+
+    # Estimate a bundle's percentage only when the source gives a bundle total and
+    # the user reference is for the same unit. Anomalous offers are sent to review.
+    if (
+        discount_value is None
+        and explicit_savings is None
+        and pair is None
+        and source_promo is not None
+        and ref_normal is not None
+        and ref_low is not None
+        and reference_origin == "user_supplied_estimate"
+    ):
+        quantity = _simple_quantity(row, text)
+        has_bundle_offer = bool(
+            quantity
+            and re.search(r"\b(?:beli|dapat)\s*\d+\b", text, re.I)
+            and not re.search(
+                r"(?:/\s*(?:pck|pack|bdd|karton|dus|set|btl|botol|box)|\bper\s+(?:pack|pak|karton|dus|botol|box)\b)",
+                text,
+                re.I,
+            )
+        )
+        unit_ok = _simple_reference_unit_compatible(row, text)
+        if has_bundle_offer and unit_ok:
+            expected_low = ref_low * quantity
+            expected_mid = ref_normal * quantity
+            ratio = source_promo / expected_mid if expected_mid else 0
+            if source_promo < expected_low and 0.60 <= ratio < 1.0:
+                normal_display = expected_mid
+                promo_display = source_promo
+                savings_display = expected_mid - source_promo
+                discount_value = round(savings_display / expected_mid * 100, 1)
+                calculation_basis = "estimated_bundle_from_user_range"
+                discount_status = "Estimasi paket dari rentang harga pengguna"
+            elif source_promo < expected_low and ratio < 0.60:
+                discount_status = "Perlu review: harga paket jauh di bawah rentang acuan"
+
+    # Direct user-range references for non-bundle offers: only produce an
+    # additional estimate if the promo is below the stated low end, not merely
+    # below the midpoint. This avoids claiming a discount when the promo lies
+    # inside the user's broad approximate range.
+    if (
+        discount_value is None
+        and explicit_savings is None
+        and pair is None
+        and source_promo is not None
+        and source_normal is None
+        and ref_normal is not None
+        and ref_low is not None
+        and reference_origin == "user_supplied_estimate"
+        and not row.get("purchase_condition")
+    ):
+        if source_promo < ref_low:
+            normal_display = ref_normal
+            savings_display = ref_normal - source_promo
+            discount_value = round(savings_display / ref_normal * 100, 1)
+            calculation_basis = "estimate_below_user_range"
+            discount_status = "Estimasi dari rentang pengguna; promo di bawah batas bawah acuan"
+
+    # Always avoid an empty Diskon cell.
+    if discount_value is not None and 0 <= discount_value <= 100:
+        discount_cell = discount_value
+    else:
+        discount_cell = "Belum bisa dihitung"
+        if not discount_status:
+            if explicit_savings is not None:
+                discount_status = "Potongan nominal tertulis; pembanding tidak memadai"
+            elif quality_flags:
+                discount_status = "Perlu review harga/satuan"
+            elif source_promo is None:
+                discount_status = "Harga promo tidak tersedia"
+            elif ref_normal is not None and source_promo >= ref_normal:
+                discount_status = "Harga promo tidak lebih rendah dari acuan"
+            else:
+                discount_status = "Belum ada pembanding harga yang sebanding"
+
+    # If a source/conditional price is member-only or region-specific, make the
+    # limitation visible rather than implying a universal price.
+    if re.search(r"khusus member|member|pulau jawa|bali|sumatera|wilayah|minimum|min\.?\s*belanja", text, re.I):
+        if not discount_status.startswith("Estimasi"):
+            discount_status = "Ada syarat wilayah/member; periksa penawaran"
+
+    if promo_display is None:
+        promo_cell = "—"
+    else:
+        promo_cell = promo_display
+
+    if normal_display is None:
+        normal_cell = "—"
+    else:
+        normal_cell = normal_display
+
+    if savings_display is None:
+        savings_cell = "—"
+    else:
+        savings_cell = savings_display
+
+    return {
+        "Nama Produk": product or "Produk belum teridentifikasi",
+        "Kategori": category,
+        "Merchant": merchant,
+        "Harga Normal/Acuan (Rp)": normal_cell,
+        "Harga Promo (Rp)": promo_cell,
+        "Hemat (Rp)": savings_cell,
+        "Diskon (%)": discount_cell,
+        "Masa Berlaku": _simple_format_period(row.get("valid_from"), row.get("valid_until")),
+        "Status Diskon": discount_status or "Belum bisa dihitung",
+        "Penawaran": offer or "—",
+        "Status Promo": display_status(row),
+        "Verifikasi Sumber": row.get("source_verification_label") or source_verification_label(row.get("verification_status")),
+        "Sumber URL": row.get("source_url") or "",
+        "_discount_numeric": isinstance(discount_cell, (int, float)),
+        "_discount_basis": calculation_basis or existing_basis,
+        "_review_required": (
+            not isinstance(discount_cell, (int, float))
+            or bool(row.get("price_quality_flag"))
+            or row.get("product_validation_status") == "review"
+            or row.get("promo_status") in {"active_estimated", "upcoming_estimated", "unknown"}
+            or bool(row.get("period_flags"))
+            or bool(row.get("overlap_period_flag"))
+        ),
+        "_source_row": row,
+    }
+
+
+def _write_simple_worksheet(wb, name, rows, header_fill, title_fill=None):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    ws = wb.create_sheet(name)
+    ws.append(SIMPLE_EXCEL_COLUMNS)
+    for row in rows:
+        ws.append([row.get(header, "—") for header in SIMPLE_EXCEL_COLUMNS])
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    widths = {
+        "Nama Produk": 42,
+        "Kategori": 30,
+        "Merchant": 20,
+        "Harga Normal/Acuan (Rp)": 21,
+        "Harga Promo (Rp)": 17,
+        "Hemat (Rp)": 15,
+        "Diskon (%)": 18,
+        "Masa Berlaku": 23,
+        "Status Diskon": 48,
+        "Penawaran": 48,
+        "Status Promo": 22,
+        "Verifikasi Sumber": 35,
+        "Sumber URL": 62,
+    }
+    for col_idx, header in enumerate(SIMPLE_EXCEL_COLUMNS, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = widths.get(header, 20)
+    for row_idx in range(2, ws.max_row + 1):
+        for col_idx, header in enumerate(SIMPLE_EXCEL_COLUMNS, start=1):
+            cell = ws.cell(row_idx, col_idx)
+            cell.alignment = Alignment(
+                vertical="top",
+                wrap_text=header in {
+                    "Nama Produk", "Kategori", "Status Diskon",
+                    "Penawaran", "Verifikasi Sumber", "Sumber URL",
+                },
+            )
+            if header in {"Harga Normal/Acuan (Rp)", "Harga Promo (Rp)", "Hemat (Rp)"}:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '"Rp" #,##0'
+            elif header == "Diskon (%)" and isinstance(cell.value, (int, float)):
+                cell.number_format = '0.0"%"'
+    ws.freeze_panes = "A2"
+    # Do not set ws.auto_filter.ref on a range that is also an Excel Table.
+    # The Table owns its own AutoFilter; writing both can make Excel repair the
+    # workbook by removing the table/AutoFilter on open.
+    ws.sheet_view.showGridLines = False
+    ws.row_dimensions[1].height = 34
+    try:
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+        if ws.max_row >= 2:
+            table_name = re.sub(r"[^A-Za-z0-9]", "", name) + "Table"
+            table = Table(displayName=table_name, ref=ws.dimensions)
+            table.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False,
+            )
+            ws.add_table(table)
+    except Exception:
+        pass
+    return ws
+
+
+def build_simple_catalog_rows(rows):
+    """Build the exact public-facing 13-column representation shared by Excel and CSV."""
+    return [make_simple_excel_row(row) for row in rows]
+
+
+def write_simple_catalog_csv(path, rows):
+    """Write a CSV whose columns and display values mirror the Excel Promo sheet."""
+    simple_rows = build_simple_catalog_rows(rows)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SIMPLE_EXCEL_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows({header: row.get(header, "—") for header in SIMPLE_EXCEL_COLUMNS} for row in simple_rows)
+    return len(simple_rows)
+
+
+def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, title_fill):
+    from openpyxl.styles import Alignment, Font
+
+    # The same transformation is used by write_simple_catalog_csv so numeric
+    # calculations and human-readable fallback labels cannot drift by format.
+    simple_current = build_simple_catalog_rows(current_rows)
+    simple_review = build_simple_catalog_rows(review_rows)
+
+    active_keys = {
+        (
+            str(row.get("Nama Produk", "")).casefold(),
+            str(row.get("Merchant", "")).casefold(),
+            str(row.get("Masa Berlaku", "")),
+            str(row.get("Penawaran", "")),
+            str(row.get("Sumber URL", "")),
+        )
+        for row in simple_current
+    }
+
+    # The review tab includes explicit review rows plus current rows that still
+    # have an uncomputable/estimated discount or a data-quality flag.
+    combined_review = []
+    seen = set()
+    for row in simple_review + [item for item in simple_current if item.get("_review_required")]:
+        key = (
+            str(row.get("Nama Produk", "")).casefold(),
+            str(row.get("Merchant", "")).casefold(),
+            str(row.get("Masa Berlaku", "")),
+            str(row.get("Penawaran", "")),
+            str(row.get("Sumber URL", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        combined_review.append(row)
+
+    _write_simple_worksheet(wb, "Promo", simple_current, header_fill, title_fill)
+    _write_simple_worksheet(wb, "Perlu Diperiksa", combined_review, header_fill, title_fill)
+
+    # Simple summary as the initial tab.
+    summary = wb.create_sheet("Ringkasan", 0)
+    today_text = TODAY.isoformat()
+    numeric_discounts = [r["Diskon (%)"] for r in simple_current if isinstance(r.get("Diskon (%)"), (int, float))]
+    not_calculated = sum(not isinstance(r.get("Diskon (%)"), (int, float)) for r in simple_current)
+    estimated = sum("Estimasi" in str(r.get("Status Diskon", "")) for r in simple_current)
+    summary_rows = [
+        ["KATALOG PROMO", ""],
+        ["Tanggal referensi", today_text],
+        ["Promo pada daftar utama", len(simple_current)],
+        ["Diskon bisa dihitung", len(numeric_discounts)],
+        ["Diskon belum bisa dihitung", not_calculated],
+        ["Diskon berbasis estimasi", estimated],
+        ["Baris perlu diperiksa", len(combined_review)],
+        ["Kolom utama", "Nama Produk · Kategori · Merchant · Harga Normal/Acuan · Harga Promo · Hemat · Diskon · Masa Berlaku"],
+        ["Cara membaca", "Diskon numerik dari harga tertulis diberi status hitungan; rentang pengguna/historis diberi status estimasi. 'Belum bisa dihitung' berarti bukti pembanding tidak cukup atau basis harga berbeda."],
+        ["Verifikasi", "Sumber agregator bukan verifikasi resmi retailer. Periksa sumber URL sebelum menganggap harga berlaku di semua toko/wilayah."],
+        ["Riwayat", "Sheet audit teknis disimpan tersembunyi agar file utama sederhana. Data mentah dan log tetap ada di folder _internal."],
+    ]
+    for row in summary_rows:
+        summary.append(row)
+    summary.merge_cells("A1:B1")
+    summary["A1"].font = Font(bold=True, size=16, color="FFFFFF")
+    summary["A1"].fill = header_fill
+    summary["A1"].alignment = Alignment(vertical="center")
+    summary.row_dimensions[1].height = 30
+    for i in range(2, len(summary_rows) + 1):
+        summary.cell(i, 1).font = Font(bold=True, color="1F4E78")
+        summary.cell(i, 1).alignment = Alignment(vertical="top", wrap_text=True)
+        summary.cell(i, 2).alignment = Alignment(vertical="top", wrap_text=True)
+    summary.column_dimensions["A"].width = 32
+    summary.column_dimensions["B"].width = 110
+    summary.sheet_view.showGridLines = False
+
+    # Keep only useful daily tabs visible. Detailed audit sheets still exist for
+    # project diagnostics and tests but do not clutter normal spreadsheet use.
+    visible = {"Ringkasan", "Promo", "Perlu Diperiksa", "Ringkasan Kategori"}
+    for ws in wb.worksheets:
+        ws.sheet_state = "visible" if ws.title in visible else "hidden"
+    wb.active = wb.sheetnames.index("Promo")
+    return simple_current, combined_review
+
+
+
+
 def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_variant_rows, possible_duplicate_rows, rejected_rows=None, export_gate_report=None):
     """User-facing workbook: clean catalogs plus separate review/duplicate/rejected audit sheets."""
     rejected_rows = rejected_rows or []
@@ -2913,7 +3526,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
         ["Status Validasi Produk", "Kolom ini terpisah dari Status Promo. 'Valid' berarti identitas produk dan pemeriksaan harga/merchant lolos gerbang; 'Perlu review' berarti perlu pemeriksaan, meskipun tanggal promo masih berstatus Aktif."],
         ["Sumber produk", "Hemat.id, Katalogpromosi.com, dan Scanharga.com"],
         ["Catatan", "Kepastian periode dipisahkan dari verifikasi sumber; agregator dan artikel publik bukan verifikasi resmi retailer."],
-        ["Petunjuk", f"Buka sheet Aktif untuk katalog sehari-hari. Gunakan filter Kategori Produk dan Subkategori untuk mencari jenis barang. Ringkasan Kategori menunjukkan jumlah promo aktif per kategori; Referensi Kategori berisi daftar {len(CATEGORY_TAXONOMY)} kategori. Daftar Filter Produk mengulang daftar contoh klasifikasi yang disimpan di input/category_review_list.csv."],
+        ["Petunjuk", f"Buka sheet Promo untuk daftar promo sehari-hari. Gunakan filter Kategori Produk dan Subkategori untuk mencari jenis barang. Ringkasan Kategori menunjukkan jumlah promo aktif per kategori; Referensi Kategori berisi daftar {len(CATEGORY_TAXONOMY)} kategori. Daftar Filter Produk mengulang daftar contoh klasifikasi yang disimpan di input/category_review_list.csv."],
         ["File teknis", "Data mentah dan log tersimpan di folder _internal; laporan gerbang ekspor ada di promo_export_quality_gate_report.json."],
     ]
     for row in summary:
@@ -3276,6 +3889,7 @@ def write_excel_catalog(path, current_rows, confirmed_rows, review_rows, name_va
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
 
+    _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, title_fill)
     wb.save(path)
     return True
 
@@ -3525,6 +4139,7 @@ def main():
     write_audit_rows(OUT_FULL, merged_raw)
     write_audit_rows(OUT_REJECTED_PRODUCTS, rejected_product_rows)
     write_possible_duplicate_csv(OUT_POSSIBLE_DUPES, possible_duplicate_rows)
+    write_simple_catalog_csv(OUT_SIMPLE_CSV, current)
     write_excel_catalog(OUT_XLSX, current, confirmed, review, name_variant_rows, possible_duplicate_rows, rejected_product_rows, export_gate_report)
 
     discount_basis = Counter(r.get("discount_percent_basis") or "not_available" for r in current)
@@ -3615,7 +4230,12 @@ def main():
         ),
         "discount_basis_counts_current": dict(discount_basis),
         "merchant_counts_current": dict(merchant_counts),
-        "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
+        "user_facing_output_files": [OUT_ACTIVE.relative_to(ROOT_DIR).as_posix(), OUT_SIMPLE_CSV.relative_to(ROOT_DIR).as_posix(), OUT_XLSX.relative_to(ROOT_DIR).as_posix()],
+        "output_contracts": {
+            OUT_ACTIVE.name: "Katalog bersih dengan kolom provenance lebih lengkap dan nilai numerik kosong bila tidak tersedia; cocok untuk pengolahan data.",
+            OUT_SIMPLE_CSV.name: "Kolom dan nilai tampilan identik dengan sheet Promo pada workbook Excel, termasuk label Belum bisa dihitung.",
+            OUT_XLSX.name: "Workbook ringkas untuk penggunaan harian serta sheet audit teknis tersembunyi.",
+        },
         "internal_audit_files": [OUT_CONFIRMED.relative_to(ROOT_DIR).as_posix(), OUT_REVIEW.relative_to(ROOT_DIR).as_posix(), OUT_FULL.relative_to(ROOT_DIR).as_posix(), OUT_REJECTED_PRODUCTS.relative_to(ROOT_DIR).as_posix(), OUT_GATE_REPORT.relative_to(ROOT_DIR).as_posix(), OUT_REPORT.relative_to(ROOT_DIR).as_posix()],
         "clean_catalog_columns": [label for label, _ in CLEAN_COLUMNS],
         "full_audit_file": OUT_FULL.name,

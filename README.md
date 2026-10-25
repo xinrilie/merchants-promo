@@ -34,7 +34,12 @@ Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebag
 
 5. Buka `hasil/Katalog_Promo_Final.xlsx` atau `hasil/Katalog_Promo_Final.csv`.
 
+   - `hasil/Katalog_Promo_Final.xlsx` — workbook ringkas untuk pemakaian harian dan sheet audit.
+   - `hasil/Katalog_Promo_Final_Ringkas.csv` — kolom dan nilai tampilan sama dengan sheet `Promo` di Excel; cocok untuk dibagikan atau dipakai aplikasi yang membutuhkan tampilan ringkas.
+   - `hasil/Katalog_Promo_Final.csv` — CSV yang lebih rinci dan tetap menyimpan kolom provenance/referensi; nilai numerik yang belum tersedia dibiarkan kosong agar tetap mudah diolah sebagai data.
+
 Jangan menjalankan enhancer sebelum collector selesai. Enhancer berhenti jika hasil collector tidak ada atau kosong agar katalog lama tidak tertimpa oleh ekspor kosong.
+Jika salah satu URL artikel mengembalikan HTTP 404/410, URL itu dicatat sebagai tidak ditemukan/dihapus dan URL lain tetap diproses. HTTP 401/403/429, error server 5xx, timeout/kegagalan request, atau redirect keluar domain tetap menjadi kondisi penghentian sumber untuk menjaga keamanan dan kualitas data.
 
 ## Struktur proyek
 
@@ -56,9 +61,24 @@ merchants-promo-revisi-harga/
 └── _internal/   # log, data antara, laporan kualitas dan audit
 ```
 
-## Urutan kolom harga di Excel
+## Tampilan Excel untuk pemakaian sehari-hari
 
-Di sheet `Aktif`, `Periode Pasti`, dan `Perlu Review`, kolom harga diawali dengan urutan:
+Sheet yang ditampilkan di awal workbook disederhanakan menjadi:
+
+- `Ringkasan` — jumlah promo, jumlah diskon yang bisa dihitung, baris estimasi, serta baris yang perlu diperiksa.
+- `Promo` — katalog utama dengan 13 kolom yang ringkas.
+- `Perlu Diperiksa` — daftar promo yang membutuhkan pemeriksaan harga, satuan, diskon, atau masa berlaku.
+- `Ringkasan Kategori` — jumlah promo per kategori.
+
+Di sheet `Promo`, urutan kolom harga adalah `Harga Normal/Acuan (Rp)` → `Harga Promo (Rp)` → `Hemat (Rp)` → `Diskon (%)` → `Masa Berlaku`. Jadi, `Masa Berlaku` langsung mengikuti `Diskon (%)`.
+
+Sel `Diskon (%)` pada sheet `Promo` selalu diisi angka jika dasar hitungnya memadai, atau teks `Belum bisa dihitung` bila bukti harga/satuan tidak cukup. Sel tidak dibiarkan kosong dan sistem tidak mengarang persentase. Estimasi dari rentang harga pengguna atau bundling diberi penanda di `Status Diskon`. File `Katalog_Promo_Final_Ringkas.csv` menggunakan transformasi baris yang sama agar hasil tampilannya identik dengan sheet tersebut. CSV utama `Katalog_Promo_Final.csv` tetap mempertahankan nilai numerik kosong untuk field yang tidak tersedia dan kolom provenance yang lebih lengkap.
+
+Sheet teknis seperti `Aktif`, `Periode Pasti`, `Perlu Review`, `Referensi Harga`, `Kemungkinan Duplikat`, dan audit lainnya tetap tersedia di workbook dalam keadaan tersembunyi untuk pemeriksaan mendalam; tampilan harian tidak dipenuhi sheet teknis.
+
+## Urutan kolom pada sheet audit
+
+Di sheet audit `Aktif`, `Periode Pasti`, dan `Perlu Review`, kolom harga rinci diawali dengan urutan:
 
 1. `Harga Asli (Rp)`
 2. `Harga Promo (Rp)`
@@ -92,7 +112,7 @@ Lalu ada `Basis Harga Asli`, `Harga Asli dari Sumber (Rp)`, `Harga Normal Refere
 
 ## Sheet workbook
 
-Workbook memuat `Mulai Di Sini`, `Ringkasan Kategori`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` jika ada perubahan klasifikasi, `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna`.
+Sheet yang terlihat di awal file: `Ringkasan`, `Promo`, `Perlu Diperiksa`, dan `Ringkasan Kategori`. Sheet rinci `Mulai Di Sini`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` (jika ada perubahan klasifikasi), `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna` tetap disimpan tetapi disembunyikan agar workbook harian ringkas.
 
 `Referensi Harga` memuat rekaman database beserta rentang, satuan, asal rekaman, sumber, tanggal, bukti, dan URL bila tersedia. `Rentang Referensi Pengguna` menampilkan daftar 102 acuan awal secara terpisah dari pengamatan sumber.
 

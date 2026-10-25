@@ -368,3 +368,36 @@ def test_current_source_metadata_comes_from_three_source_runlog(tmp_path, monkey
     assert metadata["Hemat.id"]["output_status"] == "updated"
     assert metadata["Katalogpromosi.com"]["output_status"] == "preserved_previous_catalog"
     assert metadata["Scanharga.com"]["output_status"] == "request_failed"
+
+
+
+def test_price_mentioned_only_in_campaign_title_is_not_accepted_as_product_price():
+    with __import__("tempfile").TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "headline_price.csv"
+        _write_feed(path, {
+            "product_text": "Snack Brand Potato Chips 200 g",
+            "merchant_name": "Fresh Basket",
+            "campaign_title": "Campaign headline mentioning Harga Promo Rp 99.000",
+            "offer_text": "Diskon 20% untuk produk pilihan",
+            "raw_line": "Snack Brand Potato Chips 200 g — Diskon 20% untuk produk pilihan",
+            "promo_price": "99000",
+            "normal_price": "120000",
+            "price_basis": "offer_price",
+            "discount_percent": "20",
+            "valid_from": "2026-10-01",
+            "valid_until": "2026-10-31",
+            "period_precision": "range",
+            "source_name": "Katalogpromosi.com",
+            "source_type": "aggregator_article",
+            "verification_status": "aggregator_only",
+            "source_url": "https://example.test/promo",
+        })
+        rows = enhancer.load_source(path, "promo_multisource_products_all.csv")
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["promo_price"] is None
+    assert row["normal_price"] is None
+    assert "promo_price_without_matching_offer_evidence" in (row["price_quality_flag"] or "")
+    assert "normal_price_without_matching_offer_evidence" in (row["price_quality_flag"] or "")
+    assert row["product_validation_status"] == "review"

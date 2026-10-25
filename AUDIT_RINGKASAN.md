@@ -1,43 +1,49 @@
-# Ringkasan Revisi — Referensi Harga & Kolom Excel
+# Ringkasan Audit Final — Katalog Promo Multi-Sumber
 
-## Perubahan
+Tanggal snapshot data: **25 Oktober 2026**. Paket dibangun dari file data collector yang sudah tersimpan; proses pemaketan ini tidak menjalankan scraping live.
 
-- Memasukkan **102 rentang harga referensi manual** dari daftar yang diberikan pengguna, termasuk batas minimum, maksimum, titik tengah estimasi, satuan, kategori, asal referensi, tanggal input, dan catatan.
-- Menambahkan **89 alias katalog terpilih** untuk variasi nama di CSV promo agar dapat dicocokkan tanpa fuzzy matching saat runtime. Alias penawaran kondisional “Nestle … Beli 2 Lebih” dikeluarkan agar tidak diperlakukan sebagai identitas SKU biasa.
-- Database `data/product_price_reference.csv` kini berisi **394 rekaman**: 228 observasi scrape dan 166 estimasi dari referensi pengguna/alias. Seeder membangun ulang slot `user_supplied_estimate` dari daftar rentang dan alias aktif, tetapi mempertahankan observasi sumber.
-- Referensi pada merchant yang sama diprioritaskan. Jika tidak tersedia, acuan umum/merchant lain dapat menjadi fallback yang ditandai di Excel.
-- Harga promo dengan harga asli kosong kini dapat memakai titik tengah rentang sebagai `Harga Asli (Rp)` jika SKU/satuan cocok, transaksi tidak bersyarat, nilai promo masih dalam rentang yang masuk akal, dan rentang tidak terlalu lebar. Harga asli dari sumber tetap terpisah dan tidak dipalsukan oleh estimasi.
-- Diskon dihitung dari harga asli sumber atau dari titik tengah referensi saat layak. Klaim diskon sumber yang berbeda dari hitungan disimpan dalam `Klaim Diskon Sumber (Review) (%)`; promo paket/beli banyak dan harga tidak sebanding tidak dihitung otomatis.
-- Harga normal yang secara eksplisit disebut dalam detail penawaran dapat dipulihkan bila parser awal melewatkannya, kecuali penawaran tampak seperti bundling/syarat transaksi.
-- Urutan kolom utama diubah menjadi `Harga Asli (Rp)` → `Harga Promo (Rp)` → `Diskon (%)`, kemudian basis harga asli, nilai asli dari sumber, referensi tengah/rentang, dan dasar diskon.
-- Workbook menampilkan sheet `Referensi Harga` untuk seluruh database dan `Rentang Referensi Pengguna` untuk 102 rentang kanonis.
+## Status akhir
 
-## Hasil pengolahan CSV/XLSX yang dilampirkan
+- **97 tes lulus**, termasuk regresi parser diskon nominal. `compileall`, self-test normalisasi nama, dan self-test collector juga lulus.
+- `hasil/Katalog_Promo_Final.xlsx` berhasil dibuat ulang dan dibuka untuk verifikasi struktur.
+- Sheet yang ditujukan untuk pemakaian harian: `Ringkasan`, `Promo`, `Perlu Diperiksa`, dan `Ringkasan Kategori`. Pada workbook lampiran perbaikan ini, semua 16 tab terlihat karena metadata hidden tidak dipertahankan saat ekspor perbaikan; seluruh data audit tetap ada. Pipeline proyek yang dijalankan ulang memakai kode yang telah diperbaiki menerapkan pengaturan tampilan normal.
+- Sheet `Promo` memiliki **455 baris promo**, menggunakan 13 kolom. Urutan kolom `Diskon (%)` diikuti langsung oleh `Masa Berlaku`.
+- Sel `Diskon (%)`: **380 nilai numerik**, **75 bertanda `Belum bisa dihitung`**, dan **0 sel kosong**.
+- Pemeriksaan promo dengan teks potongan nominal menemukan nominal seperti `Diskon Rp10.000` ditampilkan di `Hemat (Rp)`, bukan dianggap sebagai `Harga Promo (Rp)`. Kasus yang dapat dibandingkan dengan rentang acuan satuan yang cocok ditandai jelas sebagai estimasi.
 
-- 457 baris katalog promo diproses ulang.
-- 98 baris memiliki kecocokan ke salah satu rentang/alias referensi.
-- 54 baris diisi `Harga Asli (Rp)` dengan titik tengah referensi pengguna.
-- 51 diskon dihitung dari titik tengah rentang referensi.
-- 27 harga normal yang sudah tertulis eksplisit di detail penawaran dipulihkan ke kolom harga asli sumber.
-- 14 penawaran bersyarat/paket dan 9 harga di luar rentang tidak dipaksakan menjadi diskon estimasi; rentang lebar juga ditahan dari perhitungan otomatis.
+## Perbaikan parser
 
-Angka di atas berlaku untuk katalog yang diunggah pada sesi ini, bukan jaminan jumlah pada scraping berikutnya. Rentang harga adalah acuan perkiraan dari pengguna, bukan verifikasi harga retailer.
+- Regex untuk label `diskon`, `potongan`, dan `hemat` diperbaiki agar benar-benar mengenali batas kata dan spasi.
+- `parse_offer_text()` tidak lagi menganggap `Beli 5 pcs Diskon Rp. 10.000` sebagai produk dengan harga promo Rp10.000; hasilnya menempatkan nominal itu sebagai potongan nominal.
+- Fungsi Excel juga memperbaiki baris legacy ketika `promo_price` sebelumnya keliru memuat nilai diskon. Teks `raw_line` yang mengulang `offer_text` tidak membuat nominal yang sama dihitung dua kali.
+- Diskon dihitung hanya dari pasangan harga yang dapat dibandingkan atau dari acuan yang sesuai dengan satuan/kondisi; selain itu nilainya diberi status `Belum bisa dihitung`, bukan dibuat-buat.
 
-## Perubahan file utama
+## Data referensi dan batasan
 
-- `engine/promo_price_reference.py`
-- `engine/enrich_existing_promo_catalog_multisource.py`
-- `engine/seed_user_price_references.py`
-- `engine/test_price_reference.py`
-- `data/product_price_reference.csv`
-- `data/user_product_price_ranges.csv`
-- `data/user_product_price_reference_aliases.csv`
+- Daftar sumber referensi pengguna memuat **102 rentang harga** dan **89 alias katalog terpilih**. Database harga yang dibundel berisi 394 rekaman pada snapshot ini.
+- Rentang yang disediakan pengguna adalah **estimasi acuan**, bukan harga resmi merchant. Data dari situs agregator juga bukan verifikasi resmi retailer.
+- Harga/diskon berbasis perkiraan tetap diberi penanda pada `Status Diskon`; periksa `Sumber URL`, syarat transaksi, satuan, dan masa berlaku sebelum menganggap penawaran universal.
 
-## Verifikasi
+## File utama
 
-- `python -m compileall -q engine`: lulus.
-- `python -m pytest -q engine`: **91 tes lulus**.
+- `hasil/Katalog_Promo_Final.xlsx` — workbook Excel ringkas dengan sheet audit tersembunyi.
+- `hasil/Katalog_Promo_Final.csv` — data CSV utama.
+- `_internal/` — data antara, log, laporan kualitas ekspor, kandidat review/duplikat, serta audit lengkap.
+- `Jalankan_Promo.bat` — jalankan tes dan pipeline lengkap di Windows.
+- `Jalankan_Promo.bat --test-only` — tes offline tanpa scraping live.
 
-## Batasan
+## Perbaikan kompatibilitas Excel — 25 Oktober 2026
 
-Harga dari daftar rentang dan hasil fallback tidak dinyatakan sebagai harga resmi retailer. Referensi tidak digunakan untuk menghitung diskon ketika transaksi bersyarat, harga promo di luar rentang, satuan tidak sebanding, atau rentang terlalu lebar. Cek kolom `Basis Harga Asli`, `Merchant Acuan Referensi`, `Status Referensi Harga`, `Dasar Diskon`, dan `Catatan` sebelum mempublikasikan diskon estimasi.
+- Penyebab yang diidentifikasi: sheet `Promo` dan `Perlu Diperiksa` menuliskan `AutoFilter` worksheet pada rentang yang sama dengan AutoFilter bawaan Excel Table. Ini membuat Excel menawarkan perbaikan dengan menghapus fitur AutoFilter/tabel saat dibuka.
+- Kode pembuat workbook telah diperbaiki: untuk sheet yang menggunakan Excel Table, filter dikelola oleh tabel dan tidak lagi ditulis terpisah ke worksheet.
+- Workbook lampiran dibangun ulang dengan dua objek tabel tanpa AutoFilter duplikat. Struktur XLSX tervalidasi, seluruh 16 sheet dan data kunci dapat dibaca kembali, serta arsip XLSX lolos tes integritas.
+- Seluruh **97 tes lulus** setelah perubahan kode.
+
+
+
+## Tindak lanjut P0 pada paket revisi ini
+
+- HTTP 404/410 dan error HTTP 4xx URL-level kini dicatat terpisah dari pemblokiran sumber; artikel lain tetap diproses. Status 401/403/429, 5xx, request error, dan redirect keluar domain tetap memicu penghentian sumber.
+- Ditambahkan `hasil/Katalog_Promo_Final_Ringkas.csv` dengan kolom dan nilai tampilan yang dihasilkan oleh transformasi yang sama dengan sheet Excel `Promo`. CSV utama tetap menjadi ekspor lebih rinci untuk pengolahan data.
+- Ditambahkan tes regresi untuk 404 pada satu artikel, kesamaan transformasi CSV ringkas dengan tampilan Excel, serta penolakan harga yang hanya muncul pada judul kampanye tanpa bukti harga di penawaran.
+- Verifikasi offline pada revisi: 101 tes otomatis lulus. Ini tidak menggantikan smoke test scraping live.

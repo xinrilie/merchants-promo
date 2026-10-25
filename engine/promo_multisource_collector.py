@@ -445,6 +445,38 @@ def derive_campaign_type(title: str) -> str:
     return "Lainnya"
 
 
+def parse_explicit_discount_amount(text: str) -> int | None:
+    """Extract a stated nominal saving; never treat 'Diskon RpX' as product price.
+
+    Returns None for percentage discounts and for amounts that are not explicitly
+    labelled as a saving. The caller must still check whether a comparable
+    normal/promo price pair is present in the same offer.
+    """
+    source = clean_text(text)
+    if not source or re.search(r"\b(?:diskon|potongan|hemat)\s*\d+(?:[.,]\d+)?\s*%", source, re.I):
+        return None
+    match = re.search(
+        r"\b(?:diskon|potongan(?:\s+harga)?|hemat)\s*(?:nominal\s*)?rp\.?\s*([0-9][0-9.,]*)",
+        source,
+        re.I,
+    )
+    if not match:
+        return None
+    # Only one explicitly stated saving is supported by this parser.
+    return parse_idr(match.group(1))
+
+
+def has_explicit_price_pair(text: str) -> bool:
+    """Whether offer text explicitly contains both promo and normal prices."""
+    source = clean_text(text)
+    has_normal = bool(re.search(r"\bharga\s+(?:normal|asli|reguler)", source, re.I))
+    has_promo = bool(
+        re.search(r"\bharga\s+(?:promo|spesial|setelah\s+diskon)", source, re.I)
+        or re.search(r"\b(?:dari|dibanding(?:kan)?)\s+harga\s+(?:normal|asli|reguler)", source, re.I)
+    )
+    return has_normal and has_promo and len(re.findall(r"\brp\.?\s*[0-9][0-9.,]*", source, re.I)) >= 2
+
+
 def parse_offer_text(product_text: str, offer_text: str, source_mode: str) -> dict:
     offer = clean_text(offer_text)
     whole = f"{product_text} {offer}".strip()
@@ -472,6 +504,27 @@ def parse_offer_text(product_text: str, offer_text: str, source_mode: str) -> di
         deal_type = "Diskon Persentase"
     elif purchase_condition:
         deal_type = "Bundle Purchase"
+
+    explicit_savings = parse_explicit_discount_amount(offer)
+    if (
+        explicit_savings is not None
+        and normal is None
+        and promo is None
+        and not has_explicit_price_pair(offer)
+        and len(re.findall(r"\brp\.?\s*[0-9][0-9.,]*", offer, re.I)) == 1
+    ):
+        return {
+            "normal_price": None,
+            "promo_price": None,
+            "discount_percent": None,
+            "discount_savings_rp": explicit_savings,
+            "discount_basis": "explicit_amount_discount",
+            "price_parse_method": "explicit_discount_amount_not_product_price",
+            "price_basis": "discount_amount_offer",
+            "purchase_condition": purchase_condition,
+            "deal_type": "Potongan Nominal",
+            "price_quality_flag": None,
+        }
 
     if promo is not None:
         method = "explicit_promo_label"
@@ -1054,6 +1107,20 @@ def fetch_page(
             info["status"] = "server_error"
             info["error"] = f"HTTP {response.status_code}; sumber dihentikan untuk run ini."
             return None, info
+        # A stale/deleted article is an URL-level problem, not evidence that the
+        # whole source is unavailable. Continue discovering and parsing other URLs.
+        if response.status_code == 404:
+            info["status"] = "not_found"
+            info["error"] = "HTTP 404; URL tidak ditemukan, lanjut ke URL sumber berikutnya."
+            return None, info
+        if response.status_code == 410:
+            info["status"] = "gone"
+            info["error"] = "HTTP 410; URL telah dihapus, lanjut ke URL sumber berikutnya."
+            return None, info
+        if 400 <= response.status_code < 500:
+            info["status"] = "client_error"
+            info["error"] = f"HTTP {response.status_code}; URL tidak dapat diproses, sumber lain tetap dicoba."
+            return None, info
         response.raise_for_status()
 
         # Do not attribute a redirected page on an unrelated host to the
@@ -1340,7 +1407,10 @@ def build_source_health_report(source_names, products, request_log) -> dict:
         report[source_name] = {
             "request_count": len(source_requests),
             "successful_requests": ok_requests,
-            "failed_requests": sum(item.get("status") in {"request_error", "error", "not_html"} for item in source_requests),
+            "failed_requests": sum(item.get("status") in {"request_error", "error", "not_html", "not_found", "gone", "client_error"} for item in source_requests),
+            "not_found_requests": sum(item.get("status") == "not_found" for item in source_requests),
+            "gone_requests": sum(item.get("status") == "gone" for item in source_requests),
+            "other_client_error_requests": sum(item.get("status") == "client_error" for item in source_requests),
             "blocked_or_limited_requests": sum(item.get("status") == "blocked_or_limited" for item in source_requests),
             "product_rows_in_output": len(source_products),
             "fresh_product_rows": len(fresh_source_products),
