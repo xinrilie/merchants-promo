@@ -14,6 +14,7 @@ from promo_price_reference import identity_key
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REVIEW_XLSX = ROOT / "hasil" / "Review_Harga_Poster_OCR.xlsx"
 DEFAULT_OVERRIDES_CSV = ROOT / "_internal" / "promo_poster_price_overrides.csv"
+NO_MATCH_SKU_SENTINEL = "Tidak ada SKU yang cocok"
 OVERRIDE_FIELDS = [
     "candidate_id", "decision", "product_text", "normal_price", "promo_price",
     "source_name", "campaign_title", "article_url", "image_url", "ocr_snippet",
@@ -114,7 +115,9 @@ def import_reviewed_prices(review_xlsx: str | Path = DEFAULT_REVIEW_XLSX, overri
             confidence = str(row.get("Keyakinan OCR") or "").strip()
             claim = str(row.get("Klaim Diskon OCR (%)") or "").strip()
             issues = []
-            if not product or not identity_key(product):
+            if product.casefold() == NO_MATCH_SKU_SENTINEL.casefold():
+                issues.append("pilihan 'Tidak ada SKU yang cocok' bukan nama produk; koreksi SKU atau ubah keputusan ke CEK/TOLAK")
+            elif not product or not identity_key(product):
                 issues.append("nama produk untuk review kosong")
             if normal_price is None and promo_price is None:
                 issues.append("isi minimal harga normal atau harga promo")

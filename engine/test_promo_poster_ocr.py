@@ -398,7 +398,7 @@ def test_review_workbook_adds_row_specific_sku_dropdown_choices(tmp_path):
     assert ws.cell(2, headers.index("Kandidat SKU 2") + 1).value == "Sunlight Lemon 910 ml"
     validations = list(ws.data_validations.dataValidation)
     sku_validation = next(v for v in validations if "C2" in str(v.sqref))
-    assert sku_validation.formula1 == "=$S2:$U2"
+    assert sku_validation.formula1 == "=$S2:$V2"
     status = ws.cell(2, headers.index("Validasi Klaim Diskon") + 1).value
     assert status == "BELUM BISA DIBANDINGKAN"
     wb.close()
@@ -428,3 +428,99 @@ def test_build_candidates_suggests_several_catalog_skus_without_auto_approving_t
     assert row["matched_product_name"] == "Sunlight Lime 910 ml"
     # Choice fields are suggestions only; they don't alter review/approval state.
     assert "decision" not in row
+
+
+
+def test_sku_match_rejects_size_only_and_generic_category_similarity():
+    from promo_poster_ocr import _matching_score, _candidate_sku_choices
+
+    cases = [
+        ("Maestro Wijen Sangrai 100 g", "Kerupuk Tengiri 100g"),
+        ("Maestro Wijen Sangrai 100 g", "Pasta Gigi MW 3 Whitening 100g"),
+        ("Alfamart Facial Tissue Albi 50'S", "Fac Tissue Doraemon 70s"),
+    ]
+    for sku, context in cases:
+        score, note = _matching_score(sku, context)
+        assert score == 0.0, (sku, context, score, note)
+        choices = _candidate_sku_choices(context, [{"product_text": sku, "product_validation_status": "eligible"}], [])
+        assert all(name != sku for name, _ in choices), (sku, context, choices)
+
+
+def test_sku_match_rejects_conflicting_flavour_or_package_size():
+    from promo_poster_ocr import _matching_score
+
+    score, note = _matching_score("Sunlight Lime 910 ml", "Sunlight Lemon 910 ml")
+    assert score == 0.0
+    assert "varian" in note.lower()
+
+    score, note = _matching_score("Bebio Minyak Telon Plus 60 ml", "Bebio Minyak Telon Plus 100 ml")
+    assert score == 0.0
+    assert "ukuran" in note.lower()
+
+
+def test_sku_match_keeps_exact_name_high_and_wrong_size_name_out():
+    from promo_poster_ocr import _matching_score, _suggest_product
+
+    score, note = _matching_score("Bebio Minyak Telon Plus 60 ml", "Bebio Minyak Telon Plus 60ml")
+    assert score >= 0.95
+    name, best_score, note = _suggest_product("Bebio Minyak Telon Plus 60ml", [
+        {"product_text": "Bebio Minyak Telon Plus 100 ml", "product_validation_status": "eligible"},
+        {"product_text": "Bebio Minyak Telon Plus 60 ml", "product_validation_status": "eligible"},
+    ])
+    assert name == "Bebio Minyak Telon Plus 60 ml"
+    assert best_score >= 0.95
+
+
+def test_no_match_option_is_in_sku_dropdown_and_importer_rejects_it(tmp_path):
+    from openpyxl import load_workbook
+    from promo_poster_ocr import make_review_workbook
+    from promo_poster_overrides import NO_MATCH_SKU_SENTINEL, import_reviewed_prices
+
+    review = tmp_path / "review.xlsx"
+    overrides = tmp_path / "overrides.csv"
+    candidate = {
+        "candidate_id": "NOMATCH123456", "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo", "article_url": "https://example.test/a",
+        "image_url": "https://example.test/p.jpg", "ocr_snippet": "Kerupuk Tengiri Rp18.500 Rp13.900",
+        "local_product_name_suggestion": "Kerupuk Tengiri 100g", "normal_price_candidate": 18500,
+        "promo_price_candidate": 13900, "discount_claim_percent": 25,
+        "discount_calculated_percent": 24.9, "ocr_confidence": .95,
+        "catalog_sku_candidate_1": "", "catalog_sku_candidate_2": "", "catalog_sku_candidate_3": "",
+    }
+    make_review_workbook([candidate], review)
+    wb = load_workbook(review)
+    ws = wb["Kandidat OCR"]
+    headers = [cell.value for cell in ws[1]]
+    sku4_col = headers.index("Pilihan jika tidak ada SKU cocok") + 1
+    assert ws.cell(2, sku4_col).value == NO_MATCH_SKU_SENTINEL
+    validations = list(ws.data_validations.dataValidation)
+    sku_validation = next(v for v in validations if "C2" in str(v.sqref))
+    assert sku_validation.formula1 == "=$S2:$V2"
+    # Selecting the sentinel and marking TERIMA must never import a fake product.
+    ws.cell(2, headers.index("Keputusan") + 1, "TERIMA")
+    ws.cell(2, headers.index("Nama Produk untuk Review") + 1, NO_MATCH_SKU_SENTINEL)
+    ws.cell(2, headers.index("Harga Normal untuk Review (Rp)") + 1, 18500)
+    ws.cell(2, headers.index("Harga Promo untuk Review (Rp)") + 1, 13900)
+    wb.save(review)
+    wb.close()
+
+    stats = import_reviewed_prices(review, overrides)
+    assert stats["accepted_or_updated"] == 0
+    assert stats["rejected_invalid"] == 1
+    assert any("bukan nama produk" in error for error in stats["errors"])
+
+
+def test_sku_dropdown_does_not_recommend_conflicting_variant_even_with_same_brand_and_size():
+    from promo_poster_ocr import _candidate_sku_choices, _suggest_product
+
+    products = [
+        {"product_text": "Sunlight Lime 910 ml", "product_validation_status": "eligible"},
+        {"product_text": "Sunlight Lemon 910 ml", "product_validation_status": "eligible"},
+    ]
+    choices = _candidate_sku_choices("Sunlight Lime 910 ml", products, [], limit=3)
+    assert choices
+    assert choices[0][0] == "Sunlight Lime 910 ml"
+    assert all(name != "Sunlight Lemon 910 ml" for name, _ in choices)
+    matched, score, note = _suggest_product("Sunlight Lime 910 ml", products)
+    assert matched == "Sunlight Lime 910 ml"
+    assert score >= 0.95

@@ -29,10 +29,10 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
-from promo_names import product_name_similarity, product_name_size_signature
+from promo_names import product_name_similarity, product_name_size_signature, product_name_variant_signature
 from promo_price_reference import identity_key
 from promo_market_prices import parse_idr_price
-from promo_poster_overrides import DEFAULT_REVIEW_XLSX, import_reviewed_prices
+from promo_poster_overrides import DEFAULT_REVIEW_XLSX, NO_MATCH_SKU_SENTINEL, import_reviewed_prices
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE_INDEX = ROOT / "_internal" / "promo_multisource_catalog_images.csv"
@@ -70,7 +70,7 @@ REVIEW_HEADERS = [
     "Harga Normal Kandidat (Rp)", "Harga Promo Kandidat (Rp)",
     "Klaim Diskon OCR (%)", "Diskon Hitung (%)", "Kecocokan Nama", "Keyakinan OCR",
     "Potongan Teks Poster OCR", "Sumber", "Kampanye", "URL Artikel", "URL Gambar", "Catatan Review",
-    "Kandidat SKU 1", "Kandidat SKU 2", "Kandidat SKU 3",
+    "Kandidat SKU 1", "Kandidat SKU 2", "Kandidat SKU 3", "Pilihan jika tidak ada SKU cocok",
     "Skor SKU 1", "Skor SKU 2", "Skor SKU 3",
     "Validasi Klaim Diskon", "Selisih Diskon (poin persentase)",
 ]
@@ -769,24 +769,128 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
     return unique
 
 
+# Terms that are common across unrelated SKUs. These words may describe a
+# category, packaging, or campaign but must never establish a SKU match alone.
+_SKU_GENERIC_TOKENS = {
+    "harga", "normal", "asli", "reguler", "promo", "diskon", "discount", "sale",
+    "hemat", "off", "beli", "buy", "get", "gratis", "voucher", "periode", "berlaku",
+    "katalog", "cashback", "special", "spesial", "baru", "semua", "varian", "variant",
+    "variants", "all", "setiap", "belanja", "produk", "pcs", "pc", "piece", "pieces",
+    "sheets", "sheet", "lembar", "buah", "pack", "sachet", "ref", "refill", "isi",
+    "ukuran", "size", "ml", "g", "gr", "gram", "kg", "mg", "l", "liter", "litre",
+    "x", "dan", "dengan", "untuk", "the", "of", "and", "for", "new", "terbaru",
+    "mingguan", "weekend", "online", "terdekat", "termurah", "murah", "pilihan",
+    # Common descriptive/category words that cause unrelated names to look similar.
+    "facial", "tissue", "tisu", "shampoo", "shampo", "conditioner", "pasta", "gigi",
+    "toothpaste", "toothbrush", "whitening", "kerupuk", "crackers", "cracker", "biskuit",
+    "biscuits", "biscuit", "wafer", "pants", "pant", "diaper", "diapers", "popok",
+    "adult", "baby", "cologne", "body", "lotion", "sabun", "soap", "detergen", "detergent",
+    "liquid", "minyak", "goreng", "saus", "sauce", "tomat", "susu", "milk", "drink",
+    "drinks", "air", "water", "instant", "mie", "mi", "noodle", "noodles", "good",
+    "skin", "premium", "comfort", "fit", "freshness", "family", "jumbo", "large", "small",
+}
+_SKU_CATEGORY_TOKENS = {
+    "facial", "tissue", "tisu", "shampoo", "shampo", "conditioner", "pasta", "gigi",
+    "toothpaste", "toothbrush", "kerupuk", "crackers", "cracker", "biskuit", "biscuits",
+    "biscuit", "wafer", "pants", "pant", "diaper", "diapers", "popok", "adult", "baby",
+    "cologne", "body", "lotion", "sabun", "soap", "detergen", "detergent", "liquid",
+    "minyak", "goreng", "saus", "sauce", "tomat", "susu", "milk", "drink", "drinks",
+    "air", "water", "instant", "mie", "mi", "noodle", "noodles",
+}
+_SKU_UNIT_TOKENS = {"ml", "g", "gr", "gram", "kg", "mg", "l", "liter", "litre", "pcs", "pc", "s"}
+
+
+def _sku_match_features(value: str) -> tuple[set[str], set[str], set[str], set[str]]:
+    """Extract distinctive SKU tokens while keeping category, variant and size evidence separate."""
+    tokens = set(identity_key(value).split())
+    # Quantities and size codes (e.g. M34, L30, 100, 375ml) cannot identify a brand/SKU.
+    tokens = {t for t in tokens if not any(ch.isdigit() for ch in t) and len(t) > 1 and t not in _SKU_UNIT_TOKENS}
+    categories = tokens & _SKU_CATEGORY_TOKENS
+    core = tokens - _SKU_GENERIC_TOKENS - _SKU_CATEGORY_TOKENS
+    variants = set(product_name_variant_signature(value))
+    sizes = set(product_name_size_signature(value))
+    return core, categories, variants, sizes
+
+
+def _matched_core_tokens(left: set[str], right: set[str]) -> tuple[set[str], set[str]]:
+    """Return token matches, allowing only very conservative OCR typos for long words."""
+    matched_left: set[str] = set()
+    matched_right: set[str] = set()
+    for a in left:
+        exact = next((b for b in right if b == a), None)
+        if exact is not None:
+            matched_left.add(a)
+            matched_right.add(exact)
+            continue
+        best = None
+        best_ratio = 0.0
+        if len(a) >= 5:
+            from difflib import SequenceMatcher
+            for b in right:
+                if len(b) < 5:
+                    continue
+                ratio = SequenceMatcher(None, a, b, autojunk=False).ratio()
+                if ratio > best_ratio:
+                    best, best_ratio = b, ratio
+        if best is not None and best_ratio >= 0.88:
+            matched_left.add(a)
+            matched_right.add(best)
+    return matched_left, matched_right
+
+
 def _matching_score(product_name: str, context: str) -> tuple[float, str]:
+    """Score only distinctive SKU evidence; common categories/sizes alone are insufficient."""
     name_key = identity_key(product_name)
     text_key = identity_key(context)
     if not name_key or not text_key:
         return 0.0, "Nama tidak terbaca cukup jelas."
-    name_tokens = set(name_key.split())
-    text_tokens = set(text_key.split())
-    coverage = len(name_tokens & text_tokens) / max(1, len(name_tokens))
-    similarity = product_name_similarity(product_name, context)
-    score = round(0.55 * similarity + 0.45 * coverage, 4)
-    expected_sizes = set(product_name_size_signature(product_name))
-    seen_sizes = set(product_name_size_signature(context))
-    if expected_sizes and not (expected_sizes & seen_sizes):
-        score *= 0.72
-        note = "Ukuran SKU tidak terbaca/cocok di konteks OCR; perlu konfirmasi."
-    else:
-        note = "Ukuran cocok atau tidak dicantumkan pada nama katalog."
-    return round(score, 4), note
+
+    name_core, name_categories, name_variants, expected_sizes = _sku_match_features(product_name)
+    text_core, text_categories, text_variants, seen_sizes = _sku_match_features(context)
+    if not name_core or not text_core:
+        return 0.0, "Tidak ada token inti produk yang cukup spesifik; SKU tidak direkomendasikan."
+
+    shared_query, shared_name = _matched_core_tokens(text_core, name_core)
+    if not shared_query:
+        return 0.0, "Tidak ada token inti produk yang cocok; SKU tidak direkomendasikan."
+
+    # Explicitly contradicting category, package size, or flavour/formula is a hard stop.
+    if name_categories and text_categories and not (name_categories & text_categories):
+        return 0.0, "Kategori produk saling bertentangan; SKU tidak direkomendasikan."
+    if expected_sizes and seen_sizes and not (expected_sizes & seen_sizes):
+        return 0.0, "Ukuran/kemasan SKU berbeda; kandidat tidak direkomendasikan."
+    if name_variants and text_variants and not (name_variants & text_variants):
+        return 0.0, "Varian rasa/aroma/formula bertentangan; SKU tidak direkomendasikan."
+
+    # F1 penalizes either a candidate with many unmatched identity words or OCR context
+    # that appears to contain another product title. Sizes/categories add corroboration,
+    # never identity by themselves.
+    precision = len(shared_name) / max(1, len(name_core))
+    recall = len(shared_query) / max(1, len(text_core))
+    f1 = (2 * precision * recall / (precision + recall)) if precision + recall else 0.0
+    similarity = product_name_similarity(" ".join(sorted(name_core)), " ".join(sorted(text_core)))
+    score = 0.70 * f1 + 0.30 * similarity
+    note = "Token inti produk cocok."
+    if name_categories and text_categories:
+        category_overlap = len(name_categories & text_categories) / max(1, len(name_categories | text_categories))
+        score += 0.06 * category_overlap
+        note += " Kategori produk mendukung kecocokan."
+    if expected_sizes and seen_sizes:
+        score += 0.08
+        note += " Ukuran/kemasan cocok."
+    if name_variants and text_variants:
+        score += 0.04
+        note += " Token varian cocok."
+    if len(shared_query) == 1:
+        # A single brand/token can make a useful manual hint, but is rarely enough
+        # to auto-fill a catalog SKU unless category and size also corroborate it.
+        if not (name_categories & text_categories) or not (expected_sizes & seen_sizes):
+            score = min(score, 0.69)
+            note += " Hanya satu token inti cocok; gunakan sebagai kandidat manual, bukan auto-match."
+    if len(text_variants) > 1:
+        score = min(score, 0.78)
+        note += " Beberapa varian terdeteksi pada konteks OCR; tidak aman untuk auto-match."
+    return round(max(0.0, min(1.0, score)), 4), note
 
 
 def _rank_product_candidates(
@@ -819,11 +923,11 @@ def _suggest_product(context: str, page_products: list[dict]) -> tuple[str, floa
     best_name, best_score, best_note = ranked[0]
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
     margin = best_score - second_score
-    if best_score < 0.62:
+    if best_score < 0.82:
         return "", best_score, "Skor kecocokan katalog di bawah 0,62; nama SKU tidak diisi otomatis."
-    if second_score >= 0.62 and margin < 0.08 and best_score < 0.92:
+    if second_score >= 0.72 and margin < 0.12 and best_score < 0.96:
         return "", best_score, "Beberapa SKU katalog memiliki skor mirip; nama SKU dibiarkan kosong agar tidak salah cocok."
-    if margin >= 0.08 or best_score >= 0.92 or len(ranked) == 1:
+    if margin >= 0.12 or best_score >= 0.96 or len(ranked) == 1:
         return best_name, best_score, best_note + f" Skor {best_score:.2f}; margin ke kandidat kedua {margin:.2f}."
     return "", best_score, "Kecocokan katalog ambigu; perlu pilih nama produk setelah membuka poster."
 
@@ -853,8 +957,8 @@ def _candidate_sku_choices(
     matched_name: str = "", matched_score: float = 0.0, limit: int = 3,
 ) -> list[tuple[str, float]]:
     """Return a few plausible catalog SKU options for a dropdown, clearly unverified."""
-    ranked_page = _rank_product_candidates(context, page_products, limit=12, minimum_score=0.30)
-    ranked_fallback = _rank_product_candidates(context, fallback_products or [], limit=12, minimum_score=0.42)
+    ranked_page = _rank_product_candidates(context, page_products, limit=12, minimum_score=0.48)
+    ranked_fallback = _rank_product_candidates(context, fallback_products or [], limit=12, minimum_score=0.56)
     merged: dict[str, tuple[str, float, int]] = {}
     for priority, ranked in ((0, ranked_page), (1, ranked_fallback)):
         for name, score, _note in ranked:
@@ -951,7 +1055,14 @@ def build_candidates(
                 match_note = "Kecocokan dari katalog lintas sumber, bukan bukti langsung pada poster ini; wajib cek SKU/ukuran. " + fallback_note
         if not suggested and local_suggestion:
             match_note = match_note + " Saran OCR lokal tersedia terpisah; itu bukan kecocokan SKU terverifikasi."
-        sku_choices = _candidate_sku_choices(match_context, page_products, fallback_products, suggested, score, limit=3)
+        sku_match_context = match_context
+        # If OCR's local title consists only of generic category/size words (e.g.
+        # "Pants Good Skin M34/L30/S40"), use the bounded tile context so a nearby
+        # brand label such as MERRIES can be considered. Distinctive local names
+        # remain isolated to avoid borrowing a neighbouring product's brand.
+        if not _sku_match_features(sku_match_context)[0]:
+            sku_match_context = context
+        sku_choices = _candidate_sku_choices(sku_match_context, page_products, fallback_products, suggested, score, limit=3)
         discount_status, discount_diff = _discount_assessment(window.get("discount_claim_percent"), window.get("discount_calculated_percent"))
         price_values = window["price_values"]
         seed = "|".join([
@@ -1216,7 +1327,7 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
             candidate.get("match_note", ""), candidate.get("ocr_confidence", ""), candidate.get("ocr_snippet", ""),
             candidate.get("source_name", ""), candidate.get("campaign_title", ""), candidate.get("article_url", ""),
             candidate.get("image_url", ""), _build_review_note(candidate, old.get("Catatan Review")),
-            candidate.get("catalog_sku_candidate_1", ""), candidate.get("catalog_sku_candidate_2", ""), candidate.get("catalog_sku_candidate_3", ""),
+            candidate.get("catalog_sku_candidate_1", ""), candidate.get("catalog_sku_candidate_2", ""), candidate.get("catalog_sku_candidate_3", ""), NO_MATCH_SKU_SENTINEL,
             candidate.get("catalog_sku_score_1", ""), candidate.get("catalog_sku_score_2", ""), candidate.get("catalog_sku_score_3", ""),
             discount_status, discount_difference,
         ]
@@ -1234,7 +1345,7 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
     ws.row_dimensions[1].height = 42
-    widths = [15, 13, 38, 38, 22, 22, 20, 20, 16, 16, 45, 14, 76, 22, 48, 60, 70, 88, 38, 38, 38, 13, 13, 13, 32, 20]
+    widths = [15, 13, 38, 38, 22, 22, 20, 20, 16, 16, 45, 14, 76, 22, 48, 60, 70, 88, 38, 38, 38, 32, 13, 13, 13, 32, 20]
     for idx, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(idx)].width = width
     for cell in ws[1]:
@@ -1248,21 +1359,21 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
             row[idx - 1].number_format = '#,##0'
         for idx in (9, 10):
             row[idx - 1].number_format = '0.0"%"'
-        for idx in (22, 23, 24):
+        for idx in (23, 24, 25):
             row[idx - 1].number_format = '0.000'
-        row[25].number_format = '0.0'
+        row[26].number_format = '0.0'
         # Yellow = editable review input; grey = OCR-generated candidate only.
         for idx in (2, 3, 5, 6, 18):
             row[idx - 1].fill = PatternFill("solid", fgColor="FFF2CC")
-        for idx in (4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26):
+        for idx in (4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27):
             row[idx - 1].fill = PatternFill("solid", fgColor="E7E6E6")
-        status_value = str(row[24].value or "")
+        status_value = str(row[25].value or "")
         if status_value.startswith("TIDAK COCOK"):
-            row[24].fill = PatternFill("solid", fgColor="F4CCCC")
+            row[25].fill = PatternFill("solid", fgColor="F4CCCC")
         elif status_value.startswith("COCOK"):
-            row[24].fill = PatternFill("solid", fgColor="D9EAD3")
+            row[25].fill = PatternFill("solid", fgColor="D9EAD3")
         elif status_value == "BELUM BISA DIBANDINGKAN":
-            row[24].fill = PatternFill("solid", fgColor="FCE5CD")
+            row[25].fill = PatternFill("solid", fgColor="FCE5CD")
     ws["B1"].comment = Comment(
         "CEK = belum disetujui. Hanya TERIMA yang mengaktifkan nilai pada kolom review; TOLAK menutup kandidat.",
         "Merchants Promo",
@@ -1283,6 +1394,10 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
         "Nilai awal disalin dari kandidat OCR untuk memudahkan review. Ini bukan persetujuan; cek poster dan pilih TERIMA setelah yakin.",
         "Merchants Promo",
     )
+    ws["V1"].comment = Comment(
+        "Pilihan eksplisit jika tiga kandidat SKU tidak cocok. Jika dipilih, keputusan TERIMA akan ditolak importer sampai nama produk diisi dengan SKU yang benar. Jangan memilih kandidat hanya karena kategori atau ukuran serupa.",
+        "Merchants Promo",
+    )
     decision_validation = DataValidation(type="list", formula1='"CEK,TERIMA,TOLAK"', allow_blank=False)
     decision_validation.error = "Pilih CEK, TERIMA, atau TOLAK."
     decision_validation.errorTitle = "Keputusan OCR tidak valid"
@@ -1291,10 +1406,10 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
         decision_validation.add(f"B2:B{ws.max_row}")
     # The SKU field has a row-specific drop-down of the top three candidate names.
     # Information-style errors still allow a manually typed SKU when all choices are poor.
-    sku_validation = DataValidation(type="list", formula1="=$S2:$U2", allow_blank=True)
-    sku_validation.error = "Pilih salah satu kandidat SKU atau masukkan nama SKU yang sudah diverifikasi dari poster."
+    sku_validation = DataValidation(type="list", formula1="=$S2:$V2", allow_blank=True)
+    sku_validation.error = "Pilih kandidat SKU, pilih Tidak ada SKU yang cocok, atau masukkan nama SKU yang telah diverifikasi."
     sku_validation.errorTitle = "Pilihan SKU untuk review"
-    sku_validation.prompt = "Pilih kandidat SKU dari daftar; jika tidak cocok, ketik nama SKU yang benar setelah melihat poster."
+    sku_validation.prompt = "Jika semua opsi salah, pilih Tidak ada SKU yang cocok. Untuk manual, ketik nama SKU yang telah diperiksa pada poster."
     sku_validation.promptTitle = "Kecocokan SKU belum disetujui"
     sku_validation.showInputMessage = True
     sku_validation.showErrorMessage = True
@@ -1307,7 +1422,7 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     tips = [
         ["REVIEW HARGA DARI POSTER PROMO (OCR LOKAL)"],
         ["1. Buka URL Gambar untuk melihat poster asli; OCR dapat salah membaca digit atau menggabungkan dua SKU."],
-        ["2. Nama Produk untuk Review hanya diprefill jika ada kecocokan katalog yang kuat dan unik. Ini bukan persetujuan. Jika kosong, gunakan dropdown Kandidat SKU 1-3 di kolom S-U; skor hanya untuk membantu memilih dan bukan bukti mutlak. Saran OCR Lokal adalah teks poster, bukan SKU terverifikasi."],
+        ["2. Nama Produk untuk Review hanya diprefill jika ada kecocokan katalog yang kuat dan unik; ini bukan persetujuan. Sistem mencocokkan token inti produk; ukuran/varian atau kategori yang bertentangan akan menolak kandidat. Gunakan dropdown Kandidat SKU 1-3 di kolom S-U hanya jika nama, merek, ukuran dan varian sesuai poster. Kolom V menyediakan pilihan Tidak ada SKU yang cocok; pilihan ini mencegah label yang salah dipaksakan. Skor adalah ranking bantu, bukan probabilitas kebenaran."],
         ["3. Harga Normal/Promo untuk Review adalah nilai kandidat yang boleh diedit, BUKAN persetujuan. Harga tanpa label atau klaim diskon pendukung akan dibiarkan kosong."],
         ["4. HANYA pilihan TERIMA pada kolom Keputusan yang mengaktifkan harga. Nama produk untuk review wajib diisi secara eksplisit; saran OCR tidak dipakai otomatis sebagai pengganti."],
         ["5. Kolom Validasi Klaim Diskon membandingkan klaim OCR dengan hasil hitung. Toleransi status COCOK adalah maksimal 1,0 poin persentase; status TIDAK COCOK wajib diperiksa visual dan tidak boleh diterima otomatis."],

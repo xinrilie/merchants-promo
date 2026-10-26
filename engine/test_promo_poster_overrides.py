@@ -179,3 +179,32 @@ def test_importer_still_accepts_legacy_approved_column_names(tmp_path):
     stats = import_reviewed_prices(review, overrides)
     assert stats["accepted_or_updated"] == 1
     assert stats["active_overrides"] == 1
+
+
+
+def test_importer_rejects_no_match_sku_sentinel_as_product_name(tmp_path):
+    from openpyxl import Workbook
+    from promo_poster_overrides import NO_MATCH_SKU_SENTINEL, import_reviewed_prices
+
+    review = tmp_path / "review.xlsx"
+    overrides = tmp_path / "overrides.csv"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Kandidat OCR"
+    ws.append([
+        "ID Kandidat", "Keputusan", "Nama Produk untuk Review",
+        "Harga Normal untuk Review (Rp)", "Harga Promo untuk Review (Rp)",
+        "Sumber", "Kampanye", "URL Artikel", "URL Gambar", "Potongan Teks Poster OCR",
+    ])
+    ws.append([
+        "NO-MATCH-SENTINEL", "TERIMA", NO_MATCH_SKU_SENTINEL, 18500, 13900,
+        "Katalogpromosi.com", "Promo", "https://example.test/a",
+        "https://example.test/p.jpg", "Kerupuk Tengiri Rp18.500 Rp13.900",
+    ])
+    wb.save(review)
+    wb.close()
+
+    stats = import_reviewed_prices(review, overrides)
+    assert stats["accepted_or_updated"] == 0
+    assert stats["rejected_invalid"] == 1
+    assert any("bukan nama produk" in error for error in stats["errors"])
