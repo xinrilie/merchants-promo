@@ -30,7 +30,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
-from promo_names import product_name_similarity, product_name_size_signature, product_name_variant_signature
+from promo_names import product_name_similarity, product_name_size_signature, product_name_variant_signature, product_name_identity_warnings
 from promo_price_reference import identity_key
 from promo_market_prices import parse_idr_price
 from promo_poster_overrides import DEFAULT_REVIEW_XLSX, NO_MATCH_SKU_SENTINEL, import_reviewed_prices
@@ -46,9 +46,15 @@ OVERRIDES_CSV = ROOT / "_internal" / "promo_poster_price_overrides.csv"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REQUEST_TIMEOUT = (5, 15)
 OCR_PIPELINE_VERSION = "poster-ocr-v2.1-fast-crop"
+# Parser-only upgrades can rebuild price candidates from cached OCR boxes without re-running ONNX.
+CANDIDATE_PIPELINE_VERSION = "poster-ocr-v2.2-spatial-context"
 # Bound per-image crop inference time. Full-page OCR remains the primary pass;
 # color crops are only a rescue path for labels whose price was not read.
 MAX_COLOR_PRICE_CROPS_PER_IMAGE = 6
+# Product cards on HAP/weekly posters can contain 2 normal/promo price boxes
+# plus another product price just 4–8% of page height away. Keep price clusters
+# pair-sized and use the local title region separately.
+MAX_PRICE_CLUSTER_VERTICAL_SPAN_RATIO = 0.05
 USER_AGENT = "Mozilla/5.0 (compatible; MerchantsPromoPosterOCR/1.0; local catalog audit)"
 
 CACHE_FIELDS = [
@@ -61,7 +67,7 @@ LINE_FIELDS = [
     "line_no", "ocr_text", "ocr_confidence", "x0", "y0", "x1", "y1", "image_width", "image_height", "processed_at", "recognition_method",
 ]
 CANDIDATE_FIELDS = [
-    "candidate_id", "source_name", "campaign_title", "article_url", "image_url", "image_alt",
+    "candidate_id", "candidate_pipeline_version", "source_name", "campaign_title", "article_url", "image_url", "image_alt",
     "ocr_snippet", "price_values_json", "normal_price_candidate", "promo_price_candidate",
     "discount_claim_percent", "discount_calculated_percent", "ocr_confidence",
     "matched_product_name", "matched_product_score", "local_product_name_suggestion", "match_note", "candidate_note",
@@ -109,6 +115,16 @@ MULTIBUY_OFFER_RE = re.compile(
     r"(?i)\b(?:beli\s*\d+\s*(?:pcs?\s*)?(?:gratis|free)\s*\d+|"
     r"buy\s*\d+\s*get\s*\d+|ambil\s*\d+\s*gratis\s*\d+|"
     r"beli\s*\d+\s*gratis\s*\d+)\b"
+)
+# Purchase quantity may be stated in the offer title ("BELI 5 INDOMIE") or
+# attached to the price itself ("Rp15.300/5Pcs"). These are distinct from
+# packaging claims such as "BUY 1 EXTRA 1", which must never become retailer terms.
+BUY_QUANTITY_RE = re.compile(r"(?i)\b(?:beli|buy)\s*(\d{1,2})\b")
+PRICE_QUANTITY_SUFFIX_RE = re.compile(
+    r"(?i)(?:/|per\s*)(\d{1,2})\s*(?:p[ce]s?|buah|unit)\b"
+)
+ADD_QUANTITY_OFFER_RE = re.compile(
+    r"(?i)\btambah\s+(?:rp\.?\s*[\d.,]+\s+)?(?:dapat|untuk)\s+(\d{1,2})\s*(?:pcs?|pc|buah|unit)\b"
 )
 PACKAGING_EXTRA_RE = re.compile(
     r"(?i)\b(?:buy\s*1\s*extra\s*1|extra\s*(?:isi|content)|"
@@ -729,6 +745,69 @@ def _first_context_match(pattern: re.Pattern, segments: list[str]) -> str:
     return ""
 
 
+def _extract_purchase_condition(text: str) -> str:
+    """Return a cautious, review-only purchase-quantity note from localized OCR text.
+
+    Prefer explicit retail offer wording and the quantity attached to a price.
+    Packaging copy (notably "BUY 1 EXTRA 1") is excluded. If several distinct
+    quantities occur in the same region, preserve the ambiguity instead of
+    choosing one silently.
+    """
+    segments = [seg.strip() for seg in re.split(r"\s*(?:\||\r?\n)\s*", str(text or "")) if seg.strip()]
+    offer_phrases: list[str] = []
+    suffix_quantities: list[int] = []
+    for segment in segments:
+        # Explicit multi-buy/gift terms are more specific than a bare quantity.
+        multi = MULTIBUY_OFFER_RE.search(segment)
+        if multi:
+            offer_phrases.append(re.sub(r"\s+", " ", multi.group(0)).strip())
+            continue
+        if PACKAGING_EXTRA_RE.search(segment):
+            continue
+        if PACKAGING_PERCENT_CONTEXT_RE.search(segment) and not BUY_QUANTITY_RE.search(segment):
+            continue
+        buy = BUY_QUANTITY_RE.search(segment)
+        if buy:
+            # Exclude malformed OCR quantities and retain only explicit retail wording.
+            quantity = int(buy.group(1))
+            if 2 <= quantity <= 20:
+                offer_phrases.append(f"Beli {quantity}")
+        add = ADD_QUANTITY_OFFER_RE.search(segment)
+        if add:
+            quantity = int(add.group(1))
+            if 2 <= quantity <= 20:
+                offer_phrases.append(f"Tambah harga untuk {quantity} pcs")
+        for match in PRICE_QUANTITY_SUFFIX_RE.finditer(segment):
+            quantity = int(match.group(1))
+            if 2 <= quantity <= 50:
+                suffix_quantities.append(quantity)
+
+    offer_phrases = list(dict.fromkeys(offer_phrases))
+    suffix_quantities = list(dict.fromkeys(suffix_quantities))
+    all_quantities = set(suffix_quantities)
+    for phrase in offer_phrases:
+        m = re.search(r"(?i)\b(?:beli|buy)\s*(\d{1,2})\b", phrase)
+        if m:
+            all_quantities.add(int(m.group(1)))
+        m = re.search(r"(?i)\b(\d{1,2})\s*pcs\b", phrase)
+        if m:
+            all_quantities.add(int(m.group(1)))
+    if len(all_quantities) > 1:
+        return "AMBIGU: beberapa syarat jumlah terdeteksi (" + ", ".join(map(str, sorted(all_quantities))) + " pcs)"
+
+    parts = offer_phrases[:]
+    if suffix_quantities:
+        quantity = suffix_quantities[0]
+        suffix_note = f"harga tertera untuk {quantity} pcs"
+        if not parts:
+            parts.append(suffix_note.capitalize())
+        elif quantity not in all_quantities or not any(re.search(rf"(?i)\b{quantity}\b", p) for p in parts):
+            parts.append(suffix_note)
+        elif not any("harga tertera" in p.casefold() for p in parts):
+            parts.append(suffix_note)
+    return "; ".join(parts)
+
+
 def classify_promo_context(text: str) -> dict:
     """Classify review-only promo cues without assigning ambiguous prices to a SKU."""
     segments = [seg.strip() for seg in re.split(r"\s*(?:\||\r?\n)\s*", str(text or "")) if seg.strip()]
@@ -746,10 +825,6 @@ def classify_promo_context(text: str) -> dict:
         tags.append("LABEL HARGA SPESIAL TERDETEKSI")
     if PACKAGING_EXTRA_RE.search(joined) or PACKAGING_PERCENT_CONTEXT_RE.search(joined):
         tags.append("TEKS TAMBAHAN/KLAIM KEMASAN TERDETEKSI")
-    if not tags and (LABEL_NORMAL_RE.search(joined) or LABEL_PROMO_RE.search(joined)):
-        tags.append("LABEL HARGA NORMAL/PROMO TERDETEKSI")
-    if not tags:
-        tags.append("KONTEKS PROMO BELUM TERKLASIFIKASI")
 
     # Only emit a member price when the same OCR segment contains both the cue
     # and exactly one amount. A nearby member word is not enough to infer price role.
@@ -760,11 +835,17 @@ def classify_promo_context(text: str) -> dict:
             if len(values) == 1:
                 member_price = values[0]
                 break
-    multi = _first_context_match(MULTIBUY_OFFER_RE, segments)
+    purchase_condition = _extract_purchase_condition(joined)
+    if purchase_condition:
+        tags.append("SYARAT PEMBELIAN/JUMLAH TERDETEKSI — VERIFIKASI BASIS HARGA")
+    if not tags and (LABEL_NORMAL_RE.search(joined) or LABEL_PROMO_RE.search(joined)):
+        tags.append("LABEL HARGA NORMAL/PROMO TERDETEKSI")
+    if not tags:
+        tags.append("KONTEKS PROMO BELUM TERKLASIFIKASI")
     region = _first_context_match(REGION_CUE_RE, segments)
     return {
-        "promo_context_tags": "; ".join(tags),
-        "purchase_condition": multi,
+        "promo_context_tags": "; ".join(dict.fromkeys(tags)),
+        "purchase_condition": purchase_condition,
         "regional_scope": region,
         "member_price_candidate": member_price,
     }
@@ -880,16 +961,19 @@ def _line_center(line: dict) -> tuple[float, float]:
 
 
 def _cluster_price_anchor_lines(lines: list[dict], width: int, height: int) -> list[list[dict]]:
-    """Group OCR price lines that likely belong to the same product tile.
+    """Group paired price boxes without transitively swallowing the next SKU.
 
-    A poster can have multiple OCR boxes for normal/promo prices in one tile.
-    Group close anchors first, then use neighbouring tile anchors to set safe
-    boundaries. This avoids one large rectangular context mixing adjacent SKUs.
+    A simple connected-component rule used to join three prices in one column
+    (e.g. normal/promo for one product and a single price for the next product)
+    because each adjacent pair was less than 5.5% of page height apart. This
+    version also constrains the total vertical span and rejects implausible price
+    ratios before joining two distinct boxes. Ambiguous price rows stay separate.
     """
     anchors = [line for line in _sort_lines(lines) if extract_prices(str(line.get("text") or ""))]
     if not anchors:
         return []
     centers = [_line_center(line) for line in anchors]
+    values = [list(dict.fromkeys(item["price"] for item in extract_prices(str(line.get("text") or "")))) for line in anchors]
     parent = list(range(len(anchors)))
 
     def find(index: int) -> int:
@@ -898,13 +982,36 @@ def _cluster_price_anchor_lines(lines: list[dict], width: int, height: int) -> l
             index = parent[index]
         return index
 
+    def component_members(root: int) -> list[int]:
+        return [idx for idx in range(len(anchors)) if find(idx) == root]
+
     def union(a: int, b: int) -> None:
         ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
+        if ra == rb:
+            return
+        members = component_members(ra) + component_members(rb)
+        ys = [centers[idx][1] for idx in members]
+        if max(ys) - min(ys) > height * MAX_PRICE_CLUSTER_VERTICAL_SPAN_RATIO:
+            return
+        # Only pair one-price boxes when their values could plausibly represent
+        # normal/promo amounts. Clearly different scales (e.g. 10,000 and 321,600)
+        # should not merge just because OCR boxes are nearby. Explicitly labelled
+        # normal/promo lines may still group even when the arithmetic is unusual.
+        va, vb = values[a], values[b]
+        if len(va) == 1 and len(vb) == 1:
+            high, low = max(va[0], vb[0]), min(va[0], vb[0])
+            diff = (high - low) / high * 100 if high else 0.0
+            label_evidence = bool(
+                (LABEL_NORMAL_RE.search(str(anchors[a].get("text") or "")) or LABEL_PROMO_RE.search(str(anchors[a].get("text") or "")))
+                or (LABEL_NORMAL_RE.search(str(anchors[b].get("text") or "")) or LABEL_PROMO_RE.search(str(anchors[b].get("text") or "")))
+            )
+            if not label_evidence and not (2.0 <= diff <= 80.0):
+                return
+        parent[rb] = ra
 
-    # Same-tile price labels are normally close together; neighbouring SKU
-    # tiles are much farther apart. Use both axes to avoid joining whole rows.
+    # The poster design usually stacks normal/promo price boxes tightly. The
+    # total-span cap prevents a chain of adjacent boxes from joining successive
+    # products; numeric plausibility disambiguates nearby unrelated prices.
     for i, (x1, y1) in enumerate(centers):
         for j in range(i + 1, len(anchors)):
             x2, y2 = centers[j]
@@ -1007,7 +1114,10 @@ def _infer_stacked_price_pair(parsed: dict, lines: list[dict], width: int, heigh
             # must not become a normal/promo pair merely because values differ.
             if not (0.004 <= y_gap <= 0.105):
                 continue
-            if center_dx > 0.075 or (overlap < 0.20 and x0_gap > 0.04):
+            # Large price boxes often have different centers despite being
+            # clearly overlapping (e.g. 21.400 box vs Rp18.900 box). Trust strong
+            # horizontal overlap, but still reject truly side-by-side columns.
+            if (center_dx > 0.095 and overlap < 0.35) or (overlap < 0.20 and x0_gap > 0.04):
                 continue
             conf = min(_confidence(normal_line.get("confidence")), _confidence(promo_line.get("confidence")))
             quality = overlap - center_dx - abs(y_gap - 0.045) * 0.3 + conf * 0.05
@@ -1055,12 +1165,24 @@ def _local_product_name_suggestion(
         cleaned = _clean_local_product_line(raw)
         tokens = re.findall(r"[A-Za-z][A-Za-z0-9'&./-]*", cleaned)
         alpha_chars = sum(ch.isalpha() for ch in cleaned)
-        if alpha_chars < 5 or len(tokens) < 2 or len(tokens) > 10:
+        # Single-token brand/size boxes (e.g. "KANZLER", "PAROTI", "65g")
+        # are useful companions to an adjacent product-title line. They are
+        # attachable, but only a multi-token line can be the primary anchor.
+        attachable_single = len(tokens) == 1 and (
+            (alpha_chars >= 3 and not re.search(r"[A-Za-z]\d+[A-Za-z]", cleaned))
+            or bool(product_name_size_signature(cleaned))
+        )
+        if alpha_chars < 5 and not attachable_single:
+            continue
+        if len(tokens) < 1 or len(tokens) > 10:
             continue
         # A line that contains two distinct sizes often contains two SKU titles
         # merged by OCR. Do not invent a single combined product name.
         sizes = set(product_name_size_signature(cleaned))
-        if len(sizes) > 1:
+        size_numbers = {re.match(r"\d+(?:[.,]\d+)?", value).group(0) for value in sizes if re.match(r"\d+(?:[.,]\d+)?", value)}
+        # A single printed pack may appear as "380ml/380g". Treat equal numeric
+        # values in alternate units as one equivalent pack size, not two SKUs.
+        if len(size_numbers) > 1:
             continue
         if generic_only_re.search(cleaned):
             # Strip generic campaign tokens only when enough product-like terms remain.
@@ -1083,41 +1205,65 @@ def _local_product_name_suggestion(
 
     if not entries:
         return ""
-    entries.sort(key=lambda item: (-item["score"], item["dy"], item["dx"], len(item["text"])))
-    best = entries[0]
+    # Do not let a single generic word become the SKU anchor.
+    anchor_entries = [item for item in entries if len(re.findall(r"[A-Za-z][A-Za-z0-9'&./-]*", item["text"])) >= 2]
+    if not anchor_entries:
+        return ""
+    anchor_entries.sort(key=lambda item: (-item["score"], item["dy"], item["dx"], len(item["text"])))
+    best = anchor_entries[0]
     selected = [best]
-    # A brand and product/variant can appear on adjacent OCR lines. Add one
-    # companion only if boxes align and there is no size conflict.
-    companions = []
-    for item in entries[1:]:
-        if identity_key(item["text"]) == identity_key(best["text"]):
-            continue
-        vertical_gap = abs(float(item["y"]) - float(best["y"])) / max(1, height)
-        center_gap = abs(float(item["x"]) - float(best["x"])) / max(1, width)
-        overlap = _horizontal_overlap_ratio(item["line"], best["line"])
-        if vertical_gap > 0.065 or (center_gap > 0.035 and overlap < 0.35):
-            continue
-        union_sizes = set(best["sizes"]) | set(item["sizes"])
-        if len(union_sizes) > 1:
-            continue
-        best_tokens = re.findall(r"[A-Za-z][A-Za-z0-9'&./-]*", best["text"])
-        item_tokens = re.findall(r"[A-Za-z][A-Za-z0-9'&./-]*", item["text"])
-        # Only attach a short brand-like line to a longer SKU/size line. Two
-        # full product titles near one another are not concatenated.
-        one_is_brand = (len(best_tokens) <= 2 < len(item_tokens)) or (len(item_tokens) <= 2 < len(best_tokens))
-        if not one_is_brand:
-            continue
-        combined = f"{best['text']} {item['text']}".strip()
-        combined_tokens = re.findall(r"[A-Za-z][A-Za-z0-9'&./-]*", combined)
-        if len(combined_tokens) > 10:
-            continue
-        companions.append(item)
-    if companions:
-        companions.sort(key=lambda item: (-item["score"], item["dy"], item["dx"]))
-        selected.append(companions[0])
-    # Preserve original vertical order for readability.
+    # Product titles in retail posters are often split over 2–4 short OCR boxes
+    # (brand, variant, pack size). Grow a spatially connected text block around
+    # the strongest title line, but require alignment, tight vertical spacing,
+    # non-conflicting sizes, and a bounded token count so neighboring SKUs do not
+    # get concatenated into one suggestion.
+    max_component_lines = 4
+    max_title_tokens = 10
+    while len(selected) < max_component_lines:
+        possibilities = []
+        for item in entries:
+            if item in selected or identity_key(item["text"]) in {identity_key(x["text"]) for x in selected}:
+                continue
+            vertical_gaps = [abs(float(item["y"]) - float(chosen["y"])) / max(1, height) for chosen in selected]
+            nearest_gap = min(vertical_gaps, default=1.0)
+            if nearest_gap > 0.04:
+                continue
+            aligned = False
+            overlaps = []
+            for chosen in selected:
+                center_gap = abs(float(item["x"]) - float(chosen["x"])) / max(1, width)
+                overlap = _horizontal_overlap_ratio(item["line"], chosen["line"])
+                overlaps.append(overlap)
+                if center_gap <= 0.04 or overlap >= 0.30:
+                    aligned = True
+            if not aligned:
+                continue
+            combined_sizes = set(item["sizes"])
+            for chosen in selected:
+                combined_sizes |= set(chosen["sizes"])
+            combined_size_numbers = {re.match(r"\d+(?:[.,]\d+)?", value).group(0) for value in combined_sizes if re.match(r"\d+(?:[.,]\d+)?", value)}
+            if len(combined_size_numbers) > 1:
+                continue
+            combined_tokens = sum(len(re.findall(r"[A-Za-z][A-Za-z0-9'&./-]*", x["text"])) for x in selected) + len(re.findall(r"[A-Za-z][A-Za-z0-9'&./-]*", item["text"]))
+            if combined_tokens > max_title_tokens:
+                continue
+            # Prefer a box that extends the current title block, not a distant
+            # one with merely similar x coordinates.
+            quality = max(overlaps, default=0.0) - nearest_gap + (0.05 if item["sizes"] else 0.0)
+            possibilities.append((quality, item))
+        if not possibilities:
+            break
+        possibilities.sort(key=lambda pair: (-pair[0], pair[1]["y"], pair[1]["x"]))
+        selected.append(possibilities[0][1])
     selected.sort(key=lambda item: (item["y"], item["x"]))
-    return " ".join(item["text"] for item in selected)
+    text_parts = []
+    seen = set()
+    for item in selected:
+        key = identity_key(item["text"])
+        if key and key not in seen:
+            seen.add(key)
+            text_parts.append(item["text"])
+    return " ".join(text_parts)
 
 
 def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]:
@@ -1141,8 +1287,10 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
         # their centers so a window cannot spill into the next SKU card.
         left = cx - width * 0.11
         right = cx + width * 0.11
-        top = cy - height * 0.13
-        bottom = cy + height * 0.13
+        # Keep the price-parser context tight: product titles and the next row's
+        # quantity banner can be 100–200 px away and must not add extra prices.
+        top = cy - height * 0.055
+        bottom = cy + height * 0.055
         for other_index, (ox, oy) in enumerate(tile_centers):
             if other_index == index:
                 continue
@@ -1153,7 +1301,7 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
                     left = max(left, (ox + cx) / 2)
                 else:
                     right = min(right, (ox + cx) / 2)
-            if ndx <= 0.115 and ndy > 0.055:
+            if ndx <= 0.20 and ndy > 0.035:
                 if dy < 0:
                     top = max(top, (oy + cy) / 2)
                 else:
@@ -1176,7 +1324,6 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
         neighborhood = sorted(neighborhood, key=lambda row: (_line_center(row)[1], _line_center(row)[0]))
         context = " | ".join(str(line.get("text") or "").strip() for line in neighborhood if str(line.get("text") or "").strip())
         parsed = interpret_price_pair(context, allow_unlabelled_pair=True)
-        promo_context = classify_promo_context(context)
         # Promo Gantung-style tiles frequently show the crossed-out normal price
         # above the larger promo price without verbal labels. Infer only when
         # two separate OCR boxes are vertically stacked and horizontally aligned.
@@ -1206,24 +1353,47 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
                     name_right = min(name_right, (ox + cx) / 2)
         name_top = max(0.0, cy - height * 0.19)
         above_same_column = [oy for ox, oy in tile_centers
-                             if oy < cy and abs(ox - cx) / width <= 0.12
+                             if oy < cy and abs(ox - cx) / width <= 0.20
                              and (cy - oy) / height > 0.06]
         if above_same_column:
-            name_top = max(name_top, max(above_same_column) + height * 0.012)
-        name_bottom = min(float(height), cy + height * 0.025)
+            # Start below the immediately preceding price row. A small gap is
+            # enough to exclude that row's title while retaining the current SKU
+            # name, which can sit noticeably above its own price.
+            name_top = max(name_top, max(above_same_column) + height * 0.015)
+        name_bottom = min(float(height), cy + height * 0.01)
         name_lines = []
         for line in sorted_lines:
             lx, ly = _line_center(line)
             if name_left <= lx <= name_right and name_top <= ly <= name_bottom:
+                # The name-search region is separate from the price region. Do not
+                # reintroduce a neighbouring price via product-title context (for
+                # example Rp299.900 beside the Lotte Chocopie label).
+                if extract_prices(str(line.get("text") or "")):
+                    continue
+                lx0, lx1 = float(line.get("x0", 0)), float(line.get("x1", 0))
+                line_width = max(1.0, lx1 - lx0)
+                horizontal_overlap = max(0.0, min(lx1, name_right) - max(lx0, name_left)) / line_width
+                if horizontal_overlap < 0.65:
+                    continue
                 if CAMPAIGN_FOOTER_RE.search(str(line.get("text") or "")):
                     continue
                 name_lines.append(line)
         local_name = _local_product_name_suggestion(
             name_lines, cx, cy, width, height, max_dx=0.17, max_dy=0.25
         )
+        name_context = " | ".join(str(line.get("text") or "").strip() for line in name_lines if str(line.get("text") or "").strip())
+        # Parse prices only from the tight price area. Context tags/conditions may
+        # use the tightly bounded product-title area as additional evidence.
+        promo_context = classify_promo_context(" | ".join(part for part in (context, name_context) if part))
+        display_context = " | ".join(dict.fromkeys(part for part in (context, name_context) if part))
         signature = json.dumps([context.casefold(), bucket_x, bucket_y, parsed["prices"]], ensure_ascii=False, sort_keys=True)
         windows.append({
-            "context": context,
+            # Keep the public context field inclusive for callers/tests/review;
+            # price_context is the restricted area used only for amount parsing.
+            "context": display_context,
+            "price_context": context,
+            "display_context": display_context,
+            "product_context": name_context,
             "center_x": cx,
             "center_y": cy,
             "image_width": width,
@@ -1243,6 +1413,7 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
             ),
             **promo_context,
             "lines_in_context": neighborhood,
+            "lines_in_product_context": name_lines,
             "bucket_x": bucket_x,
             "bucket_y": bucket_y,
             "_signature": signature,
@@ -1600,12 +1771,13 @@ def build_candidates(
         candidate_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:14].upper()
         raw_candidates.append({
             "candidate_id": candidate_id,
+            "candidate_pipeline_version": CANDIDATE_PIPELINE_VERSION,
             "source_name": image_record.get("source_name", ""),
             "campaign_title": image_record.get("campaign_title", ""),
             "article_url": image_record.get("article_url", ""),
             "image_url": image_record.get("image_url", ""),
             "image_alt": image_record.get("image_alt", ""),
-            "ocr_snippet": context,
+            "ocr_snippet": window.get("display_context") or context,
             "price_values_json": json.dumps(price_values, ensure_ascii=False),
             "normal_price_candidate": window["normal_price_candidate"],
             "promo_price_candidate": window["promo_price_candidate"],
@@ -1639,7 +1811,7 @@ def build_candidates(
             "_center_y": float(window.get("center_y", 0)),
             "_image_width": int(window.get("image_width", 0)),
             "_image_height": int(window.get("image_height", 0)),
-            "_context_lines": {str(line.get("text") or "").strip() for line in window.get("lines_in_context", []) if str(line.get("text") or "").strip()},
+            "_context_lines": {str(line.get("text") or "").strip() for line in (list(window.get("lines_in_context", [])) + list(window.get("lines_in_product_context", []))) if str(line.get("text") or "").strip()},
         })
 
     # OCR produces one window around each price line. Adjacent windows often
@@ -1781,8 +1953,35 @@ def _line_records(cache_row: dict) -> list[dict]:
     try:
         lines = json.loads(cache_row.get("lines_json") or "[]")
         return lines if isinstance(lines, list) else []
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         return []
+
+
+def _is_current_ocr_cache(cache_row: dict) -> bool:
+    """Only count a cache row as usable for a complete review if it is current and valid."""
+    if not cache_row or str(cache_row.get("ocr_pipeline_version") or "") != OCR_PIPELINE_VERSION:
+        return False
+    status = str(cache_row.get("ocr_status") or "").strip().casefold()
+    if status == "ok":
+        return bool(_line_records(cache_row))
+    if status == "no_text":
+        # Empty OCR is still a valid result when the active pipeline recorded it explicitly.
+        raw_lines = cache_row.get("lines_json")
+        try:
+            decoded = json.loads(raw_lines) if raw_lines not in (None, "") else None
+        except (json.JSONDecodeError, TypeError):
+            return False
+        return isinstance(decoded, list) and not decoded
+    return False
+
+
+def _cache_coverage(images: list[dict], cache: dict[str, dict]) -> tuple[int, int]:
+    """Return (current usable cached images, indexed images missing/stale) for this index."""
+    usable = sum(
+        _is_current_ocr_cache(cache.get(str(record.get("image_url") or ""), {}))
+        for record in images
+    )
+    return usable, max(0, len(images) - usable)
 
 
 def _load_old_review(path: Path) -> dict[str, dict]:
@@ -1814,9 +2013,68 @@ def _review_price_key(value: object) -> str:
     return str(value or "").strip()
 
 
+def _review_pair_fingerprint(row: dict) -> str:
+    """Stable, conservative fallback key when context changes candidate IDs.
+
+    The image URL and both prices must be present. Candidate rows with only one
+    price, or repeated identical price pairs on the same poster, are not safe to
+    migrate by fingerprint alone.
+    """
+    image_url = str(row.get("URL Gambar") or row.get("image_url") or "").strip()
+    if not image_url:
+        return ""
+    normal = row.get("Harga Normal Kandidat (Rp)", row.get("normal_price_candidate"))
+    promo = row.get("Harga Promo Kandidat (Rp)", row.get("promo_price_candidate"))
+    normal_key, promo_key = _review_price_key(normal), _review_price_key(promo)
+    if not normal_key or not promo_key:
+        return ""
+    return f"{image_url}|{normal_key}|{promo_key}"
+
+
+def _review_product_context_compatible(old_row: dict, candidate: dict) -> bool:
+    """Require product-name continuity before migrating a manual decision by fallback key.
+
+    This deliberately blocks the dangerous case where a parser fix moves an old
+    price pair from a neighbouring title (e.g. Sambal) to the true product (CHIL-KID).
+    Exact candidate IDs are still the strongest match; this guard is only for the
+    fallback used when IDs changed after a pipeline upgrade.
+    """
+    old_name = str(
+        old_row.get("Saran Nama Produk (OCR Lokal)")
+        or old_row.get("Nama Produk Saran")
+        or ""
+    ).strip()
+    new_name = str(
+        candidate.get("local_product_name_suggestion")
+        or candidate.get("matched_product_name")
+        or ""
+    ).strip()
+    if not old_name or not new_name:
+        return False
+    if identity_key(old_name) == identity_key(new_name):
+        return True
+    if product_name_identity_warnings(old_name, new_name):
+        return False
+    return product_name_similarity(old_name, new_name) >= 0.68
+
+
 def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior: dict[str, dict] | None = None) -> None:
     prior = prior or {}
     path.parent.mkdir(parents=True, exist_ok=True)
+    # The candidate ID includes spatial/context information and can legitimately
+    # change after a parser upgrade. Carry prior human decisions only when the
+    # same image plus both price values identifies exactly one row in old and new
+    # workbooks. Never carry by a one-price or duplicated-price fingerprint.
+    old_fp_rows: dict[str, list[dict]] = {}
+    for old_row in prior.values():
+        fingerprint = _review_pair_fingerprint(old_row)
+        if fingerprint:
+            old_fp_rows.setdefault(fingerprint, []).append(old_row)
+    new_fp_counts: dict[str, int] = {}
+    for candidate in candidates:
+        fingerprint = _review_pair_fingerprint(candidate)
+        if fingerprint:
+            new_fp_counts[fingerprint] = new_fp_counts.get(fingerprint, 0) + 1
     wb = Workbook()
     ws = wb.active
     ws.title = "Kandidat OCR"
@@ -1824,6 +2082,12 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     for candidate in candidates:
         cid = candidate["candidate_id"]
         old = prior.get(cid, {})
+        if not old:
+            fingerprint = _review_pair_fingerprint(candidate)
+            matches = old_fp_rows.get(fingerprint, []) if fingerprint else []
+            if (fingerprint and len(matches) == 1 and new_fp_counts.get(fingerprint) == 1
+                    and _review_product_context_compatible(matches[0], candidate)):
+                old = matches[0]
         # Keep the catalog match and local OCR title suggestion separate.
         # Old unreviewed workbooks often copied the same OCR guess into both
         # fields; discard that duplicate auto-fill but preserve explicit edits
@@ -1986,7 +2250,8 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
         ["6. Persentase kemasan seperti '30% lebih banyak sereal' dikecualikan dari klaim diskon harga. Kolom Persentase Kemasan Diabaikan dan Teks Klaim Diskon yang Dipakai membantu audit alasan parser."],
         ["7. Crop OCR warna merah/kuning adalah jalur rescue lokal untuk label harga yang luput dari OCR halaman penuh; harga crop hanya masuk sebagai teks kandidat dan bukan persetujuan."],
         ["8. Konteks promo, syarat pembelian, wilayah, dan harga member adalah petunjuk hasil aturan lokal. Jangan menganggap teks footer kampanye berlaku untuk SKU tertentu tanpa bukti poster."],
-        ["9. Untuk promo beli beberapa, gratis, harga member, harga spesial, atau cakupan wilayah, pastikan syarat dan basis harga (satuan/paket) dibaca benar sebelum TERIMA."],
+        ["9. Syarat pembelian mendeteksi teks Beli N dan kuantitas pada harga seperti /2Pcs atau /5Pcs. Ini petunjuk basis paket, bukan persetujuan; pastikan SKU dan jumlahnya cocok secara visual."],
+        ["10. Untuk promo gratis, harga member, harga spesial, atau cakupan wilayah, pastikan syarat dan basis harga (satuan/paket) dibaca benar sebelum TERIMA."],
         ["10. Jika harga normal dicoret dan harga promo tidak berlabel, pastikan kedua kotak harga benar-benar berada di area produk yang sama."],
         ["11. Setelah menyimpan dan menutup Excel, jalankan: python engine\\promo_poster_ocr.py --import-reviewed-only"],
         ["12. Lalu perbarui katalog: python engine\\enrich_existing_promo_catalog_multisource.py. Harga dari poster hanya dipakai setelah TERIMA."],
@@ -2073,19 +2338,23 @@ def _catalog_fallback_for_campaign(catalog: list[dict], campaign_title: str) -> 
 
 
 def rebuild_review_from_cache(limit: int = 0) -> dict:
-    """Rebuild review from saved OCR cache. With limit, emit a separate latest-batch workbook."""
-    images = _load_image_index(IMAGE_INDEX)
-    if not images:
+    """Rebuild review from current-version OCR caches without risking a partial main workbook."""
+    all_images = _load_image_index(IMAGE_INDEX)
+    if not all_images:
         raise FileNotFoundError(f"Daftar gambar poster tidak ditemukan/kosong: {IMAGE_INDEX}. Jalankan collector terlebih dahulu.")
     old_cache = {str(r.get("image_url") or ""): r for r in _read_csv(CACHE_CSV)}
+    current_cache_count, missing_or_stale_count = _cache_coverage(all_images, old_cache)
     review_path = REVIEW_XLSX
     lines_path = LINES_CSV
     candidates_path = CANDIDATES_CSV
-    if limit > 0:
-        # Use the newest cache timestamps so the user can inspect a recent OCR
-        # batch without rebuilding/overwriting the full catalogue review.
-        cached_images = [r for r in images if str(r.get("image_url") or "") in old_cache]
 
+    # A limited rebuild is always a sandbox preview based only on valid current-version OCR caches.
+    # A full rebuild is allowed only when every indexed image has a valid result from this OCR version.
+    current_cached_images = [
+        record for record in all_images
+        if _is_current_ocr_cache(old_cache.get(str(record.get("image_url") or ""), {}))
+    ]
+    if limit > 0:
         def _processed_timestamp(record: dict) -> float:
             raw = str(old_cache.get(str(record.get("image_url") or ""), {}).get("processed_at") or "")
             try:
@@ -2096,19 +2365,39 @@ def rebuild_review_from_cache(limit: int = 0) -> dict:
             except (TypeError, ValueError, OverflowError):
                 return 0.0
 
-        images = sorted(cached_images, key=_processed_timestamp, reverse=True)[:limit]
+        images = sorted(current_cached_images, key=_processed_timestamp, reverse=True)[:limit]
+        if not images:
+            raise RuntimeError(
+                "Belum ada cache OCR valid untuk versi " + OCR_PIPELINE_VERSION + ". "
+                "Jalankan `python engine\\promo_poster_ocr.py --limit 10` terlebih dahulu."
+            )
         review_path = REVIEW_XLSX.with_name("Review_Harga_Poster_OCR_UjiTerbaru.xlsx")
         lines_path = LINES_CSV.with_name("promo_poster_ocr_lines_review_latest.csv")
         candidates_path = CANDIDATES_CSV.with_name("promo_poster_price_candidates_review_latest.csv")
-        print(f"Mode review uji: memakai {len(images)} cache terbaru; tidak mengunduh/OCR ulang dan tidak menimpa review utama.", flush=True)
+        print(
+            f"Mode review uji: memakai {len(images)} cache OCR valid terbaru; "
+            "tidak mengunduh/OCR ulang dan tidak menimpa review utama.", flush=True
+        )
     else:
-        print("Mode review saja: memakai cache OCR; tidak mengunduh gambar atau menjalankan OCR.", flush=True)
-    cache_rows = [old_cache.get(str(r.get("image_url") or ""), {}) for r in images]
+        if missing_or_stale_count:
+            coverage_pct = 100.0 * current_cache_count / max(1, len(all_images))
+            raise RuntimeError(
+                f"Cache OCR belum lengkap: {current_cache_count}/{len(all_images)} gambar "
+                f"({coverage_pct:.1f}%) memiliki hasil valid versi {OCR_PIPELINE_VERSION}; "
+                f"{missing_or_stale_count} gambar belum ada cache aktif atau masih memakai versi lama/gagal. "
+                "Review utama tidak diubah. Jalankan OCR inkremental bertahap `python engine\\promo_poster_ocr.py --limit 25` "
+                "sampai cakupan cache lengkap, lalu ulangi `--rebuild-review-only`. Untuk meninjau sebagian cache, "
+                "gunakan `--rebuild-review-only --limit 10`."
+            )
+        images = all_images
+        print("Mode review saja: seluruh indeks memiliki cache OCR aktif; tidak mengunduh gambar atau menjalankan OCR.", flush=True)
+
     line_rows = []
     candidates = []
     page_products = _load_page_products(PRODUCTS_CSV)
     catalog_products = _load_catalog_products(PRODUCTS_CSV)
-    for image_record, cache_row in zip(images, cache_rows):
+    for image_record in images:
+        cache_row = old_cache[str(image_record.get("image_url") or "")]
         lines = _line_records(cache_row)
         try:
             width = int(cache_row.get("image_width") or 0)
@@ -2136,10 +2425,16 @@ def rebuild_review_from_cache(limit: int = 0) -> dict:
     _write_csv(candidates_path, candidates, CANDIDATE_FIELDS)
     prior = _load_old_review(review_path)
     make_review_workbook(candidates, review_path, prior)
-    cached = sum(bool(str(row.get("image_url") or "") in old_cache) for row in images)
+    if limit <= 0:
+        import_stats = import_reviewed_prices(REVIEW_XLSX, OVERRIDES_CSV)
+    else:
+        import_stats = {"active_overrides": "tidak disentuh (mode uji terpisah)"}
     stats = {
-        "images_indexed": len(_load_image_index(IMAGE_INDEX)), "images_considered": len(images),
-        "images_processed": 0, "images_cached": cached,
+        "images_indexed": len(all_images), "images_considered": len(images),
+        "images_processed": 0, "images_cached": len(images),
+        "cache_usable_images": current_cache_count,
+        "cache_missing_or_stale_images": missing_or_stale_count,
+        "cache_coverage_percent": round(100.0 * current_cache_count / max(1, len(all_images)), 1),
         "ocr_ok": 0, "ocr_failed_or_empty": 0, "ocr_backend": "cache-reuse",
         "line_count": len(line_rows), "candidate_count": len(candidates),
         "candidate_price_pair_count": sum(bool(r.get("normal_price_candidate")) and bool(r.get("promo_price_candidate")) for r in candidates),
@@ -2148,12 +2443,8 @@ def rebuild_review_from_cache(limit: int = 0) -> dict:
         "candidate_local_name_suggestion_count": sum(bool(r.get("local_product_name_suggestion")) for r in candidates),
         "cache_csv": str(CACHE_CSV), "lines_csv": str(lines_path), "candidate_csv": str(candidates_path),
         "review_workbook": str(review_path),
+        "approved_override_count": import_stats.get("active_overrides", 0),
     }
-    if limit <= 0:
-        import_stats = import_reviewed_prices(REVIEW_XLSX, OVERRIDES_CSV)
-        stats["approved_override_count"] = import_stats.get("active_overrides", 0)
-    else:
-        stats["approved_override_count"] = "tidak disentuh (mode uji terpisah)"
     return stats
 
 
@@ -2162,6 +2453,7 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
     if not images:
         raise FileNotFoundError(f"Daftar gambar poster tidak ditemukan/kosong: {IMAGE_INDEX}. Jalankan collector terlebih dahulu.")
     old_cache = {str(r.get("image_url") or ""): r for r in _read_csv(CACHE_CSV)}
+    starting_cache = dict(old_cache)
     if force:
         to_process = images[:limit] if limit > 0 else images
         scope = f"semua {len(to_process)} gambar" if limit <= 0 else f"{len(to_process)} gambar pertama"
@@ -2170,10 +2462,8 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
         # Retry transient download/OCR failures next run. Successful results and
         # no-text images remain cached to avoid repeatedly processing the same poster.
         to_process = [
-            r for r in images
-            if str(r.get("image_url") or "") not in old_cache
-            or str(old_cache.get(str(r.get("image_url") or ""), {}).get("ocr_status") or "").casefold() == "failed"
-            or str(old_cache.get(str(r.get("image_url") or ""), {}).get("ocr_pipeline_version") or "") != OCR_PIPELINE_VERSION
+            record for record in images
+            if not _is_current_ocr_cache(old_cache.get(str(record.get("image_url") or ""), {}))
         ]
         if limit > 0:
             to_process = to_process[:limit]
@@ -2189,9 +2479,13 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
             print(f"Koreksi poster aktif: {import_stats.get('active_overrides', 0)}")
         else:
             import_stats = {"active_overrides": 0}
+        cache_usable, cache_missing_or_stale = _cache_coverage(images, old_cache)
         return {
             "images_indexed": len(images), "images_processed": 0,
-            "images_cached": len([r for r in images if r.get("image_url") in old_cache]),
+            "images_cached": cache_usable,
+            "cache_usable_images": cache_usable,
+            "cache_missing_or_stale_images": cache_missing_or_stale,
+            "cache_coverage_percent": round(100.0 * cache_usable / max(1, len(images)), 1),
             "ocr_ok": 0, "ocr_failed": 0, "candidate_count": 0,
             "approved_override_count": import_stats.get("active_overrides", 0),
         }
@@ -2284,8 +2578,18 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
     prior = _load_old_review(REVIEW_XLSX)
     make_review_workbook(candidates, REVIEW_XLSX, prior)
     import_stats = import_reviewed_prices(REVIEW_XLSX, OVERRIDES_CSV)
+    cache_usable, cache_missing_or_stale = _cache_coverage(images, old_cache)
+    to_process_urls = {str(record.get("image_url") or "") for record in to_process}
+    reused_count = sum(
+        str(record.get("image_url") or "") not in to_process_urls
+        and _is_current_ocr_cache(starting_cache.get(str(record.get("image_url") or ""), {}))
+        for record in images
+    )
     return {
-        "images_indexed": len(images), "images_processed": processed, "images_cached": len(images) - processed,
+        "images_indexed": len(images), "images_processed": processed, "images_cached": reused_count,
+        "cache_usable_images": cache_usable,
+        "cache_missing_or_stale_images": cache_missing_or_stale,
+        "cache_coverage_percent": round(100.0 * cache_usable / max(1, len(images)), 1),
         "ocr_ok": ok, "ocr_failed_or_empty": failed, "ocr_backend": backend,
         "line_count": len(line_rows), "candidate_count": len(candidates),
         "candidate_price_pair_count": sum(bool(r.get("normal_price_candidate")) and bool(r.get("promo_price_candidate")) for r in candidates),

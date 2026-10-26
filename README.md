@@ -60,15 +60,17 @@ OCR tidak bisa menjamin pembacaan digit pada poster yang kecil/buram. Label teks
 python engine\promo_poster_ocr.py --limit 25
 ```
 
-Memproses paling banyak 25 gambar yang belum memiliki cache atau masih memakai versi pipeline lama. Jalankan tanpa `--limit` untuk memproses semua gambar yang membutuhkan OCR. Gunakan `--force` untuk memproses ulang seluruh gambar. Gambar yang sempat gagal diunduh/OCR dicoba ulang pada pelaksanaan berikutnya; gambar yang berhasil tapi tidak mengandung teks tetap di-cache agar tidak diproses terus-menerus. Upgrade `poster-ocr-v2.0` membuat cache lama dianggap perlu diproses ulang satu kali agar crop harga merah/kuning dan filter konteks persentase diterapkan. Untuk migrasi bertahap, jalankan `--limit 10` atau `--limit 25` beberapa kali sebelum menjalankan pipeline penuh.
+Memproses paling banyak 25 gambar yang belum memiliki cache atau masih memakai versi pipeline lama. Jalankan tanpa `--limit` untuk memproses semua gambar yang membutuhkan OCR. Gunakan `--force` untuk memproses ulang seluruh gambar. Gambar yang sempat gagal diunduh/OCR dicoba ulang pada pelaksanaan berikutnya; gambar yang berhasil tapi tidak mengandung teks tetap di-cache agar tidak diproses terus-menerus. Cache OCR yang sukses dengan versi pengenalan `poster-ocr-v2.1-fast-crop` dipakai ulang oleh upgrade parser `poster-ocr-v2.2-spatial-context`; perubahan aturan spasial/syarat pembelian tidak memaksa inferensi OCR ONNX lagi. Gunakan `--rebuild-review-only` untuk membangun ulang kandidat dari kotak OCR yang sudah tersimpan. Versi OCR hanya perlu berubah bila model, prapemrosesan, atau jalur pengenalan teks berubah. Untuk migrasi bertahap, jalankan `--limit 10` atau `--limit 25` beberapa kali sebelum menjalankan pipeline penuh.
 
-Untuk menguji perubahan parser pada 25 gambar yang paling baru masuk cache tanpa menimpa workbook utama, jalankan:
+Untuk menguji perubahan parser pada paling banyak 25 gambar dengan cache OCR versi aktif tanpa menimpa workbook utama, jalankan:
 
 ```cmd
 python engine\promo_poster_ocr.py --rebuild-review-only --limit 25
 ```
 
-Output terpisah: `hasil\Review_Harga_Poster_OCR_UjiTerbaru.xlsx`. Mode ini memakai cache, tidak mengunduh atau menjalankan OCR ulang, dan tidak mengubah persetujuan/harga aktif. `--rebuild-review-only` tanpa `--limit` tetap membangun ulang workbook utama dari seluruh cache.
+Output terpisah: `hasil\Review_Harga_Poster_OCR_UjiTerbaru.xlsx`. Mode ini hanya memakai cache OCR versi aktif yang valid, tidak mengunduh atau menjalankan OCR ulang, dan tidak mengubah persetujuan/harga aktif. Jika cache valid yang tersedia hanya satu gambar, preview memang hanya berisi kandidat dari gambar tersebut.
+
+`--rebuild-review-only` tanpa `--limit` hanya boleh membangun ulang workbook utama jika **semua gambar pada indeks** punya cache OCR valid dengan versi aktif. Jika belum lengkap atau masih ada cache versi lama/gagal, perintah berhenti dengan pesan cakupan cache dan tidak mengubah workbook review utama, CSV baris/kandidat, maupun override. Jalankan `python engine\promo_poster_ocr.py --limit 25` berulang sampai semua gambar memiliki cache aktif; angka `cache_usable_images`, `cache_missing_or_stale_images`, dan `cache_coverage_percent` menunjukkan progres. `images_cached` sekarang berarti cache versi aktif yang benar-benar dipakai ulang, bukan sekadar gambar yang tidak diproses di batch tersebut.
 
 Setelah mengubah workbook review utama, gunakan `--import-reviewed-only` di atas. Perintah OCR pada launcher juga mengimpor keputusan review yang ada, termasuk ketika tidak ada gambar baru untuk diproses.
 
@@ -117,4 +119,4 @@ python engine\promo_multisource_collector.py --self-test
 python -m pytest -q engine
 ```
 
-Upgrade OCR poster v2 menambahkan rescue OCR crop label merah/kuning, filter persentase kemasan, klasifikasi konteks promo, kolom audit pada workbook review, dan invalidasi cache berdasarkan versi pipeline. Seluruh temuan tetap berstatus review; harga hanya aktif melalui `TERIMA` yang lolos importer.
+Parser kandidat poster v2.2 memakai kembali kotak OCR sukses dari v2.1 dan menambahkan pengelompokan spasial dengan batas rentang vertikal untuk mencegah harga produk tetangga tergabung, ekstraksi syarat jumlah pembelian (`2 pcs`, `Beli 5`), dan jejak audit. Versi OCR `poster-ocr-v2.1-fast-crop` tetap terpisah agar perubahan parser tidak membuat semua poster diproses ulang dengan ONNX. Ketika ID kandidat berubah akibat pembaruan konteks, keputusan review hanya dipertahankan bila URL gambar dan pasangan harga normal/promo mengidentifikasi tepat satu kandidat lama dan satu kandidat baru serta saran nama produknya masih konsisten. Jika judul berubah dari `Var. Sambal Bangkok` menjadi `CHIL-KID`, persetujuan lama tidak dipindahkan; kandidat kembali ke `CEK`. Pasangan ambigu tetap `CEK`; harga hanya aktif melalui `TERIMA` yang lolos importer.

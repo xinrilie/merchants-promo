@@ -303,8 +303,8 @@ def test_rebuild_review_from_cache_does_not_run_ocr_or_download(tmp_path, monkey
         "image_url": image_url, "source_name": "Katalogpromosi.com", "campaign_title": "Promo Indomaret",
         "article_url": article_url, "image_alt": "Sunlight Lime promo", "period_status": "current",
         "scraped_at": "2026-10-26", "image_sha256": "fakehash", "image_width": "800", "image_height": "1000",
-        "ocr_status": "ok", "ocr_backend": "rapidocr", "ocr_error": "", "processed_at": "2026-10-26T10:00:00+07:00",
-        "lines_json": json.dumps(lines),
+        "ocr_status": "ok", "ocr_backend": "rapidocr", "ocr_pipeline_version": ocr.OCR_PIPELINE_VERSION,
+        "ocr_error": "", "processed_at": "2026-10-26T10:00:00+07:00", "lines_json": json.dumps(lines),
     }
     write_csv(cache_csv, [cache_row], ocr.CACHE_FIELDS)
 
@@ -683,8 +683,8 @@ def test_limited_review_rebuild_uses_latest_cache_and_does_not_overwrite_main_fi
             "image_url": url, "source_name": "source", "campaign_title": campaign,
             "article_url": article, "image_alt": campaign, "period_status": "current",
             "scraped_at": "2026-10-26", "image_sha256": "hash", "image_width": "800", "image_height": "1000",
-            "ocr_status": "ok", "ocr_backend": "rapidocr", "ocr_error": "", "processed_at": stamp,
-            "lines_json": json.dumps(base_lines),
+            "ocr_status": "ok", "ocr_backend": "rapidocr", "ocr_pipeline_version": ocr.OCR_PIPELINE_VERSION,
+            "ocr_error": "", "processed_at": stamp, "lines_json": json.dumps(base_lines),
         })
     write_csv(cache_csv, cache_rows, ocr.CACHE_FIELDS)
     for name, value in {
