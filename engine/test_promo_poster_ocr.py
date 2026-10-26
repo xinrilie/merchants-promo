@@ -332,3 +332,99 @@ def test_rebuild_review_from_cache_does_not_run_ocr_or_download(tmp_path, monkey
     assert "Harga Normal Disetujui (Rp)" not in headers
     assert ws["B2"].value == "CEK"
     wb.close()
+
+
+def test_review_note_refreshes_legacy_auto_note_and_flags_discount_mismatch(tmp_path):
+    from openpyxl import load_workbook
+    from promo_poster_ocr import make_review_workbook
+
+    output = tmp_path / "review.xlsx"
+    candidate = {
+        "candidate_id": "STALEDISK01", "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo", "article_url": "https://example.test/a",
+        "image_url": "https://example.test/p.jpg",
+        "ocr_snippet": "Deluxe Kitchen Towel Harga Normal Rp47.900 Harga Promo Rp30.500 Diskon 34%",
+        "matched_product_name": "Deluxe Kitchen Towel 3 x 80", "matched_product_score": .91,
+        "match_note": "Kecocokan perlu konfirmasi", "candidate_note": "Pasangan harga lokal cocok dengan klaim diskon; tetap konfirmasi visual.",
+        "normal_price_candidate": 47900, "promo_price_candidate": 30500,
+        "discount_claim_percent": 34, "discount_calculated_percent": 36.3,
+        "ocr_confidence": .97,
+    }
+    prior = {"STALEDISK01": {
+        "Keputusan": "CEK",
+        "Harga Normal Kandidat (Rp)": 47900,
+        "Harga Promo Kandidat (Rp)": 30500,
+        "Harga Normal untuk Review (Rp)": 47900,
+        "Harga Promo untuk Review (Rp)": 30500,
+        "Catatan Review": "Kandidat lokal: angka terbesar dianggap harga normal dan terkecil harga promo; WAJIB cocokkan poster sebelum TERIMA.",
+    }}
+    make_review_workbook([candidate], output, prior)
+    wb = load_workbook(output, data_only=True)
+    ws = wb["Kandidat OCR"]
+    headers = [cell.value for cell in ws[1]]
+    note = ws.cell(2, headers.index("Catatan Review") + 1).value
+    status = ws.cell(2, headers.index("Validasi Klaim Diskon") + 1).value
+    difference = ws.cell(2, headers.index("Selisih Diskon (poin persentase)") + 1).value
+    assert "angka terbesar" not in note.lower()
+    assert "REVIEW OCR AUTO:" in note
+    assert "tidak cocok" in note.lower()
+    assert status.startswith("TIDAK COCOK")
+    assert difference == 2.3
+    wb.close()
+
+
+def test_review_workbook_adds_row_specific_sku_dropdown_choices(tmp_path):
+    from openpyxl import load_workbook
+    from promo_poster_ocr import make_review_workbook
+
+    output = tmp_path / "review.xlsx"
+    candidate = {
+        "candidate_id": "SKU-DROPDOWN-1", "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo", "article_url": "https://example.test/a",
+        "image_url": "https://example.test/p.jpg", "ocr_snippet": "Sunlight Lime 910 ml Rp20.000 Rp16.900",
+        "matched_product_name": "Sunlight Lime 910 ml", "matched_product_score": .91,
+        "local_product_name_suggestion": "Sunlight Lime 910 ml", "match_note": "Ada kecocokan katalog",
+        "candidate_note": "Periksa poster", "normal_price_candidate": "", "promo_price_candidate": "",
+        "discount_claim_percent": 15, "discount_calculated_percent": "",
+        "catalog_sku_candidate_1": "Sunlight Lime 910 ml", "catalog_sku_candidate_2": "Sunlight Lemon 910 ml",
+        "catalog_sku_candidate_3": "Sunlight Extra Power 900 ml", "catalog_sku_score_1": .91,
+        "catalog_sku_score_2": .78, "catalog_sku_score_3": .65,
+    }
+    make_review_workbook([candidate], output)
+    wb = load_workbook(output, data_only=True)
+    ws = wb["Kandidat OCR"]
+    headers = [cell.value for cell in ws[1]]
+    assert ws.cell(2, headers.index("Kandidat SKU 1") + 1).value == "Sunlight Lime 910 ml"
+    assert ws.cell(2, headers.index("Kandidat SKU 2") + 1).value == "Sunlight Lemon 910 ml"
+    validations = list(ws.data_validations.dataValidation)
+    sku_validation = next(v for v in validations if "C2" in str(v.sqref))
+    assert sku_validation.formula1 == "=$S2:$U2"
+    status = ws.cell(2, headers.index("Validasi Klaim Diskon") + 1).value
+    assert status == "BELUM BISA DIBANDINGKAN"
+    wb.close()
+
+
+def test_build_candidates_suggests_several_catalog_skus_without_auto_approving_them():
+    from promo_poster_ocr import build_candidates
+
+    lines = [
+        {"text": "Sunlight Lime 910 ml", "confidence": .95, "x0": 100, "y0": 120, "x1": 470, "y1": 165},
+        {"text": "Harga Normal Rp20.000", "confidence": .95, "x0": 100, "y0": 180, "x1": 470, "y1": 220},
+        {"text": "Harga Promo Rp16.900", "confidence": .95, "x0": 100, "y0": 230, "x1": 470, "y1": 270},
+        {"text": "Diskon 15%", "confidence": .95, "x0": 100, "y0": 280, "x1": 470, "y1": 320},
+    ]
+    image = {"source_name": "Katalogpromosi.com", "campaign_title": "Promo Mingguan", "article_url": "https://example.test/article", "image_url": "https://example.test/poster.jpg"}
+    page_products = [{"product_text": "Sunlight Lime 910 ml", "product_validation_status": "eligible"}]
+    fallback_products = [
+        {"product_text": "Sunlight Lemon 910 ml", "product_validation_status": "eligible"},
+        {"product_text": "Sunlight Extra Power 900 ml", "product_validation_status": "eligible"},
+        {"product_text": "Sunlight Lime 910 ml", "product_validation_status": "eligible"},
+    ]
+    candidates = build_candidates(image, lines, 800, 1000, page_products, fallback_products)
+    assert candidates
+    assert any(row.get("catalog_sku_candidate_1") == "Sunlight Lime 910 ml" for row in candidates)
+    row = candidates[0]
+    assert "catalog_sku_score_1" in row
+    assert row["matched_product_name"] == "Sunlight Lime 910 ml"
+    # Choice fields are suggestions only; they don't alter review/approval state.
+    assert "decision" not in row

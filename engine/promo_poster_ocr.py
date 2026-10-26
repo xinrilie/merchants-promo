@@ -60,6 +60,9 @@ CANDIDATE_FIELDS = [
     "ocr_snippet", "price_values_json", "normal_price_candidate", "promo_price_candidate",
     "discount_claim_percent", "discount_calculated_percent", "ocr_confidence",
     "matched_product_name", "matched_product_score", "local_product_name_suggestion", "match_note", "candidate_note",
+    "catalog_sku_candidate_1", "catalog_sku_candidate_2", "catalog_sku_candidate_3",
+    "catalog_sku_score_1", "catalog_sku_score_2", "catalog_sku_score_3",
+    "discount_validation_status", "discount_difference_pp",
 ]
 REVIEW_HEADERS = [
     "ID Kandidat", "Keputusan", "Nama Produk untuk Review", "Saran Nama Produk (OCR Lokal)",
@@ -67,6 +70,9 @@ REVIEW_HEADERS = [
     "Harga Normal Kandidat (Rp)", "Harga Promo Kandidat (Rp)",
     "Klaim Diskon OCR (%)", "Diskon Hitung (%)", "Kecocokan Nama", "Keyakinan OCR",
     "Potongan Teks Poster OCR", "Sumber", "Kampanye", "URL Artikel", "URL Gambar", "Catatan Review",
+    "Kandidat SKU 1", "Kandidat SKU 2", "Kandidat SKU 3",
+    "Skor SKU 1", "Skor SKU 2", "Skor SKU 3",
+    "Validasi Klaim Diskon", "Selisih Diskon (poin persentase)",
 ]
 
 PRICE_CUE_RE = re.compile(r"(?i)\b(?:rp\.?|idr|harga|price|promo|normal|asli|reguler|diskon|discount|hemat|off|potongan)\b")
@@ -783,11 +789,12 @@ def _matching_score(product_name: str, context: str) -> tuple[float, str]:
     return round(score, 4), note
 
 
-def _suggest_product(context: str, page_products: list[dict]) -> tuple[str, float, str]:
-    """Return a catalog match only when its score is strong and distinguishable."""
-    best_note = "Tidak ada kecocokan katalog yang kuat; periksa saran nama OCR lokal dan poster asli."
+def _rank_product_candidates(
+    context: str, products: list[dict], *, limit: int = 10, minimum_score: float = 0.0,
+) -> list[tuple[str, float, str]]:
+    """Rank eligible catalog names for explicit human selection; never auto-approve a SKU."""
     scores_by_identity: dict[str, tuple[str, float, str]] = {}
-    for product in page_products:
+    for product in products:
         if str(product.get("product_validation_status") or "eligible").casefold() not in {"eligible", "", "valid"}:
             continue
         name = str(product.get("product_text") or "").strip()
@@ -795,12 +802,20 @@ def _suggest_product(context: str, page_products: list[dict]) -> tuple[str, floa
         if not key:
             continue
         score, note = _matching_score(name, context)
+        if score < minimum_score:
+            continue
         prior = scores_by_identity.get(key)
         if prior is None or score > prior[1]:
             scores_by_identity[key] = (name, score, note)
-    ranked = sorted(scores_by_identity.values(), key=lambda item: item[1], reverse=True)
+    ranked = sorted(scores_by_identity.values(), key=lambda item: (-item[1], identity_key(item[0])))
+    return ranked[:max(0, limit)]
+
+
+def _suggest_product(context: str, page_products: list[dict]) -> tuple[str, float, str]:
+    """Return a catalog match only when its score is strong and distinguishable."""
+    ranked = _rank_product_candidates(context, page_products, limit=1000)
     if not ranked:
-        return "", 0.0, best_note
+        return "", 0.0, "Tidak ada kecocokan katalog yang kuat; periksa saran nama OCR lokal dan poster asli."
     best_name, best_score, best_note = ranked[0]
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
     margin = best_score - second_score
@@ -811,6 +826,105 @@ def _suggest_product(context: str, page_products: list[dict]) -> tuple[str, floa
     if margin >= 0.08 or best_score >= 0.92 or len(ranked) == 1:
         return best_name, best_score, best_note + f" Skor {best_score:.2f}; margin ke kandidat kedua {margin:.2f}."
     return "", best_score, "Kecocokan katalog ambigu; perlu pilih nama produk setelah membuka poster."
+
+
+def _discount_assessment(claim: object, calculated: object, *, tolerance_pp: float = 1.0) -> tuple[str, float | str]:
+    """Compare printed discount claim to math; tolerance is 1 percentage point."""
+    try:
+        claim_value = float(str(claim).replace("%", "").replace(",", ".").strip()) if str(claim or "").strip() else None
+    except (TypeError, ValueError):
+        claim_value = None
+    try:
+        calculated_value = float(str(calculated).replace("%", "").replace(",", ".").strip()) if str(calculated or "").strip() else None
+    except (TypeError, ValueError):
+        calculated_value = None
+    if claim_value is None:
+        return ("TIDAK ADA KLAIM DISKON", "")
+    if calculated_value is None:
+        return ("BELUM BISA DIBANDINGKAN", "")
+    difference = round(abs(claim_value - calculated_value), 1)
+    if difference <= tolerance_pp:
+        return (f"COCOK (selisih {difference:.1f} pp)", difference)
+    return (f"TIDAK COCOK (selisih {difference:.1f} pp)", difference)
+
+
+def _candidate_sku_choices(
+    context: str, page_products: list[dict], fallback_products: list[dict] | None,
+    matched_name: str = "", matched_score: float = 0.0, limit: int = 3,
+) -> list[tuple[str, float]]:
+    """Return a few plausible catalog SKU options for a dropdown, clearly unverified."""
+    ranked_page = _rank_product_candidates(context, page_products, limit=12, minimum_score=0.30)
+    ranked_fallback = _rank_product_candidates(context, fallback_products or [], limit=12, minimum_score=0.42)
+    merged: dict[str, tuple[str, float, int]] = {}
+    for priority, ranked in ((0, ranked_page), (1, ranked_fallback)):
+        for name, score, _note in ranked:
+            key = identity_key(name)
+            if not key:
+                continue
+            prior = merged.get(key)
+            # Page-specific catalog entries are preferred on ties; better score wins.
+            item = (name, score, priority)
+            if prior is None or score > prior[1] or (score == prior[1] and priority < prior[2]):
+                merged[key] = item
+    ordered = sorted(merged.values(), key=lambda item: (-(item[1] + (0.025 if item[2] == 0 else 0.0)), identity_key(item[0])))
+    if matched_name:
+        key = identity_key(matched_name)
+        found = merged.get(key)
+        if found:
+            ordered = [found] + [item for item in ordered if identity_key(item[0]) != key]
+        else:
+            ordered.insert(0, (matched_name, float(matched_score or 0.0), 0))
+    selected = []
+    seen = set()
+    for name, score, _priority in ordered:
+        key = identity_key(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        selected.append((name, round(float(score), 3)))
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _is_legacy_generated_review_note(note: str) -> bool:
+    text = str(note or "").strip()
+    if text.startswith("REVIEW OCR AUTO:"):
+        return True
+    legacy_prefixes = (
+        "Kandidat lokal:", "Lebih dari dua harga dalam konteks", "Harga belum dapat ditentukan",
+        "Dua harga terdeteksi", "Pasangan harga lokal cocok", "Dua harga OCR tidak cocok",
+        "Harga promo berlabel", "Harga normal berlabel", "Harga normal dan promo dikenali",
+        "Label harga terbaca", "Label/urutan harga konflik", "Harga normal berlabel tetapi",
+        "Harga promo berlabel tetapi",
+    )
+    return text.startswith(legacy_prefixes)
+
+
+def _build_review_note(candidate: dict, old_note: object = "") -> str:
+    old = str(old_note or "").strip()
+    # Keep user-authored notes but discard stale generated notes from earlier builds.
+    marker = " | REVIEW OCR AUTO:"
+    manual = old.split(marker, 1)[0].strip() if marker in old else old
+    if _is_legacy_generated_review_note(manual):
+        manual = ""
+    base = str(candidate.get("candidate_note") or "Harga belum dapat ditentukan; buka poster asli.").strip()
+    status, _difference = _discount_assessment(candidate.get("discount_claim_percent"), candidate.get("discount_calculated_percent"))
+    claim = candidate.get("discount_claim_percent")
+    calculated = candidate.get("discount_calculated_percent")
+    if status.startswith("TIDAK COCOK"):
+        # Override older, looser parser language such as "cocok" when the difference exceeds 1 pp.
+        if "cocok" in base.casefold():
+            base = "Pasangan harga kandidat perlu diperiksa; validasi diskon yang lebih ketat menemukan ketidaksesuaian."
+        base += f" Klaim diskon {claim}% tetapi hasil hitung {calculated}%; {status.lower()}."
+    elif status.startswith("COCOK"):
+        base += f" Klaim diskon cocok dalam toleransi 1,0 poin persentase ({status.lower()}); tetap konfirmasi visual."
+    elif status == "BELUM BISA DIBANDINGKAN":
+        base += f" Klaim diskon {claim}% terbaca, tetapi pasangan harga belum lengkap; belum dapat dibandingkan."
+    else:
+        base += " Klaim diskon tidak terbaca; validasi matematis tidak tersedia."
+    auto = "REVIEW OCR AUTO: " + base
+    return f"{manual} | {auto}" if manual else auto
 
 
 def build_candidates(
@@ -837,6 +951,8 @@ def build_candidates(
                 match_note = "Kecocokan dari katalog lintas sumber, bukan bukti langsung pada poster ini; wajib cek SKU/ukuran. " + fallback_note
         if not suggested and local_suggestion:
             match_note = match_note + " Saran OCR lokal tersedia terpisah; itu bukan kecocokan SKU terverifikasi."
+        sku_choices = _candidate_sku_choices(match_context, page_products, fallback_products, suggested, score, limit=3)
+        discount_status, discount_diff = _discount_assessment(window.get("discount_claim_percent"), window.get("discount_calculated_percent"))
         price_values = window["price_values"]
         seed = "|".join([
             str(image_record.get("image_url") or ""),
@@ -863,6 +979,14 @@ def build_candidates(
             "local_product_name_suggestion": local_suggestion,
             "match_note": match_note,
             "candidate_note": window["candidate_note"],
+            "catalog_sku_candidate_1": sku_choices[0][0] if len(sku_choices) > 0 else "",
+            "catalog_sku_candidate_2": sku_choices[1][0] if len(sku_choices) > 1 else "",
+            "catalog_sku_candidate_3": sku_choices[2][0] if len(sku_choices) > 2 else "",
+            "catalog_sku_score_1": sku_choices[0][1] if len(sku_choices) > 0 else "",
+            "catalog_sku_score_2": sku_choices[1][1] if len(sku_choices) > 1 else "",
+            "catalog_sku_score_3": sku_choices[2][1] if len(sku_choices) > 2 else "",
+            "discount_validation_status": discount_status,
+            "discount_difference_pp": discount_diff,
             "_bucket_x": int(window.get("bucket_x", 0)),
             "_bucket_y": int(window.get("bucket_y", 0)),
             "_center_x": float(window.get("center_x", 0)),
@@ -929,6 +1053,30 @@ def build_candidates(
             chosen["local_product_name_suggestion"] = other["local_product_name_suggestion"]
         if chosen.get("candidate_note") and other.get("candidate_note") and chosen.get("candidate_note") != other.get("candidate_note"):
             chosen["candidate_note"] = chosen.get("candidate_note") + " Window OCR bertumpang tindih digabung; tetap periksa poster."
+        # Preserve the union of SKU dropdown candidates across overlapping windows.
+        options = []
+        for source in (chosen, other):
+            for n in range(1, 4):
+                name = str(source.get(f"catalog_sku_candidate_{n}") or "").strip()
+                score_value = source.get(f"catalog_sku_score_{n}")
+                try:
+                    score_value = float(score_value)
+                except (TypeError, ValueError):
+                    score_value = 0.0
+                if name:
+                    options.append((name, score_value))
+        unique_options = {}
+        for name, option_score in options:
+            key = identity_key(name)
+            if key and (key not in unique_options or option_score > unique_options[key][1]):
+                unique_options[key] = (name, option_score)
+        ranked_options = sorted(unique_options.values(), key=lambda x: (-x[1], identity_key(x[0])))[:3]
+        for n in range(1, 4):
+            chosen[f"catalog_sku_candidate_{n}"] = ranked_options[n-1][0] if len(ranked_options) >= n else ""
+            chosen[f"catalog_sku_score_{n}"] = ranked_options[n-1][1] if len(ranked_options) >= n else ""
+        discount_status, discount_diff = _discount_assessment(chosen.get("discount_claim_percent"), chosen.get("discount_calculated_percent"))
+        chosen["discount_validation_status"] = discount_status
+        chosen["discount_difference_pp"] = discount_diff
         merged[match_index] = chosen
 
     for candidate in merged:
@@ -1051,6 +1199,15 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
                 promo_for_review = ""
         if promo_for_review in (None, ""):
             promo_for_review = candidate.get("promo_price_candidate") or ""
+        discount_status, discount_difference = _discount_assessment(
+            candidate.get("discount_claim_percent"), candidate.get("discount_calculated_percent")
+        )
+        provided_status = str(candidate.get("discount_validation_status") or "").strip()
+        provided_difference = candidate.get("discount_difference_pp")
+        if provided_status:
+            discount_status = provided_status
+        if provided_difference not in (None, ""):
+            discount_difference = provided_difference
         row_values = [
             cid, decision, product_for_review, local_suggestion,
             normal_for_review, promo_for_review,
@@ -1058,7 +1215,10 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
             candidate.get("discount_claim_percent") or "", candidate.get("discount_calculated_percent") or "",
             candidate.get("match_note", ""), candidate.get("ocr_confidence", ""), candidate.get("ocr_snippet", ""),
             candidate.get("source_name", ""), candidate.get("campaign_title", ""), candidate.get("article_url", ""),
-            candidate.get("image_url", ""), old.get("Catatan Review") or candidate.get("candidate_note", ""),
+            candidate.get("image_url", ""), _build_review_note(candidate, old.get("Catatan Review")),
+            candidate.get("catalog_sku_candidate_1", ""), candidate.get("catalog_sku_candidate_2", ""), candidate.get("catalog_sku_candidate_3", ""),
+            candidate.get("catalog_sku_score_1", ""), candidate.get("catalog_sku_score_2", ""), candidate.get("catalog_sku_score_3", ""),
+            discount_status, discount_difference,
         ]
         ws.append(row_values)
         # Make both provenance URLs clickable in Excel so reviewers can open the
@@ -1074,7 +1234,7 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
     ws.row_dimensions[1].height = 42
-    widths = [15, 13, 38, 38, 22, 22, 20, 20, 16, 16, 45, 14, 76, 22, 48, 60, 70, 68]
+    widths = [15, 13, 38, 38, 22, 22, 20, 20, 16, 16, 45, 14, 76, 22, 48, 60, 70, 88, 38, 38, 38, 13, 13, 13, 32, 20]
     for idx, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(idx)].width = width
     for cell in ws[1]:
@@ -1088,11 +1248,21 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
             row[idx - 1].number_format = '#,##0'
         for idx in (9, 10):
             row[idx - 1].number_format = '0.0"%"'
+        for idx in (22, 23, 24):
+            row[idx - 1].number_format = '0.000'
+        row[25].number_format = '0.0'
         # Yellow = editable review input; grey = OCR-generated candidate only.
         for idx in (2, 3, 5, 6, 18):
             row[idx - 1].fill = PatternFill("solid", fgColor="FFF2CC")
-        for idx in (4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
+        for idx in (4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26):
             row[idx - 1].fill = PatternFill("solid", fgColor="E7E6E6")
+        status_value = str(row[24].value or "")
+        if status_value.startswith("TIDAK COCOK"):
+            row[24].fill = PatternFill("solid", fgColor="F4CCCC")
+        elif status_value.startswith("COCOK"):
+            row[24].fill = PatternFill("solid", fgColor="D9EAD3")
+        elif status_value == "BELUM BISA DIBANDINGKAN":
+            row[24].fill = PatternFill("solid", fgColor="FCE5CD")
     ws["B1"].comment = Comment(
         "CEK = belum disetujui. Hanya TERIMA yang mengaktifkan nilai pada kolom review; TOLAK menutup kandidat.",
         "Merchants Promo",
@@ -1119,15 +1289,29 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     ws.add_data_validation(decision_validation)
     if ws.max_row >= 2:
         decision_validation.add(f"B2:B{ws.max_row}")
+    # The SKU field has a row-specific drop-down of the top three candidate names.
+    # Information-style errors still allow a manually typed SKU when all choices are poor.
+    sku_validation = DataValidation(type="list", formula1="=$S2:$U2", allow_blank=True)
+    sku_validation.error = "Pilih salah satu kandidat SKU atau masukkan nama SKU yang sudah diverifikasi dari poster."
+    sku_validation.errorTitle = "Pilihan SKU untuk review"
+    sku_validation.prompt = "Pilih kandidat SKU dari daftar; jika tidak cocok, ketik nama SKU yang benar setelah melihat poster."
+    sku_validation.promptTitle = "Kecocokan SKU belum disetujui"
+    sku_validation.showInputMessage = True
+    sku_validation.showErrorMessage = True
+    sku_validation.errorStyle = "information"
+    ws.add_data_validation(sku_validation)
+    if ws.max_row >= 2:
+        sku_validation.add(f"C2:C{ws.max_row}")
 
     helpws = wb.create_sheet("Petunjuk")
     tips = [
         ["REVIEW HARGA DARI POSTER PROMO (OCR LOKAL)"],
         ["1. Buka URL Gambar untuk melihat poster asli; OCR dapat salah membaca digit atau menggabungkan dua SKU."],
-        ["2. Nama Produk untuk Review hanya diprefill jika ada kecocokan katalog yang kuat dan unik. Saran Nama Produk (OCR Lokal) adalah teks sekitar harga, bukan SKU terverifikasi; ini bukan persetujuan."],
+        ["2. Nama Produk untuk Review hanya diprefill jika ada kecocokan katalog yang kuat dan unik. Ini bukan persetujuan. Jika kosong, gunakan dropdown Kandidat SKU 1-3 di kolom S-U; skor hanya untuk membantu memilih dan bukan bukti mutlak. Saran OCR Lokal adalah teks poster, bukan SKU terverifikasi."],
         ["3. Harga Normal/Promo untuk Review adalah nilai kandidat yang boleh diedit, BUKAN persetujuan. Harga tanpa label atau klaim diskon pendukung akan dibiarkan kosong."],
         ["4. HANYA pilihan TERIMA pada kolom Keputusan yang mengaktifkan harga. Nama produk untuk review wajib diisi secara eksplisit; saran OCR tidak dipakai otomatis sebagai pengganti."],
-        ["5. Jika harga normal dicoret dan harga promo tidak berlabel, pastikan area produk dan klaim diskon mendukung pasangan tersebut sebelum TERIMA."],
+        ["5. Kolom Validasi Klaim Diskon membandingkan klaim OCR dengan hasil hitung. Toleransi status COCOK adalah maksimal 1,0 poin persentase; status TIDAK COCOK wajib diperiksa visual dan tidak boleh diterima otomatis."],
+        ["6. Jika harga normal dicoret dan harga promo tidak berlabel, pastikan area produk dan klaim diskon mendukung pasangan tersebut sebelum TERIMA."],
         ["5. Setelah menyimpan dan menutup Excel, jalankan: python engine\\promo_poster_ocr.py --import-reviewed-only"],
         ["6. Lalu perbarui katalog: python engine\\enrich_existing_promo_catalog_multisource.py. Harga dari poster hanya dipakai setelah TERIMA."],
         ["7. Tidak ada AI generatif/tebakan harga. OCR menyalin teks/angka; keputusan harga tetap membutuhkan konteks bukti poster."],
