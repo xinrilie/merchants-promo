@@ -112,8 +112,46 @@ def test_review_workbook_adds_audit_columns_without_changing_decision_gate(tmp_p
 
 def test_cache_and_line_schemas_version_the_pipeline_and_preserve_recognition_method():
     assert "ocr_pipeline_version" in ocr.CACHE_FIELDS
-    assert ocr.OCR_PIPELINE_VERSION == "poster-ocr-v2.0"
+    assert ocr.OCR_PIPELINE_VERSION == "poster-ocr-v2.1-fast-crop"
     assert "recognition_method" in ocr.LINE_FIELDS
     saved = {"lines_json": '[{"text":"20.900","recognition_method":"COLOR_PRICE_TAG_CROP_RED"}]'}
     lines = ocr._line_records(saved)
     assert lines[0]["recognition_method"] == "COLOR_PRICE_TAG_CROP_RED"
+
+
+def test_color_crop_rescue_skips_tag_when_full_page_ocr_already_found_price(monkeypatch):
+    image = Image.new("RGB", (1200, 1500), "white")
+    boxes = [
+        (200, 510, 430, 555, "YELLOW"),
+        (600, 610, 830, 655, "RED"),
+    ]
+    monkeypatch.setattr(ocr, "_detect_color_price_tag_boxes", lambda _image: boxes)
+    calls = []
+    def fake_crop(_crop, _engine, _backend):
+        calls.append(True)
+        return "Rp20.900", 0.9
+    monkeypatch.setattr(ocr, "_crop_ocr_price_text", fake_crop)
+    lines = [{
+        "text": "Rp28.900", "confidence": 0.9,
+        "x0": 230, "y0": 520, "x1": 390, "y1": 545,
+        "recognition_method": "FULL_PAGE",
+    }]
+    augmented = ocr._augment_with_color_price_tag_crops(image, lines, object(), "rapidocr")
+    # The first tag is already covered by a full-page price. Only the missing
+    # second tag receives a crop inference and is added as evidence.
+    assert len(calls) == 1
+    assert len(augmented) == 2
+    assert any(line.get("recognition_method") == "COLOR_PRICE_TAG_CROP_RED" for line in augmented)
+
+
+def test_color_crop_rescue_has_a_per_image_upper_bound(monkeypatch):
+    image = Image.new("RGB", (1200, 1500), "white")
+    boxes = [(100 + 100*i, 500 + 50*i, 180 + 100*i, 530 + 50*i, "RED") for i in range(12)]
+    monkeypatch.setattr(ocr, "_detect_color_price_tag_boxes", lambda _image: boxes)
+    calls = []
+    def fake_crop(_crop, _engine, _backend):
+        calls.append(True)
+        return "not a price", 0.0
+    monkeypatch.setattr(ocr, "_crop_ocr_price_text", fake_crop)
+    ocr._augment_with_color_price_tag_crops(image, [], object(), "rapidocr")
+    assert len(calls) == ocr.MAX_COLOR_PRICE_CROPS_PER_IMAGE == 6

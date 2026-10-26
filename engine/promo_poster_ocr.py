@@ -45,7 +45,10 @@ REVIEW_XLSX = DEFAULT_REVIEW_XLSX
 OVERRIDES_CSV = ROOT / "_internal" / "promo_poster_price_overrides.csv"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REQUEST_TIMEOUT = (5, 15)
-OCR_PIPELINE_VERSION = "poster-ocr-v2.0"
+OCR_PIPELINE_VERSION = "poster-ocr-v2.1-fast-crop"
+# Bound per-image crop inference time. Full-page OCR remains the primary pass;
+# color crops are only a rescue path for labels whose price was not read.
+MAX_COLOR_PRICE_CROPS_PER_IMAGE = 6
 USER_AGENT = "Mozilla/5.0 (compatible; MerchantsPromoPosterOCR/1.0; local catalog audit)"
 
 CACHE_FIELDS = [
@@ -424,11 +427,45 @@ def _augment_with_color_price_tag_crops(image: Image.Image, lines: list[dict], e
         return lines
     width, height = image.size
     augmented = list(lines)
+    crop_attempts = 0
     for x0, y0, x1, y1, color in boxes:
-        # Keep this rescue pass even when the full-page OCR found another price
-        # nearby: a tag-level crop can distinguish two labels that are visually
-        # adjacent. Duplicate spatial detections are removed below.
-        pad_x = max(4, int((x1 - x0) * 0.05))
+        box_w = max(1, x1 - x0)
+        box_h = max(1, y1 - y0)
+
+        # A color crop is a rescue pass, not a second OCR pass over every price.
+        # If full-page OCR already recognized a price whose line sits inside the
+        # tag (or its small margin), skip this crop entirely. The old behavior
+        # OCRed every colored label and only discarded duplicates afterwards,
+        # making one poster perform 12-23 extra ONNX inferences.
+        tag_left = max(0.0, x0 - box_w * 0.12)
+        tag_top = max(0.0, y0 - box_h * 0.35)
+        tag_right = min(float(width), x1 + box_w * 0.12)
+        tag_bottom = min(float(height), y1 + box_h * 0.35)
+        existing_price_found = False
+        for line in augmented:
+            if not extract_prices(str(line.get("text") or "")):
+                continue
+            lx0 = float(line.get("x0", 0) or 0)
+            ly0 = float(line.get("y0", 0) or 0)
+            lx1 = float(line.get("x1", 0) or 0)
+            ly1 = float(line.get("y1", 0) or 0)
+            cx = (lx0 + lx1) / 2
+            cy = (ly0 + ly1) / 2
+            # Use either center-in-expanded-tag or geometric intersection. The
+            # intersection branch handles OCR boxes whose baseline extends past
+            # the colored rectangle while still representing its printed price.
+            intersects = lx1 >= tag_left and lx0 <= tag_right and ly1 >= tag_top and ly0 <= tag_bottom
+            center_inside = tag_left <= cx <= tag_right and tag_top <= cy <= tag_bottom
+            if intersects or center_inside:
+                existing_price_found = True
+                break
+        if existing_price_found:
+            continue
+        if crop_attempts >= MAX_COLOR_PRICE_CROPS_PER_IMAGE:
+            break
+        crop_attempts += 1
+
+        pad_x = max(4, int(box_w * 0.05))
         # Include a narrow margin around the detected tag. Excessive vertical
         # padding can merge neighbouring labels into one OCR crop.
         pad_y = max(4, int((y1 - y0) * 0.12))
@@ -2164,6 +2201,7 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
     processed = ok = failed = 0
     try:
         for idx, record in enumerate(to_process, 1):
+            image_started_at = time.monotonic()
             url = str(record.get("image_url") or "")
             previous_cache = old_cache.get(url)
             cache_to_store = None
@@ -2196,8 +2234,15 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
                 cache_to_store = cache_row
             old_cache[url] = {field: str(cache_to_store.get(field) or "") for field in CACHE_FIELDS}
             processed += 1
-            if idx == 1 or idx % 10 == 0 or idx == len(to_process):
-                print(f"OCR gambar {idx}/{len(to_process)} | teks terbaca={ok} | gagal/kosong={failed}", flush=True)
+            image_duration = time.monotonic() - image_started_at
+            short_label = str(record.get("image_alt") or record.get("campaign_title") or record.get("source_name") or "poster").strip()
+            if len(short_label) > 55:
+                short_label = short_label[:52] + "..."
+            print(
+                f"OCR gambar {idx}/{len(to_process)} | {short_label} | "
+                f"teks terbaca={ok} | gagal/kosong={failed} | durasi={image_duration:.1f}s",
+                flush=True,
+            )
             time.sleep(0.05)
     finally:
         session.close()

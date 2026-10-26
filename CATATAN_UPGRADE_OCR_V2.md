@@ -34,3 +34,12 @@ Upgrade diterapkan langsung ke `engine/promo_poster_ocr.py` pada proyek Merchant
 - Masker warna merah/kuning dioptimalkan untuk pola poster Promo Gantung yang diuji; warna desain poster lain bisa luput atau menghasilkan crop tak relevan.
 - OpenCV membantu memilih crop, tetapi tetap bukan pembukti bahwa angka adalah harga. OCR crop yang ambigu atau rendah keyakinannya perlu ditinjau dari URL gambar asli.
 - Integrasi teknis diuji melalui test suite lokal dan importer yang ada. Data poster yang seluruhnya berbeda desain perlu ditambahkan sebagai kumpulan regresi sebelum penggunaan otomatis berskala besar.
+
+
+## Pembaruan kinerja v2.1 (26 Oktober 2026)
+
+Log dari uji pengguna menunjukkan crop rescue menjalankan OCR untuk setiap kandidat label warna, termasuk label yang harganya sudah terbaca dari OCR halaman penuh. Pada 16 poster acuan, detektor mengusulkan 12–23 kotak warna per halaman, sehingga menimbulkan inferensi ONNX tambahan dan peringatan `The text detection result is empty` pada crop yang tidak berisi teks yang dapat dibaca.
+
+Perbaikan: crop rescue sekarang dilewati jika OCR halaman penuh sudah menemukan harga di area label; jumlah crop OCR tambahan dibatasi maksimal 6 per gambar; cache diberi versi `poster-ocr-v2.1-fast-crop` agar hasil versi sebelumnya diproses ulang dengan jalur baru; output progres ditampilkan setelah setiap gambar beserta durasi. Peringatan deteksi kosong yang tersisa dapat muncul pada crop yang memang masih dicoba dan bukan dengan sendirinya error fatal.
+
+Verifikasi setelah perubahan kinerja: `python -m pytest -q engine` — 165 passed. OCR end-to-end untuk semua poster tetap perlu dijalankan di mesin pengguna dengan memantau durasi per gambar.
