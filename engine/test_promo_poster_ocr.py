@@ -160,3 +160,27 @@ def test_review_workbook_links_to_article_and_original_poster(tmp_path):
     assert ws["P2"].hyperlink.target == "https://example.test/article"
     assert ws["Q2"].hyperlink.target == "https://example.test/poster.jpg"
     wb.close()
+
+def test_paddleocr_disables_mkldnn_for_cpu_pir_workaround(monkeypatch):
+    import sys
+    import types
+    from promo_poster_ocr import create_ocr_engine
+
+    captured = {}
+    fake_engine = object()
+
+    def fake_paddleocr(**kwargs):
+        captured.update(kwargs)
+        return fake_engine
+
+    fake_module = types.ModuleType("paddleocr")
+    fake_module.PaddleOCR = fake_paddleocr
+    monkeypatch.setitem(sys.modules, "paddleocr", fake_module)
+
+    backend, engine = create_ocr_engine("paddleocr")
+
+    assert backend == "paddleocr"
+    assert engine is fake_engine
+    assert captured["enable_mkldnn"] is False
+    assert captured["device"] == "cpu"
+

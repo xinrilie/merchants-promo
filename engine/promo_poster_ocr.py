@@ -189,6 +189,11 @@ def create_ocr_engine(preferred: str = "auto"):
                 engine = PaddleOCR(
                     lang="en",
                     device="cpu",
+                    # Work around PaddlePaddle 3.3.x / PaddleOCR 3.4.x CPU
+                    # oneDNN-PIR failures reported as:
+                    # ConvertPirAttribute2RuntimeAttribute not support
+                    # [pir::ArrayAttribute<pir::DoubleAttribute>].
+                    enable_mkldnn=False,
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False,
                     use_textline_orientation=True,
