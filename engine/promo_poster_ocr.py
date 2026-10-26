@@ -24,6 +24,7 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from PIL import Image, ImageEnhance, ImageOps, UnidentifiedImageError
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
@@ -61,8 +62,8 @@ CANDIDATE_FIELDS = [
     "matched_product_name", "matched_product_score", "match_note", "candidate_note",
 ]
 REVIEW_HEADERS = [
-    "ID Kandidat", "Keputusan", "Nama Produk Disetujui", "Nama Produk Saran",
-    "Harga Normal Disetujui (Rp)", "Harga Promo Disetujui (Rp)",
+    "ID Kandidat", "Keputusan", "Nama Produk untuk Review", "Nama Produk Saran",
+    "Harga Normal untuk Review (Rp)", "Harga Promo untuk Review (Rp)",
     "Harga Normal Kandidat (Rp)", "Harga Promo Kandidat (Rp)",
     "Klaim Diskon OCR (%)", "Diskon Hitung (%)", "Kecocokan Nama", "Keyakinan OCR",
     "Potongan Teks Poster OCR", "Sumber", "Kampanye", "URL Artikel", "URL Gambar", "Catatan Review",
@@ -934,16 +935,23 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
         decision = str(old.get("Keputusan") or "CEK").strip().upper()
         if decision not in {"CEK", "TERIMA", "TOLAK"}:
             decision = "CEK"
-        product_approved = old.get("Nama Produk Disetujui") or suggested
-        normal_approved = old.get("Harga Normal Disetujui (Rp)")
-        if normal_approved in (None, ""):
-            normal_approved = candidate.get("normal_price_candidate") or ""
-        promo_approved = old.get("Harga Promo Disetujui (Rp)")
-        if promo_approved in (None, ""):
-            promo_approved = candidate.get("promo_price_candidate") or ""
+        # These are editable values for review, not approvals. The sole approval
+        # gate is the explicit decision in column B. Keep values from older
+        # workbooks for continuity, but expose them under non-approval labels.
+        product_for_review = old.get("Nama Produk untuk Review") or old.get("Nama Produk Disetujui") or suggested
+        normal_for_review = old.get("Harga Normal untuk Review (Rp)")
+        if normal_for_review in (None, ""):
+            normal_for_review = old.get("Harga Normal Disetujui (Rp)")
+        if normal_for_review in (None, ""):
+            normal_for_review = candidate.get("normal_price_candidate") or ""
+        promo_for_review = old.get("Harga Promo untuk Review (Rp)")
+        if promo_for_review in (None, ""):
+            promo_for_review = old.get("Harga Promo Disetujui (Rp)")
+        if promo_for_review in (None, ""):
+            promo_for_review = candidate.get("promo_price_candidate") or ""
         row_values = [
-            cid, decision, product_approved, suggested,
-            normal_approved, promo_approved,
+            cid, decision, product_for_review, suggested,
+            normal_for_review, promo_for_review,
             candidate.get("normal_price_candidate") or "", candidate.get("promo_price_candidate") or "",
             candidate.get("discount_claim_percent") or "", candidate.get("discount_calculated_percent") or "",
             candidate.get("match_note", ""), candidate.get("ocr_confidence", ""), candidate.get("ocr_snippet", ""),
@@ -978,9 +986,23 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
             row[idx - 1].number_format = '#,##0'
         for idx in (9, 10):
             row[idx - 1].number_format = '0.0"%"'
-        # Editable columns are highlighted using a pale yellow fill.
+        # Yellow = editable review input; grey = OCR-generated candidate only.
         for idx in (2, 3, 5, 6, 18):
             row[idx - 1].fill = PatternFill("solid", fgColor="FFF2CC")
+        for idx in (4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
+            row[idx - 1].fill = PatternFill("solid", fgColor="E7E6E6")
+    ws["B1"].comment = Comment(
+        "CEK = belum disetujui. Hanya TERIMA yang mengaktifkan nilai pada kolom review; TOLAK menutup kandidat.",
+        "Merchants Promo",
+    )
+    ws["E1"].comment = Comment(
+        "Nilai awal disalin dari kandidat OCR untuk memudahkan review. Ini bukan persetujuan; cek poster dan pilih TERIMA setelah yakin.",
+        "Merchants Promo",
+    )
+    ws["F1"].comment = Comment(
+        "Nilai awal disalin dari kandidat OCR untuk memudahkan review. Ini bukan persetujuan; cek poster dan pilih TERIMA setelah yakin.",
+        "Merchants Promo",
+    )
     decision_validation = DataValidation(type="list", formula1='"CEK,TERIMA,TOLAK"', allow_blank=False)
     decision_validation.error = "Pilih CEK, TERIMA, atau TOLAK."
     decision_validation.errorTitle = "Keputusan OCR tidak valid"
@@ -992,13 +1014,14 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     tips = [
         ["REVIEW HARGA DARI POSTER PROMO (OCR LOKAL)"],
         ["1. Buka URL Gambar untuk melihat poster asli; OCR dapat salah membaca digit atau menggabungkan dua SKU."],
-        ["2. Periksa Nama Produk Disetujui dan Harga Normal/Promo Disetujui. Kolom berwarna kuning adalah kolom yang boleh diedit."],
-        ["3. Pilih TERIMA hanya bila SKU, ukuran/varian, dan peran harga sudah cocok secara visual. Pilih TOLAK bila kandidat salah; selain itu biarkan CEK."],
+        ["2. Kolom Nama Produk untuk Review dan Harga Normal/Promo untuk Review adalah nilai usulan yang boleh diedit, BUKAN persetujuan harga. Nilai usulan sengaja ditampilkan agar tidak perlu mengetik ulang."],
+        ["3. HANYA pilihan TERIMA pada kolom Keputusan yang menyetujui dan mengaktifkan harga. Selama keputusan CEK/TOLAK, harga tidak boleh masuk katalog."],
         ["4. Jika harga normal dicoret dan harga promo tidak berlabel, pastikan konteks poster/klaim diskon mendukung pasangan tersebut sebelum TERIMA."],
         ["5. Setelah menyimpan dan menutup Excel, jalankan: python engine\\promo_poster_ocr.py --import-reviewed-only"],
         ["6. Lalu perbarui katalog: python engine\\enrich_existing_promo_catalog_multisource.py. Harga dari poster hanya dipakai setelah TERIMA."],
         ["7. Tidak ada AI generatif/tebakan harga. OCR menyalin teks/angka; keputusan harga tetap membutuhkan konteks bukti poster."],
-        ["8. Kandidat yang tidak punya kecocokan produk tetap bisa ditinjau, tetapi isi Nama Produk Disetujui sesuai SKU katalog dan cocokkan URL artikelnya."],
+        ["8. Kandidat yang tidak punya kecocokan produk tetap bisa ditinjau, tetapi koreksi Nama Produk untuk Review sesuai SKU katalog dan cocokkan URL artikelnya."],
+        ["9. Beban laptop: OCR memakai CPU/RAM saat gambar diproses. Tanpa --force, gambar yang sudah berhasil dicache tidak diproses ulang; gunakan --limit 10 atau 25 untuk membatasi batch."],
     ]
     for tip in tips:
         helpws.append(tip)
@@ -1080,6 +1103,59 @@ def _catalog_fallback_for_campaign(catalog: list[dict], campaign_title: str) -> 
     return [row for row in catalog if identity_key(row.get("merchant_name")) in matched]
 
 
+def rebuild_review_from_cache() -> dict:
+    """Rebuild candidate CSV/Excel from saved OCR cache without OCR inference or downloads."""
+    images = _load_image_index(IMAGE_INDEX)
+    if not images:
+        raise FileNotFoundError(f"Daftar gambar poster tidak ditemukan/kosong: {IMAGE_INDEX}. Jalankan collector terlebih dahulu.")
+    old_cache = {str(r.get("image_url") or ""): r for r in _read_csv(CACHE_CSV)}
+    print("Mode review saja: memakai cache OCR; tidak mengunduh gambar atau menjalankan OCR.", flush=True)
+    cache_rows = [old_cache.get(str(r.get("image_url") or ""), {}) for r in images]
+    line_rows = []
+    candidates = []
+    page_products = _load_page_products(PRODUCTS_CSV)
+    catalog_products = _load_catalog_products(PRODUCTS_CSV)
+    for image_record, cache_row in zip(images, cache_rows):
+        lines = _line_records(cache_row)
+        try:
+            width = int(cache_row.get("image_width") or 0)
+            height = int(cache_row.get("image_height") or 0)
+        except (TypeError, ValueError):
+            width = height = 0
+        stamp = cache_row.get("processed_at") or ""
+        for n, line in enumerate(_sort_lines(lines), 1):
+            line_rows.append({
+                "source_name": image_record.get("source_name", ""), "campaign_title": image_record.get("campaign_title", ""),
+                "article_url": image_record.get("article_url", ""), "image_url": image_record.get("image_url", ""),
+                "image_alt": image_record.get("image_alt", ""), "period_status": image_record.get("period_status", ""),
+                "line_no": n, "ocr_text": line.get("text", ""), "ocr_confidence": line.get("confidence", ""),
+                "x0": line.get("x0", ""), "y0": line.get("y0", ""), "x1": line.get("x1", ""), "y1": line.get("y1", ""),
+                "image_width": width, "image_height": height, "processed_at": stamp,
+            })
+        product_rows = page_products.get(_canonical_article_url(image_record.get("article_url")), [])
+        fallback_rows = _catalog_fallback_for_campaign(catalog_products, str(image_record.get("campaign_title") or ""))
+        candidates.extend(build_candidates(image_record, lines, width, height, product_rows, fallback_rows))
+
+    _write_csv(LINES_CSV, line_rows, LINE_FIELDS)
+    candidate_map = {candidate["candidate_id"]: candidate for candidate in candidates}
+    candidates = sorted(candidate_map.values(), key=lambda row: (row.get("source_name", ""), row.get("campaign_title", ""), row.get("candidate_id", "")))
+    _write_csv(CANDIDATES_CSV, candidates, CANDIDATE_FIELDS)
+    prior = _load_old_review(REVIEW_XLSX)
+    make_review_workbook(candidates, REVIEW_XLSX, prior)
+    import_stats = import_reviewed_prices(REVIEW_XLSX, OVERRIDES_CSV)
+    cached = sum(bool(str(row.get("image_url") or "") in old_cache) for row in images)
+    return {
+        "images_indexed": len(images), "images_processed": 0, "images_cached": cached,
+        "ocr_ok": 0, "ocr_failed_or_empty": 0, "ocr_backend": "cache-reuse",
+        "line_count": len(line_rows), "candidate_count": len(candidates),
+        "candidate_price_pair_count": sum(bool(r.get("normal_price_candidate")) and bool(r.get("promo_price_candidate")) for r in candidates),
+        "candidate_product_suggestion_count": sum(bool(r.get("matched_product_name")) for r in candidates),
+        "approved_override_count": import_stats.get("active_overrides", 0),
+        "cache_csv": str(CACHE_CSV), "lines_csv": str(LINES_CSV), "candidate_csv": str(CANDIDATES_CSV),
+        "review_workbook": str(REVIEW_XLSX),
+    }
+
+
 def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto") -> dict:
     images = _load_image_index()
     if not images:
@@ -1087,6 +1163,8 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
     old_cache = {str(r.get("image_url") or ""): r for r in _read_csv(CACHE_CSV)}
     if force:
         to_process = images[:limit] if limit > 0 else images
+        scope = f"semua {len(to_process)} gambar" if limit <= 0 else f"{len(to_process)} gambar pertama"
+        print(f"Mode OCR paksa: akan menjalankan ulang {scope}; penggunaan CPU/RAM meningkat selama inferensi.", flush=True)
     else:
         # Retry transient download/OCR failures next run. Successful results and
         # no-text images remain cached to avoid repeatedly processing the same poster.
@@ -1097,6 +1175,7 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
         ]
         if limit > 0:
             to_process = to_process[:limit]
+        print(f"Mode OCR inkremental: {len(to_process)} gambar baru/gagal akan diproses; cache sukses dipakai ulang.", flush=True)
     if not to_process:
         print("OCR: semua gambar pada indeks sudah memiliki cache; gunakan --force untuk memproses ulang.")
         # Even with no new images, the user may have edited the review workbook.
@@ -1211,9 +1290,20 @@ def main(argv=None) -> int:
     parser.add_argument("--force", action="store_true", help="Paksa OCR ulang gambar yang sudah ada cache.")
     parser.add_argument("--backend", choices=("auto", "paddleocr", "rapidocr", "tesseract"), default="auto", help="Mesin OCR lokal (default: RapidOCR/ONNX, lalu Tesseract; PaddleOCR bisa dipilih eksplisit).")
     parser.add_argument("--import-reviewed-only", action="store_true", help="Impor keputusan TERIMA/TOLAK dari workbook tanpa OCR ulang.")
+    parser.add_argument("--rebuild-review-only", action="store_true", help="Bangun ulang workbook dari cache OCR tanpa mengunduh gambar atau menjalankan OCR.")
     args = parser.parse_args(argv)
     if args.limit < 0:
         parser.error("--limit harus 0 atau lebih")
+    if args.rebuild_review_only:
+        try:
+            stats = rebuild_review_from_cache()
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            print(f"ERROR rebuild review: {exc}", file=sys.stderr)
+            return 2
+        for key, value in stats.items():
+            print(f"{key}: {value}")
+        print("Review selesai dibangun ulang dari cache; tidak ada OCR/download baru.")
+        return 0
     if args.import_reviewed_only:
         stats = import_reviewed_prices(REVIEW_XLSX, OVERRIDES_CSV)
         print(f"Baris review dibaca: {stats['review_rows']}")

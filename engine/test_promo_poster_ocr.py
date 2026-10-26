@@ -122,3 +122,101 @@ def test_local_ocr_name_suggestion_is_available_when_catalog_match_is_missing():
     assert rows
     assert rows[0]["matched_product_name"]
     assert "OCR lokal" in rows[0]["match_note"]
+
+
+def test_review_workbook_labels_inputs_as_review_not_approval(tmp_path):
+    from openpyxl import load_workbook
+    from promo_poster_ocr import make_review_workbook
+
+    output = tmp_path / "review.xlsx"
+    candidate = {
+        "candidate_id": "SAFE1234", "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo", "article_url": "https://example.test/article",
+        "image_url": "https://example.test/poster.jpg", "ocr_snippet": "Sunlight 910 ml Harga Normal Rp20.000 Harga Promo Rp16.900",
+        "matched_product_name": "Sunlight Lime 910 ml", "matched_product_score": .94,
+        "match_note": "SKU cocok", "candidate_note": "Tinjau poster",
+        "normal_price_candidate": 20000, "promo_price_candidate": 16900,
+        "discount_claim_percent": 15, "discount_calculated_percent": 15.5,
+        "ocr_confidence": .96,
+    }
+    make_review_workbook([candidate], output)
+    wb = load_workbook(output, data_only=True)
+    ws = wb["Kandidat OCR"]
+    headers = [cell.value for cell in ws[1]]
+    assert ws["B2"].value == "CEK"
+    assert "Harga Normal Disetujui (Rp)" not in headers
+    assert "Harga Promo Disetujui (Rp)" not in headers
+    assert ws["E2"].value == 20000
+    assert ws["F2"].value == 16900
+    assert "bukan persetujuan" in wb["Petunjuk"]["A3"].value.lower()
+    wb.close()
+
+
+def test_rebuild_review_from_cache_does_not_run_ocr_or_download(tmp_path, monkeypatch):
+    import csv
+    import json
+    import promo_poster_ocr as ocr
+
+    def write_csv(path, rows, fields):
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    image_url = "https://images.example.test/poster.jpg"
+    article_url = "https://example.test/promo"
+    image_index = tmp_path / "images.csv"
+    products_csv = tmp_path / "products.csv"
+    cache_csv = tmp_path / "cache.csv"
+    lines_csv = tmp_path / "lines.csv"
+    candidates_csv = tmp_path / "candidates.csv"
+    review_xlsx = tmp_path / "review.xlsx"
+    overrides_csv = tmp_path / "overrides.csv"
+
+    write_csv(image_index, [{
+        "image_url": image_url, "source_name": "Katalogpromosi.com", "campaign_title": "Promo Indomaret",
+        "article_url": article_url, "image_alt": "Sunlight Lime promo", "period_status": "current",
+    }], ["image_url", "source_name", "campaign_title", "article_url", "image_alt", "period_status"])
+    write_csv(products_csv, [{
+        "product_text": "Sunlight Lime 910 ml", "source_url": article_url, "source_page_url": article_url,
+        "product_validation_status": "eligible", "merchant_name": "Indomaret", "source_name": "Katalogpromosi.com",
+    }], ["product_text", "source_url", "source_page_url", "product_validation_status", "merchant_name", "source_name"])
+    lines = [
+        {"text": "Sunlight Lime 910 ml", "confidence": .97, "x0": 100, "y0": 100, "x1": 390, "y1": 140},
+        {"text": "Harga Normal Rp20.000", "confidence": .97, "x0": 100, "y0": 160, "x1": 390, "y1": 200},
+        {"text": "Harga Promo Rp16.900", "confidence": .97, "x0": 100, "y0": 205, "x1": 390, "y1": 245},
+        {"text": "Diskon 15%", "confidence": .97, "x0": 100, "y0": 250, "x1": 390, "y1": 285},
+    ]
+    cache_row = {
+        "image_url": image_url, "source_name": "Katalogpromosi.com", "campaign_title": "Promo Indomaret",
+        "article_url": article_url, "image_alt": "Sunlight Lime promo", "period_status": "current",
+        "scraped_at": "2026-10-26", "image_sha256": "fakehash", "image_width": "800", "image_height": "1000",
+        "ocr_status": "ok", "ocr_backend": "rapidocr", "ocr_error": "", "processed_at": "2026-10-26T10:00:00+07:00",
+        "lines_json": json.dumps(lines),
+    }
+    write_csv(cache_csv, [cache_row], ocr.CACHE_FIELDS)
+
+    for name, value in {
+        "IMAGE_INDEX": image_index, "PRODUCTS_CSV": products_csv, "CACHE_CSV": cache_csv,
+        "LINES_CSV": lines_csv, "CANDIDATES_CSV": candidates_csv, "REVIEW_XLSX": review_xlsx,
+        "OVERRIDES_CSV": overrides_csv,
+    }.items():
+        monkeypatch.setattr(ocr, name, value)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("OCR engine or downloader must not run in rebuild-review-only mode")
+
+    monkeypatch.setattr(ocr, "create_ocr_engine", must_not_run)
+    monkeypatch.setattr(ocr, "_download_image", must_not_run)
+    stats = ocr.rebuild_review_from_cache()
+    assert stats["images_processed"] == 0
+    assert stats["ocr_backend"] == "cache-reuse"
+    assert stats["candidate_count"] >= 1
+    from openpyxl import load_workbook
+    wb = load_workbook(review_xlsx, data_only=True)
+    ws = wb["Kandidat OCR"]
+    headers = [cell.value for cell in ws[1]]
+    assert "Harga Normal untuk Review (Rp)" in headers
+    assert "Harga Normal Disetujui (Rp)" not in headers
+    assert ws["B2"].value == "CEK"
+    wb.close()

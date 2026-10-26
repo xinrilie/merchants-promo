@@ -62,8 +62,14 @@ def import_reviewed_prices(review_xlsx: str | Path = DEFAULT_REVIEW_XLSX, overri
         header_values = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
         headers = [str(value or "").strip() for value in header_values]
         by_name = {h: i for i, h in enumerate(headers)}
-        required = {"ID Kandidat", "Keputusan", "Nama Produk Disetujui", "Harga Normal Disetujui (Rp)", "Harga Promo Disetujui (Rp)"}
+        required = {"ID Kandidat", "Keputusan"}
         missing = required - set(by_name)
+        product_field = "Nama Produk untuk Review" if "Nama Produk untuk Review" in by_name else "Nama Produk Disetujui"
+        normal_field = "Harga Normal untuk Review (Rp)" if "Harga Normal untuk Review (Rp)" in by_name else "Harga Normal Disetujui (Rp)"
+        promo_field = "Harga Promo untuk Review (Rp)" if "Harga Promo untuk Review (Rp)" in by_name else "Harga Promo Disetujui (Rp)"
+        for field in (product_field, normal_field, promo_field):
+            if field not in by_name:
+                missing.add(field)
         if missing:
             raise ValueError("Kolom workbook tidak lengkap: " + ", ".join(sorted(missing)))
 
@@ -86,9 +92,12 @@ def import_reviewed_prices(review_xlsx: str | Path = DEFAULT_REVIEW_XLSX, overri
                     existing[candidate_id] = previous
                 continue
 
-            product = str(row.get("Nama Produk Disetujui") or row.get("Nama Produk Saran") or "").strip()
-            normal_price = _parse_price(row.get("Harga Normal Disetujui (Rp)"))
-            promo_price = _parse_price(row.get("Harga Promo Disetujui (Rp)"))
+            # Backward-compatible aliases allow existing review workbooks to be
+            # imported. New workbooks use non-approval labels; `TERIMA` remains
+            # the only condition that activates the submitted values.
+            product = str(row.get(product_field) or row.get("Nama Produk Saran") or row.get("Nama Produk Disetujui") or "").strip()
+            normal_price = _parse_price(row.get(normal_field))
+            promo_price = _parse_price(row.get(promo_field))
             source_name = str(row.get("Sumber") or "").strip()
             campaign = str(row.get("Kampanye") or "").strip()
             article_url = str(row.get("URL Artikel") or "").strip()
@@ -98,7 +107,7 @@ def import_reviewed_prices(review_xlsx: str | Path = DEFAULT_REVIEW_XLSX, overri
             claim = str(row.get("Klaim Diskon OCR (%)") or "").strip()
             issues = []
             if not product or not identity_key(product):
-                issues.append("nama produk disetujui kosong")
+                issues.append("nama produk untuk review kosong")
             if normal_price is None and promo_price is None:
                 issues.append("isi minimal harga normal atau harga promo")
             if normal_price is not None and promo_price is not None and promo_price >= normal_price:

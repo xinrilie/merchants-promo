@@ -97,3 +97,55 @@ def test_conflicting_existing_price_is_not_overwritten(tmp_path):
     assert row["normal_price"] == "23000"
     assert row.get("poster_ocr_override_conflict")
     assert applied["rows_conflicted"] == 1
+
+
+def test_review_values_do_not_activate_until_decision_is_terima(tmp_path):
+    review = tmp_path / "Review_Harga_Poster_OCR.xlsx"
+    overrides = tmp_path / "overrides.csv"
+    candidate = {
+        "candidate_id": "CHECK123456789", "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo", "article_url": "https://example.test/a",
+        "image_url": "https://example.test/p.jpg", "ocr_snippet": "Produk Rp20.000 Rp16.900",
+        "normal_price_candidate": 20000, "promo_price_candidate": 16900,
+        "discount_claim_percent": "", "discount_calculated_percent": 15.5,
+        "ocr_confidence": .95, "matched_product_name": "Sunlight Lime 910 ml",
+        "matched_product_score": .9, "match_note": "Cek", "candidate_note": "Ambigu",
+    }
+    make_review_workbook([candidate], review)
+    stats = import_reviewed_prices(review, overrides)
+    assert stats["active_overrides"] == 0
+    assert stats["accepted_or_updated"] == 0
+    row = {
+        "source_name": "Katalogpromosi.com", "source_url": "https://example.test/a",
+        "product_text": "Sunlight Lime 910 ml", "normal_price": "", "promo_price": "",
+    }
+    apply_stats = apply_reviewed_poster_prices([row], overrides)
+    assert apply_stats["rows_updated"] == 0
+    assert row["normal_price"] == "" and row["promo_price"] == ""
+
+
+def test_importer_still_accepts_legacy_approved_column_names(tmp_path):
+    from openpyxl import Workbook
+
+    review = tmp_path / "legacy-review.xlsx"
+    overrides = tmp_path / "overrides.csv"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Kandidat OCR"
+    headers = [
+        "ID Kandidat", "Keputusan", "Nama Produk Disetujui", "Nama Produk Saran",
+        "Harga Normal Disetujui (Rp)", "Harga Promo Disetujui (Rp)",
+        "Harga Normal Kandidat (Rp)", "Harga Promo Kandidat (Rp)",
+        "Klaim Diskon OCR (%)", "Diskon Hitung (%)", "Kecocokan Nama", "Keyakinan OCR",
+        "Potongan Teks Poster OCR", "Sumber", "Kampanye", "URL Artikel", "URL Gambar", "Catatan Review",
+    ]
+    ws.append(headers)
+    ws.append([
+        "LEGACY12345678", "TERIMA", "Sunlight Lime 910 ml", "Sunlight", 20000, 16900,
+        20000, 16900, 15, 15.5, "Cocok", .95, "Harga Normal Rp20.000 Harga Promo Rp16.900",
+        "Katalogpromosi.com", "Promo", "https://example.test/a", "https://example.test/p.jpg", "OK",
+    ])
+    wb.save(review); wb.close()
+    stats = import_reviewed_prices(review, overrides)
+    assert stats["accepted_or_updated"] == 1
+    assert stats["active_overrides"] == 1
