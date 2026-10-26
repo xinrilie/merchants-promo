@@ -171,19 +171,28 @@ def _confidence(value) -> float:
 
 
 def create_ocr_engine(preferred: str = "auto"):
-    """Create a local OCR engine; prefer PaddleOCR, then RapidOCR/Tesseract fallbacks."""
+    """Create a local OCR engine; auto uses the bundled ONNX backend first.
+
+    PaddleOCR remains available with --backend paddleocr, but is opt-in because
+    its current model initialization can stall on some Windows CPU environments.
+    """
     preferred = (preferred or "auto").strip().casefold()
     factories = {
         "paddleocr": ("PaddleOCR",),
         "rapidocr": ("RapidOCR",),
         "tesseract": ("Tesseract",),
-        "auto": ("PaddleOCR", "RapidOCR", "Tesseract"),
+        # RapidOCR/ONNX Runtime is a declared project dependency and avoids
+        # a PaddleX model-initialization stall seen on some Windows CPUs.
+        # Keep PaddleOCR as an explicit opt-in backend, not a default fallback.
+        "auto": ("RapidOCR", "Tesseract"),
     }
     if preferred not in factories:
         raise ValueError(f"Backend OCR tidak dikenal: {preferred}")
     errors = []
     for name in factories[preferred]:
         try:
+            if preferred == "auto":
+                print(f"Inisialisasi backend OCR: {name}...", flush=True)
             if name == "PaddleOCR":
                 from paddleocr import PaddleOCR
                 engine = PaddleOCR(
@@ -210,8 +219,9 @@ def create_ocr_engine(preferred: str = "auto"):
     if preferred != "auto":
         raise RuntimeError(f"Backend OCR {preferred} tidak tersedia. " + " | ".join(errors))
     raise RuntimeError(
-        "Mesin OCR lokal belum tersedia. Jalankan Install_Dependency.bat atau "
-        "pasang PaddleOCR/PaddlePaddle. Fallback yang dicoba: " + " | ".join(errors)
+        "Mesin OCR lokal auto tidak tersedia. Jalankan Install_Dependency.bat "
+        "untuk memasang RapidOCR/ONNX Runtime; PaddleOCR dapat dicoba secara eksplisit "
+        "dengan --backend paddleocr. Backend yang dicoba: " + " | ".join(errors)
     )
 
 
@@ -1022,7 +1032,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="OCR poster katalog promo secara lokal; tidak melakukan estimasi harga AI.")
     parser.add_argument("--limit", type=int, default=0, help="Maksimum gambar baru diproses (0=semua yang belum ada cache).")
     parser.add_argument("--force", action="store_true", help="Paksa OCR ulang gambar yang sudah ada cache.")
-    parser.add_argument("--backend", choices=("auto", "paddleocr", "rapidocr", "tesseract"), default="auto", help="Mesin OCR lokal (default: PaddleOCR lalu fallback RapidOCR/Tesseract).")
+    parser.add_argument("--backend", choices=("auto", "paddleocr", "rapidocr", "tesseract"), default="auto", help="Mesin OCR lokal (default: RapidOCR/ONNX, lalu Tesseract; PaddleOCR bisa dipilih eksplisit).")
     parser.add_argument("--import-reviewed-only", action="store_true", help="Impor keputusan TERIMA/TOLAK dari workbook tanpa OCR ulang.")
     args = parser.parse_args(argv)
     if args.limit < 0:
@@ -1046,7 +1056,7 @@ def main(argv=None) -> int:
     for key, value in stats.items():
         print(f"{key}: {value}")
     print("Harga OCR belum dipakai ke katalog sampai keputusan Excel = TERIMA.")
-    print("Backend OCR: auto memilih PaddleOCR lokal, lalu fallback RapidOCR/Tesseract jika tersedia.")
+    print("Backend OCR: auto memprioritaskan RapidOCR/ONNX, lalu Tesseract. PaddleOCR hanya dipakai jika diminta lewat --backend paddleocr.")
     print("Untuk impor manual setelah edit Excel: python engine\\promo_poster_ocr.py --import-reviewed-only")
     print("Setelah itu: python engine\\enrich_existing_promo_catalog_multisource.py")
     return 0
