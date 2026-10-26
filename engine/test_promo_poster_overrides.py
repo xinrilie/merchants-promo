@@ -124,6 +124,36 @@ def test_review_values_do_not_activate_until_decision_is_terima(tmp_path):
     assert row["normal_price"] == "" and row["promo_price"] == ""
 
 
+
+def test_new_schema_requires_explicit_review_product_name_even_if_ocr_suggestion_exists(tmp_path):
+    review = tmp_path / "Review_Harga_Poster_OCR.xlsx"
+    overrides = tmp_path / "overrides.csv"
+    candidate = {
+        "candidate_id": "NO-SKU-12345", "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo", "article_url": "https://example.test/a",
+        "image_url": "https://example.test/p.jpg", "ocr_snippet": "DUA BELIBIS Rp19.200 Rp15.400",
+        "local_product_name_suggestion": "DUA BELIBIS Saus Tomat 535 ml",
+        "normal_price_candidate": 19200, "promo_price_candidate": 15400,
+        "discount_claim_percent": "", "discount_calculated_percent": "",
+        "ocr_confidence": .93, "matched_product_name": "", "matched_product_score": 0.0,
+        "match_note": "Tidak ada kecocokan SKU katalog", "candidate_note": "Harga belum dikonfirmasi",
+    }
+    make_review_workbook([candidate], review)
+    wb = load_workbook(review)
+    ws = wb["Kandidat OCR"]
+    headers = [cell.value for cell in ws[1]]
+    suggestion_col = headers.index("Saran Nama Produk (OCR Lokal)") + 1
+    ws.cell(2, 2, "TERIMA")
+    assert ws.cell(2, suggestion_col).value
+    # Product field is deliberately left blank: the suggestion must not be used as silent approval.
+    wb.save(review); wb.close()
+
+    stats = import_reviewed_prices(review, overrides)
+    assert stats["active_overrides"] == 0
+    assert stats["accepted_or_updated"] == 0
+    assert stats["rejected_invalid"] == 1
+    assert any("nama produk untuk review kosong" in error for error in stats["errors"])
+
 def test_importer_still_accepts_legacy_approved_column_names(tmp_path):
     from openpyxl import Workbook
 

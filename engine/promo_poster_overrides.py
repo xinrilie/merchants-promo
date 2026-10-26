@@ -95,7 +95,15 @@ def import_reviewed_prices(review_xlsx: str | Path = DEFAULT_REVIEW_XLSX, overri
             # Backward-compatible aliases allow existing review workbooks to be
             # imported. New workbooks use non-approval labels; `TERIMA` remains
             # the only condition that activates the submitted values.
-            product = str(row.get(product_field) or row.get("Nama Produk Saran") or row.get("Nama Produk Disetujui") or "").strip()
+            if product_field == "Nama Produk untuk Review":
+                # New review schema requires an explicit SKU in the editable
+                # product field. Never silently substitute the unverified OCR
+                # suggestion column when the reviewer leaves the SKU blank.
+                product = str(row.get(product_field) or "").strip()
+            else:
+                # Legacy workbooks used an approved column plus an optional
+                # suggestion field; keep backward compatibility for those files.
+                product = str(row.get(product_field) or row.get("Nama Produk Saran") or row.get("Nama Produk Disetujui") or "").strip()
             normal_price = _parse_price(row.get(normal_field))
             promo_price = _parse_price(row.get(promo_field))
             source_name = str(row.get("Sumber") or "").strip()

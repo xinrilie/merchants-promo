@@ -9,11 +9,25 @@ def test_reads_labelled_normal_promo_and_discount():
     assert result["discount_calculated_percent"] == 44.4
 
 
-def test_does_not_pair_unlabelled_prices_without_matching_discount_claim():
-    result = interpret_price_pair("Rp100.000 | Rp89.000")
+def test_does_not_pair_unlabelled_prices_even_when_spatial_mode_is_enabled():
+    # Spatial adjacency alone is not enough to infer roles for the two numbers.
+    result = interpret_price_pair("Rp100.000 | Rp89.000", allow_unlabelled_pair=True)
     assert result["normal_price_candidate"] == ""
     assert result["promo_price_candidate"] == ""
-    assert "tanpa label" in result["candidate_note"] or "tidak cocok" in result["candidate_note"]
+    assert "tanpa label" in result["candidate_note"] or "klaim diskon" in result["candidate_note"]
+
+
+def test_unlabelled_pair_requires_a_matching_discount_claim():
+    result = interpret_price_pair("Rp100.000 | Rp89.000 | Diskon 11%", allow_unlabelled_pair=True)
+    assert result["normal_price_candidate"] == 100000
+    assert result["promo_price_candidate"] == 89000
+    assert result["discount_calculated_percent"] == 11.0
+
+
+def test_one_labelled_price_does_not_guess_other_role_without_discount_claim():
+    result = interpret_price_pair("Harga Normal Rp100.000 | Rp89.000")
+    assert result["normal_price_candidate"] == 100000
+    assert result["promo_price_candidate"] == ""
 
 
 def test_does_not_pair_when_discount_math_disagrees():
@@ -107,6 +121,30 @@ def test_spatial_windows_keep_adjacent_product_tiles_separate():
     assert "Selsun" in selsun and "Sunlight" not in selsun
 
 
+
+def test_catalog_match_is_left_blank_when_two_skus_score_ambiguous(monkeypatch):
+    import promo_poster_ocr as ocr
+    scores = {"Sunlight Lime 910 ml": (.82, "size okay"), "Sunlight Lemon 910 ml": (.79, "size okay")}
+    monkeypatch.setattr(ocr, "_matching_score", lambda name, context: scores[name])
+    name, score, note = ocr._suggest_product("Sunlight 910 ml", [
+        {"product_text": "Sunlight Lime 910 ml", "product_validation_status": "eligible"},
+        {"product_text": "Sunlight Lemon 910 ml", "product_validation_status": "eligible"},
+    ])
+    assert name == ""
+    assert score == .82
+    assert "ambigu" in note.lower() or "skor" in note.lower()
+
+
+def test_catalog_match_deduplicates_duplicate_rows_for_same_sku(monkeypatch):
+    import promo_poster_ocr as ocr
+    monkeypatch.setattr(ocr, "_matching_score", lambda name, context: (.91, "size okay"))
+    name, score, note = ocr._suggest_product("Sunlight Lime 910 ml", [
+        {"product_text": "Sunlight Lime 910 ml", "product_validation_status": "eligible"},
+        {"product_text": "Sunlight Lime 910 ml", "product_validation_status": "eligible"},
+    ])
+    assert name == "Sunlight Lime 910 ml"
+    assert score == .91
+
 def test_local_ocr_name_suggestion_is_available_when_catalog_match_is_missing():
     from promo_poster_ocr import make_price_windows, build_candidates
 
@@ -120,9 +158,83 @@ def test_local_ocr_name_suggestion_is_available_when_catalog_match_is_missing():
     image = {"source_name": "Katalogpromosi.com", "campaign_title": "Promo Mingguan", "article_url": "https://example.test/a", "image_url": "https://example.test/p.jpg"}
     rows = build_candidates(image, lines, 800, 800, page_products=[])
     assert rows
-    assert rows[0]["matched_product_name"]
+    assert rows[0]["matched_product_name"] == ""
+    assert rows[0]["local_product_name_suggestion"]
     assert "OCR lokal" in rows[0]["match_note"]
 
+
+
+def test_local_ocr_suggestion_is_separate_from_catalog_matched_sku(tmp_path):
+    from openpyxl import load_workbook
+    from promo_poster_ocr import make_review_workbook
+
+    output = tmp_path / "review.xlsx"
+    candidate = {
+        "candidate_id": "LOCAL123", "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo", "article_url": "https://example.test/a",
+        "image_url": "https://example.test/p.jpg", "ocr_snippet": "DUA BELIBIS Saus Tomat 535 ml Rp19.200 Rp15.400",
+        "matched_product_name": "", "matched_product_score": .43,
+        "local_product_name_suggestion": "DUA BELIBIS Saus Tomat 535 ml",
+        "normal_price_candidate": "", "promo_price_candidate": "",
+        "discount_claim_percent": "", "discount_calculated_percent": "",
+        "ocr_confidence": .94, "match_note": "Tidak ada kecocokan katalog yang kuat",
+        "candidate_note": "Dua harga tanpa label/klaim pendukung; tidak dipasangkan.",
+    }
+    make_review_workbook([candidate], output)
+    wb = load_workbook(output, data_only=True)
+    ws = wb["Kandidat OCR"]
+    headers = [cell.value for cell in ws[1]]
+    product_col = headers.index("Nama Produk untuk Review") + 1
+    suggestion_col = headers.index("Saran Nama Produk (OCR Lokal)") + 1
+    assert ws.cell(2, product_col).value in (None, "")
+    assert ws.cell(2, suggestion_col).value == "DUA BELIBIS Saus Tomat 535 ml"
+    wb.close()
+
+
+def test_local_suggestion_with_two_distinct_sizes_is_not_combined_into_one_sku():
+    from promo_poster_ocr import make_price_windows
+    lines = [
+        {"text": "Gandum Cokelat 140g Bourbon Choco 150g", "confidence": .92, "x0": 100, "y0": 100, "x1": 430, "y1": 140},
+        {"text": "Rp20.000", "confidence": .95, "x0": 130, "y0": 170, "x1": 250, "y1": 200},
+        {"text": "Rp18.000", "confidence": .95, "x0": 130, "y0": 205, "x1": 250, "y1": 235},
+    ]
+    windows = make_price_windows(lines, 800, 800)
+    assert windows
+    assert all("Gandum Cokelat 140g Bourbon Choco 150g" != row["local_product_name_suggestion"] for row in windows)
+
+
+def test_rebuild_drops_old_unreviewed_guesses_that_were_auto_copied(tmp_path):
+    from openpyxl import load_workbook
+    from promo_poster_ocr import make_review_workbook
+
+    output = tmp_path / "review.xlsx"
+    candidate = {
+        "candidate_id": "STALE123", "source_name": "Katalogpromosi.com",
+        "campaign_title": "Promo", "article_url": "https://example.test/a",
+        "image_url": "https://example.test/p.jpg", "ocr_snippet": "Rp42.100 | Rp37.900",
+        "matched_product_name": "", "matched_product_score": 0.0,
+        "local_product_name_suggestion": "Adult Diapers Pants L8",
+        "normal_price_candidate": "", "promo_price_candidate": "",
+        "discount_claim_percent": "", "discount_calculated_percent": "",
+        "ocr_confidence": .92, "match_note": "SKU katalog tidak unik", "candidate_note": "Harga tanpa label; tidak dipasangkan.",
+    }
+    prior = {
+        "STALE123": {
+            "Keputusan": "CEK", "Nama Produk untuk Review": "Adult Diapers Pants L8",
+            "Nama Produk Saran": "Adult Diapers Pants L8",
+            "Harga Normal untuk Review (Rp)": 42100, "Harga Promo untuk Review (Rp)": 37900,
+            "Harga Normal Kandidat (Rp)": 42100, "Harga Promo Kandidat (Rp)": 37900,
+        }
+    }
+    make_review_workbook([candidate], output, prior)
+    wb = load_workbook(output, data_only=True)
+    ws = wb["Kandidat OCR"]
+    assert ws["B2"].value == "CEK"
+    assert ws["C2"].value in (None, "")
+    assert ws["E2"].value in (None, "")
+    assert ws["F2"].value in (None, "")
+    assert ws["D2"].value == "Adult Diapers Pants L8"
+    wb.close()
 
 def test_review_workbook_labels_inputs_as_review_not_approval(tmp_path):
     from openpyxl import load_workbook
