@@ -45,16 +45,17 @@ REVIEW_XLSX = DEFAULT_REVIEW_XLSX
 OVERRIDES_CSV = ROOT / "_internal" / "promo_poster_price_overrides.csv"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REQUEST_TIMEOUT = (5, 15)
+OCR_PIPELINE_VERSION = "poster-ocr-v2.0"
 USER_AGENT = "Mozilla/5.0 (compatible; MerchantsPromoPosterOCR/1.0; local catalog audit)"
 
 CACHE_FIELDS = [
     "image_url", "source_name", "campaign_title", "article_url", "image_alt", "period_status",
     "scraped_at", "image_sha256", "image_width", "image_height", "ocr_status", "ocr_backend",
-    "ocr_error", "processed_at", "lines_json",
+    "ocr_pipeline_version", "ocr_error", "processed_at", "lines_json",
 ]
 LINE_FIELDS = [
     "source_name", "campaign_title", "article_url", "image_url", "image_alt", "period_status",
-    "line_no", "ocr_text", "ocr_confidence", "x0", "y0", "x1", "y1", "image_width", "image_height", "processed_at",
+    "line_no", "ocr_text", "ocr_confidence", "x0", "y0", "x1", "y1", "image_width", "image_height", "processed_at", "recognition_method",
 ]
 CANDIDATE_FIELDS = [
     "candidate_id", "source_name", "campaign_title", "article_url", "image_url", "image_alt",
@@ -64,6 +65,8 @@ CANDIDATE_FIELDS = [
     "catalog_sku_candidate_1", "catalog_sku_candidate_2", "catalog_sku_candidate_3",
     "catalog_sku_score_1", "catalog_sku_score_2", "catalog_sku_score_3",
     "discount_validation_status", "discount_difference_pp",
+    "price_pair_method", "promo_context_tags", "purchase_condition", "regional_scope",
+    "member_price_candidate", "ignored_packaging_percentages", "discount_claim_source", "discount_claim_context",
 ]
 REVIEW_HEADERS = [
     "ID Kandidat", "Keputusan", "Nama Produk untuk Review", "Saran Nama Produk (OCR Lokal)",
@@ -74,6 +77,9 @@ REVIEW_HEADERS = [
     "Kandidat SKU 1", "Kandidat SKU 2", "Kandidat SKU 3", "Pilihan jika tidak ada SKU cocok",
     "Skor SKU 1", "Skor SKU 2", "Skor SKU 3",
     "Validasi Klaim Diskon", "Selisih Diskon (poin persentase)",
+    "Metode Pasangan Harga", "Konteks Promo (aturan lokal)", "Syarat Pembelian Terdeteksi",
+    "Cakupan Wilayah Terdeteksi", "Kandidat Harga Member (Rp)",
+    "Persentase Kemasan Diabaikan", "Sumber Klaim Diskon", "Teks Klaim Diskon yang Dipakai",
 ]
 
 PRICE_CUE_RE = re.compile(r"(?i)\b(?:rp\.?|idr|harga|price|promo|normal|asli|reguler|diskon|discount|hemat|off|potongan)\b")
@@ -85,6 +91,42 @@ OCR_MISSING_P_R_AMOUNT_RE = re.compile(r"(?i)(?<![\w])R(?!p)\s*(\d{1,3}(?:[.,:]\
 GROUPED_AMOUNT_RE = re.compile(r"(?<![\w])(\d{1,3}(?:[.,:]\d{3})+)(?![\w])")
 PLAIN_AMOUNT_RE = re.compile(r"(?<![\w])([1-9]\d{3,7})(?![\w])")
 UNIT_AFTER_RE = re.compile(r"(?i)^\s*(?:ml|g|gr|gram|kg|mg|l|liter|litre|pcs?|buah|lembar|sheets?|pack|sachet|tablet|capsule)\b")
+
+# Percentage text on packaging is not automatically a price-discount claim.
+# Example from the Oct 2026 Alfamart poster: "30% LEBIH BANYAK SEREAL" on Energen.
+PACKAGING_PERCENT_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:lebih\s+banyak|lebih\s+besar|lebih\s+isi|isi\s+lebih|"
+    r"isi\s+lebih\s+banyak|extra|ekstra|bonus|gram\s+lebih|ml\s+lebih|"
+    r"netto|isi\s+bersih|buy\s+1\s+extra\s+1)\b"
+)
+DISCOUNT_WORDING_RE = re.compile(
+    r"(?i)\b(?:diskon|discount|disc\.?|hemat|potongan(?:\s+harga)?|off|price\s*cut|harga\s+turun)\b"
+)
+MULTIBUY_OFFER_RE = re.compile(
+    r"(?i)\b(?:beli\s*\d+\s*(?:pcs?\s*)?(?:gratis|free)\s*\d+|"
+    r"buy\s*\d+\s*get\s*\d+|ambil\s*\d+\s*gratis\s*\d+|"
+    r"beli\s*\d+\s*gratis\s*\d+)\b"
+)
+PACKAGING_EXTRA_RE = re.compile(
+    r"(?i)\b(?:buy\s*1\s*extra\s*1|extra\s*(?:isi|content)|"
+    r"lebih\s+banyak|lebih\s+isi|isi\s+lebih\s+banyak|bonus\s+isi)\b"
+)
+MEMBER_CUE_RE = re.compile(r"(?i)\b(?:member|kartu\s+member|member\s+alfamart|alfamart\s+member)\b")
+REGION_CUE_RE = re.compile(r"(?i)\b(?:luar\s+(?:pulau\s+)?jawa|non[- ]?jawa|jabodetabek|jawa\s+dan\s+luar\s+jawa|wilayah\s+(?:tertentu|berlaku))\b")
+PAYMENT_PROMO_RE = re.compile(r"(?i)\b(?:shopeepay|spaylater|cashback|e[- ]?wallet|voucher\s+(?:pembayaran|transaksi)|minimal\s+belanja)\b")
+CAMPAIGN_FOOTER_RE = re.compile(
+    r"(?i)(?:diskon\s+aplikasi|shopeepay|spaylater|minimal\s+belanja|minimum\s+belanja|"
+    r"1x\s*/?\s*pengguna|per\s*periode|kuota\s+(?:terbatas|berlaku)|"
+    r"tidak\s+berlaku|promo\s+tidak\s+berlaku|tersedia\s+juga\s+di\s+alfagift)"
+)
+NON_SKU_PACKAGING_COPY_RE = re.compile(
+    r"(?i)\b(?:sumber\s+serat|lebih\s+banyak\s+sereal|ayo\s+sarapan|"
+    r"setiap\s+hari|kaya\s+(?:vitamin|kalsium|protein)|netto|isi\s+bersih|"
+    r"diformulasi\s+untuk|diperkaya\s+(?:vitamin|mineral)|bonus\s+isi)\b"
+)
+SPECIAL_PRICE_RE = re.compile(r"(?i)\b(?:harga\s+spesial|special\s+price|harga\s+khusus)\b")
+DISCOUNT_PAIR_MAX_DIFFERENCE_PP = 3.0
+DISCOUNT_REVIEW_MATCH_TOLERANCE_PP = 1.0
 
 
 def now_iso() -> str:
@@ -144,10 +186,10 @@ def _canonical_article_url(value: object) -> str:
 
 
 def _normalize_box(box) -> tuple[float, float, float, float]:
-    """Normalize polygon boxes (RapidOCR) and xyxy boxes (PaddleOCR) to xyxy."""
+    """Normalize rectangle- or polygon-shaped OCR box outputs to xyxy."""
     try:
         points = list(box)
-        # PaddleOCR 3.x returns [x0, y0, x1, y1]; RapidOCR returns polygons.
+        # Some OCR APIs return [x0, y0, x1, y1]; others return polygon points.
         if len(points) == 4 and all(not isinstance(point, (list, tuple)) and getattr(point, "ndim", 0) == 0 for point in points):
             x0, y0, x1, y1 = (float(point) for point in points)
             return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
@@ -179,19 +221,15 @@ def _confidence(value) -> float:
 
 
 def create_ocr_engine(preferred: str = "auto"):
-    """Create a local OCR engine; auto uses the bundled ONNX backend first.
+    """Create a lightweight local OCR engine without a cloud API or Paddle runtime.
 
-    PaddleOCR remains available with --backend paddleocr, but is opt-in because
-    its current model initialization can stall on some Windows CPU environments.
+    The default prefers RapidOCR/ONNX Runtime. Tesseract is a fallback only when
+    its executable is already installed locally; the pip package alone is not enough.
     """
     preferred = (preferred or "auto").strip().casefold()
     factories = {
-        "paddleocr": ("PaddleOCR",),
         "rapidocr": ("RapidOCR",),
         "tesseract": ("Tesseract",),
-        # RapidOCR/ONNX Runtime is a declared project dependency and avoids
-        # a PaddleX model-initialization stall seen on some Windows CPUs.
-        # Keep PaddleOCR as an explicit opt-in backend, not a default fallback.
         "auto": ("RapidOCR", "Tesseract"),
     }
     if preferred not in factories:
@@ -201,21 +239,6 @@ def create_ocr_engine(preferred: str = "auto"):
         try:
             if preferred == "auto":
                 print(f"Inisialisasi backend OCR: {name}...", flush=True)
-            if name == "PaddleOCR":
-                from paddleocr import PaddleOCR
-                engine = PaddleOCR(
-                    lang="en",
-                    device="cpu",
-                    # Work around PaddlePaddle 3.3.x / PaddleOCR 3.4.x CPU
-                    # oneDNN-PIR failures reported as:
-                    # ConvertPirAttribute2RuntimeAttribute not support
-                    # [pir::ArrayAttribute<pir::DoubleAttribute>].
-                    enable_mkldnn=False,
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=True,
-                )
-                return "paddleocr", engine
             if name == "RapidOCR":
                 from rapidocr import RapidOCR
                 return "rapidocr", RapidOCR()
@@ -228,8 +251,8 @@ def create_ocr_engine(preferred: str = "auto"):
         raise RuntimeError(f"Backend OCR {preferred} tidak tersedia. " + " | ".join(errors))
     raise RuntimeError(
         "Mesin OCR lokal auto tidak tersedia. Jalankan Install_Dependency.bat "
-        "untuk memasang RapidOCR/ONNX Runtime; PaddleOCR dapat dicoba secara eksplisit "
-        "dengan --backend paddleocr. Backend yang dicoba: " + " | ".join(errors)
+        "untuk memasang RapidOCR/ONNX Runtime. Jika Tesseract lokal sudah dipasang, "
+        "backend itu juga bisa dipilih. Backend yang dicoba: " + " | ".join(errors)
     )
 
 
@@ -259,40 +282,199 @@ def _prepare_image(image: Image.Image) -> Image.Image:
     return image
 
 
+def _detect_color_price_tag_boxes(image: Image.Image) -> list[tuple[int, int, int, int, str]]:
+    """Detect yellow normal-price and red promo-price labels with local OpenCV masks.
+
+    This is a bounded crop proposal step, not price recognition: OCR must still
+    read one plausible formatted IDR amount from each crop before a line is added.
+    Boxes outside the product-card area (especially the footer) are ignored.
+    """
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return []
+
+    rgb = np.asarray(image.convert("RGB"))
+    h_img, w_img = rgb.shape[:2]
+    if w_img < 300 or h_img < 400:
+        return []
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    yellow = cv2.inRange(hsv, np.array([15, 65, 115]), np.array([43, 255, 255]))
+    # Keep the two red hue bands separate during contour detection. Combining
+    # them can connect a price badge to red packaging/footer regions and make
+    # the resulting contour too large to qualify as a price tag.
+    red_low = cv2.inRange(hsv, np.array([0, 70, 70]), np.array([12, 255, 255]))
+    red_high = cv2.inRange(hsv, np.array([170, 70, 70]), np.array([180, 255, 255]))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+    candidates_by_color: dict[str, list[tuple[int, int, int, int, str]]] = {"YELLOW": [], "RED": []}
+    for color, raw_mask in (("YELLOW", yellow), ("RED", red_low), ("RED", red_high)):
+        mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            aspect = w / max(1.0, float(h))
+            center_y = (y + h / 2) / h_img
+            if not (0.055 * w_img <= w <= 0.34 * w_img):
+                continue
+            if not (0.014 * h_img <= h <= 0.095 * h_img):
+                continue
+            if not (2.0 <= aspect <= 8.5):
+                continue
+            # The product-price cards occupy the middle of this poster family;
+            # the campaign header/footer commonly contains red/yellow shapes too.
+            if not (0.17 <= center_y <= 0.845):
+                continue
+            candidates_by_color[color].append((x, y, x + w, y + h, color))
+    proposed = []
+    for color, color_boxes in candidates_by_color.items():
+        color_boxes.sort(key=lambda b: ((b[3] - b[1]) * (b[2] - b[0]), b[1], b[0]))
+        accepted = []
+        for box in color_boxes:
+            x0, y0, x1, y1, _ = box
+            duplicate = False
+            for prev in accepted:
+                px0, py0, px1, py1, _ = prev
+                inter_w = max(0, min(x1, px1) - max(x0, px0))
+                inter_h = max(0, min(y1, py1) - max(y0, py0))
+                inter = inter_w * inter_h
+                area_small = max(1, min((x1 - x0) * (y1 - y0), (px1 - px0) * (py1 - py0)))
+                if inter / area_small >= 0.78:
+                    duplicate = True
+                    break
+            if not duplicate:
+                accepted.append(box)
+        proposed.extend(accepted)
+    # Highest y is fine; stable position order makes cache results reproducible.
+    proposed.sort(key=lambda b: ((b[1] + b[3]) / 2, b[0], b[4]))
+    return proposed
+
+
+def _crop_ocr_price_text(crop: Image.Image, engine, backend: str) -> tuple[str, float]:
+    """OCR a single coloured price-tag crop; returns raw text and confidence."""
+    # Upscale only this small region. The model sees fewer background/text classes
+    # than in the full poster and the crop remains local/on-device.
+    scale = 3 if max(crop.size) < 700 else 2
+    crop = crop.resize((max(1, crop.width * scale), max(1, crop.height * scale)), Image.Resampling.LANCZOS)
+    if backend == "tesseract":
+        import pytesseract
+        from pytesseract import Output
+        config = "--psm 8 -c tessedit_char_whitelist=0123456789.,:"
+        data = pytesseract.image_to_data(crop, lang="eng", config=config, output_type=Output.DICT)
+        tokens, scores = [], []
+        for text, conf in zip(data.get("text", []), data.get("conf", [])):
+            token = str(text or "").strip()
+            if not token:
+                continue
+            tokens.append(token)
+            try:
+                numeric_conf = float(conf)
+                if numeric_conf >= 0:
+                    scores.append(numeric_conf / 100.0)
+            except (TypeError, ValueError):
+                pass
+        raw = " ".join(tokens).strip()
+        score = statistics.mean(scores) if scores else 0.0
+        if not extract_prices(raw):
+            # Some red-on-yellow chips binarize poorly. Retry with Otsu inversion,
+            # still constraining recognition to price digits and separators.
+            try:
+                import cv2
+                import numpy as np
+                gray = cv2.cvtColor(np.asarray(crop), cv2.COLOR_RGB2GRAY)
+                _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                retry_img = Image.fromarray(255 - binary)
+                retry_data = pytesseract.image_to_data(retry_img, lang="eng", config=config, output_type=Output.DICT)
+                retry_tokens, retry_scores = [], []
+                for text, conf in zip(retry_data.get("text", []), retry_data.get("conf", [])):
+                    token = str(text or "").strip()
+                    if token:
+                        retry_tokens.append(token)
+                        try:
+                            numeric_conf = float(conf)
+                            if numeric_conf >= 0:
+                                retry_scores.append(numeric_conf / 100.0)
+                        except (TypeError, ValueError):
+                            pass
+                retry_raw = " ".join(retry_tokens).strip()
+                if len({item["price"] for item in extract_prices(retry_raw)}) == 1:
+                    raw = retry_raw
+                    score = statistics.mean(retry_scores) if retry_scores else score
+            except Exception:
+                pass
+        return raw, _confidence(score)
+
+    if backend == "rapidocr":
+        result = engine(crop)
+        texts = _as_list(getattr(result, "txts", None))
+        scores = _as_list(getattr(result, "scores", None))
+        raw = " ".join(str(text).strip() for text in texts if str(text or "").strip())
+        conf = [_confidence(score) for score in scores]
+        return raw, statistics.mean(conf) if conf else 0.0
+
+    return "", 0.0
+
+
+def _augment_with_color_price_tag_crops(image: Image.Image, lines: list[dict], engine, backend: str) -> list[dict]:
+    """Add locally OCR-read price-tag lines that a full-page pass missed."""
+    if backend not in {"rapidocr", "tesseract"}:
+        return lines
+    boxes = _detect_color_price_tag_boxes(image)
+    if not boxes:
+        return lines
+    width, height = image.size
+    augmented = list(lines)
+    for x0, y0, x1, y1, color in boxes:
+        # Keep this rescue pass even when the full-page OCR found another price
+        # nearby: a tag-level crop can distinguish two labels that are visually
+        # adjacent. Duplicate spatial detections are removed below.
+        pad_x = max(4, int((x1 - x0) * 0.05))
+        # Include a narrow margin around the detected tag. Excessive vertical
+        # padding can merge neighbouring labels into one OCR crop.
+        pad_y = max(4, int((y1 - y0) * 0.12))
+        left, top = max(0, x0 - pad_x), max(0, y0 - pad_y)
+        right, bottom = min(width, x1 + pad_x), min(height, y1 + pad_y)
+        crop = image.crop((left, top, right, bottom))
+        raw, confidence = _crop_ocr_price_text(crop, engine, backend)
+        prices = list(dict.fromkeys(item["price"] for item in extract_prices(raw)))
+        # Never convert an unformatted 4-digit token or multiple amounts into a price.
+        if len(prices) != 1:
+            continue
+        price = prices[0]
+        if not (1_000 <= price <= 100_000_000):
+            continue
+        # A line is useful only if it contributes a new price at that same tag.
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        duplicate = False
+        for line in augmented:
+            line_prices = {item["price"] for item in extract_prices(str(line.get("text") or ""))}
+            if price not in line_prices:
+                continue
+            lx, ly = _line_center(line)
+            if abs(lx - cx) / max(1, width) <= 0.055 and abs(ly - cy) / max(1, height) <= 0.045:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        augmented.append({
+            "text": raw.strip(), "confidence": confidence,
+            "x0": float(left), "y0": float(top), "x1": float(right), "y1": float(bottom),
+            "recognition_method": f"COLOR_PRICE_TAG_CROP_{color}",
+        })
+    return _sort_lines(augmented)
+
+
 def recognize_image(image_bytes: bytes, engine, backend: str) -> tuple[list[dict], int, int]:
     with Image.open(io.BytesIO(image_bytes)) as opened:
+        # Keep an unenhanced colour copy for red/yellow price-tag detection while
+        # OCR on the full page uses the contrast-enhanced image.
+        color_source = ImageOps.exif_transpose(opened).convert("RGB")
         image = _prepare_image(opened)
     width, height = image.size
-    if backend == "paddleocr":
-        import numpy as np
-        # PaddleOCR expects an OpenCV-style BGR array for ndarray input.
-        bgr = np.asarray(image)[:, :, ::-1].copy()
-        result_items = engine.predict(bgr)
-        lines = []
-        for item in result_items or []:
-            try:
-                texts = item.get("rec_texts", [])
-                scores = item.get("rec_scores", [])
-                boxes = item.get("rec_boxes", [])
-            except Exception:
-                try:
-                    texts = item["rec_texts"]
-                    scores = item["rec_scores"]
-                    boxes = item["rec_boxes"]
-                except Exception:
-                    continue
-            texts = _as_list(texts)
-            scores = _as_list(scores)
-            boxes = _as_list(boxes)
-            for idx, text in enumerate(texts):
-                if not str(text or "").strip():
-                    continue
-                box = boxes[idx] if idx < len(boxes) else []
-                score = scores[idx] if idx < len(scores) else 0.0
-                x0, y0, x1, y1 = _normalize_box(box)
-                lines.append({"text": str(text).strip(), "confidence": _confidence(score), "x0": x0, "y0": y0, "x1": x1, "y1": y1})
-        return _sort_lines(lines), width, height
-
+    if color_source.size != image.size:
+        # BICUBIC preserves the saturated tag core more reliably than LANCZOS
+        # for HSV thresholding on this poster family.
+        color_source = color_source.resize(image.size, Image.Resampling.BICUBIC)
     if backend == "rapidocr":
         result = engine(image)
         texts = getattr(result, "txts", None)
@@ -308,7 +490,8 @@ def recognize_image(image_bytes: bytes, engine, backend: str) -> tuple[list[dict
             box = boxes[idx] if idx < len(boxes) else []
             score = scores[idx] if idx < len(scores) else 0.0
             x0, y0, x1, y1 = _normalize_box(box)
-            lines.append({"text": str(text).strip(), "confidence": _confidence(score), "x0": x0, "y0": y0, "x1": x1, "y1": y1})
+            lines.append({"text": str(text).strip(), "confidence": _confidence(score), "x0": x0, "y0": y0, "x1": x1, "y1": y1, "recognition_method": "FULL_PAGE"})
+        lines = _augment_with_color_price_tag_crops(color_source, lines, engine, backend)
         return _sort_lines(lines), width, height
 
     # Local Tesseract fallback. It is not installed through pip; only used when
@@ -337,7 +520,8 @@ def recognize_image(image_bytes: bytes, engine, backend: str) -> tuple[list[dict
         item["x1"] = max(item["x1"], x1); item["y1"] = max(item["y1"], y1)
     lines = []
     for item in grouped.values():
-        lines.append({"text": " ".join(item["parts"]), "confidence": statistics.mean(item["scores"]) if item["scores"] else 0.0, **{k: item[k] for k in ("x0", "y0", "x1", "y1")}})
+        lines.append({"text": " ".join(item["parts"]), "confidence": statistics.mean(item["scores"]) if item["scores"] else 0.0, **{k: item[k] for k in ("x0", "y0", "x1", "y1")}, "recognition_method": "FULL_PAGE"})
+    lines = _augment_with_color_price_tag_crops(color_source, lines, engine, backend)
     return _sort_lines(lines), width, height
 
 
@@ -399,15 +583,154 @@ def extract_prices(text: str) -> list[dict]:
     return out
 
 
+def analyze_discount_claim(text: str) -> dict:
+    """Extract plausible price-discount claims without confusing package copy.
+
+    OCR sometimes splits a phrase across boxes, e.g. ``30%`` on one line and
+    ``LEBIH BANYAK SEREAL`` on the next. The parser therefore checks the current
+    OCR segment and its immediate neighbours. Explicit discount wording wins;
+    conflicting claims stay ambiguous instead of silently selecting the first.
+    """
+    segments = [seg.strip() for seg in re.split(r"\s*(?:\||\r?\n)\s*", str(text or "")) if seg.strip()]
+    valid = []
+    ignored = []
+    for index, segment in enumerate(segments):
+        matches = list(DISCOUNT_RE.finditer(segment))
+        if not matches:
+            continue
+        neighbour_segments = segments[max(0, index - 1):min(len(segments), index + 2)]
+        local_context = " | ".join(neighbour_segments)
+        current_discount_cue = bool(DISCOUNT_WORDING_RE.search(segment))
+        current_packaging_cue = bool(PACKAGING_PERCENT_CONTEXT_RE.search(segment))
+        nearest_discount_distance = min(
+            (abs(other_index - index) for other_index, other in enumerate(segments)
+             if DISCOUNT_WORDING_RE.search(other)),
+            default=None,
+        )
+        nearest_packaging_distance = min(
+            (abs(other_index - index) for other_index, other in enumerate(segments)
+             if PACKAGING_PERCENT_CONTEXT_RE.search(other)),
+            default=None,
+        )
+        # If the percentage's own line is packaging copy, only an explicit
+        # discount cue on that same line can override the exclusion. When the
+        # words were split into boxes, the closer adjacent cue wins; a tie goes
+        # to the conservative packaging exclusion.
+        is_packaging_copy = current_packaging_cue and not current_discount_cue
+        if not current_packaging_cue and nearest_packaging_distance is not None:
+            is_packaging_copy = (
+                nearest_discount_distance is None
+                or nearest_packaging_distance <= nearest_discount_distance
+            )
+        if is_packaging_copy:
+            for match in matches:
+                ignored.append(f"{match.group(0)} — {local_context[:120]}")
+            continue
+        has_discount_wording = current_discount_cue or (
+            nearest_discount_distance is not None
+            and (nearest_packaging_distance is None or nearest_discount_distance < nearest_packaging_distance)
+            and nearest_discount_distance <= 1
+        )
+        for match in matches:
+            try:
+                value = float(match.group(1).replace(",", "."))
+            except ValueError:
+                continue
+            if not (0 < value <= 100):
+                continue
+            # A discount keyword on an adjacent OCR line can label a bare percent
+            # when the visual badge was segmented into two boxes.
+            valid.append({
+                "value": value,
+                "segment": segment,
+                "strength": 2 if has_discount_wording else 1,
+                "source": "KATA_DISKON" if has_discount_wording else "PERSENTASE_TANPA_KATA_DISKON",
+                "context": local_context,
+            })
+
+    ignored_text = "; ".join(dict.fromkeys(ignored))
+    if not valid:
+        return {
+            "claim": None,
+            "source": "PERSENTASE_KEMASAN_DIKECUALIKAN" if ignored else "TIDAK_TERDETEKSI",
+            "context": "",
+            "ignored": ignored_text,
+            "note": "Persentase kemasan bukan klaim diskon harga." if ignored else "Klaim diskon tidak terdeteksi.",
+        }
+
+    strongest = max(item["strength"] for item in valid)
+    strongest_items = [item for item in valid if item["strength"] == strongest]
+    unique_values = sorted({item["value"] for item in strongest_items})
+    if len(unique_values) != 1:
+        return {
+            "claim": None,
+            "source": "KLAIM_DISKON_AMBIGU",
+            "context": " | ".join(dict.fromkeys(item["context"] for item in strongest_items))[:240],
+            "ignored": ignored_text,
+            "note": "Ada beberapa persentase yang mungkin merupakan klaim diskon; tidak dipilih otomatis.",
+        }
+    picked = strongest_items[0]
+    return {
+        "claim": picked["value"],
+        "source": picked["source"],
+        "context": picked["context"][:240],
+        "ignored": ignored_text,
+        "note": "Klaim dipilih dari teks berlabel diskon." if picked["strength"] == 2 else "Persentase tanpa kata diskon diperlakukan sebagai petunjuk; perlu cek visual.",
+    }
+
+
 def extract_discount_claim(text: str) -> float | None:
-    match = DISCOUNT_RE.search(str(text or ""))
-    if not match:
-        return None
-    try:
-        value = float(match.group(1).replace(",", "."))
-    except ValueError:
-        return None
-    return value if 0 < value <= 100 else None
+    """Compatibility wrapper; does not classify packaging percentages as discounts."""
+    return analyze_discount_claim(text).get("claim")
+
+
+def _first_context_match(pattern: re.Pattern, segments: list[str]) -> str:
+    for segment in segments:
+        match = pattern.search(segment)
+        if match:
+            return match.group(0).strip()[:160]
+    return ""
+
+
+def classify_promo_context(text: str) -> dict:
+    """Classify review-only promo cues without assigning ambiguous prices to a SKU."""
+    segments = [seg.strip() for seg in re.split(r"\s*(?:\||\r?\n)\s*", str(text or "")) if seg.strip()]
+    joined = " | ".join(segments)
+    tags = []
+    if MEMBER_CUE_RE.search(joined):
+        tags.append("HARGA/KETENTUAN MEMBER TERDETEKSI")
+    if MULTIBUY_OFFER_RE.search(joined):
+        tags.append("PROMO MULTI-ITEM TERDETEKSI")
+    if REGION_CUE_RE.search(joined):
+        tags.append("KETERANGAN WILAYAH TERDETEKSI")
+    if PAYMENT_PROMO_RE.search(joined):
+        tags.append("TEKS PROMO PEMBAYARAN/KAMPANYE — JANGAN LEKATKAN OTOMATIS KE SKU")
+    if SPECIAL_PRICE_RE.search(joined):
+        tags.append("LABEL HARGA SPESIAL TERDETEKSI")
+    if PACKAGING_EXTRA_RE.search(joined) or PACKAGING_PERCENT_CONTEXT_RE.search(joined):
+        tags.append("TEKS TAMBAHAN/KLAIM KEMASAN TERDETEKSI")
+    if not tags and (LABEL_NORMAL_RE.search(joined) or LABEL_PROMO_RE.search(joined)):
+        tags.append("LABEL HARGA NORMAL/PROMO TERDETEKSI")
+    if not tags:
+        tags.append("KONTEKS PROMO BELUM TERKLASIFIKASI")
+
+    # Only emit a member price when the same OCR segment contains both the cue
+    # and exactly one amount. A nearby member word is not enough to infer price role.
+    member_price = ""
+    for segment in segments:
+        if MEMBER_CUE_RE.search(segment):
+            values = list(dict.fromkeys(item["price"] for item in extract_prices(segment)))
+            if len(values) == 1:
+                member_price = values[0]
+                break
+    multi = _first_context_match(MULTIBUY_OFFER_RE, segments)
+    region = _first_context_match(REGION_CUE_RE, segments)
+    return {
+        "promo_context_tags": "; ".join(tags),
+        "purchase_condition": multi,
+        "regional_scope": region,
+        "member_price_candidate": member_price,
+    }
 
 
 def _labelled_price(text: str, label_re: re.Pattern) -> int | None:
@@ -425,7 +748,8 @@ def interpret_price_pair(text: str, *, allow_unlabelled_pair: bool = False) -> d
     unique_prices = list(dict.fromkeys(item["price"] for item in prices))
     normal = _labelled_price(text, LABEL_NORMAL_RE)
     promo = _labelled_price(text, LABEL_PROMO_RE)
-    claim = extract_discount_claim(text)
+    claim_analysis = analyze_discount_claim(text)
+    claim = claim_analysis.get("claim")
     calculated = None
     note = "Harga belum dapat ditentukan dari teks OCR; perlu dibaca pada poster."
 
@@ -437,14 +761,14 @@ def interpret_price_pair(text: str, *, allow_unlabelled_pair: bool = False) -> d
         # A plausible difference alone is not evidence that two prices belong
         # to the same SKU. The labelled-label path above is the only path that
         # can make a pair without a discount claim.
-        if claim is None or abs(pct - claim) > 3.0:
+        if claim is None or abs(pct - claim) > DISCOUNT_PAIR_MAX_DIFFERENCE_PP:
             return pct, False
         return pct, True
 
     if normal and promo:
         if normal > promo:
             calculated = round((normal - promo) / normal * 100, 1)
-            if claim is None or abs(calculated - claim) <= 3.0:
+            if claim is None or abs(calculated - claim) <= DISCOUNT_PAIR_MAX_DIFFERENCE_PP:
                 note = "Harga normal dan promo dikenali dari label OCR; tetap cocokkan dengan poster."
             else:
                 note = "Label harga terbaca, tetapi hitungan tidak cocok dengan klaim diskon; periksa poster."
@@ -506,6 +830,10 @@ def interpret_price_pair(text: str, *, allow_unlabelled_pair: bool = False) -> d
         "promo_price_candidate": promo or "",
         "discount_claim_percent": claim if claim is not None else "",
         "discount_calculated_percent": calculated if calculated is not None else "",
+        "discount_claim_source": claim_analysis.get("source", "TIDAK_TERDETEKSI"),
+        "discount_claim_context": claim_analysis.get("context", ""),
+        "ignored_packaging_percentages": claim_analysis.get("ignored", ""),
+        "discount_claim_note": claim_analysis.get("note", ""),
         "candidate_note": note,
     }
 
@@ -625,7 +953,7 @@ def _infer_stacked_price_pair(parsed: dict, lines: list[dict], width: int, heigh
         return parsed
     # A printed discount claim within this area is corroborating evidence. If it
     # contradicts the calculated difference, do not infer a price pair.
-    if claim_value is not None and abs(calculated - claim_value) > 3.0:
+    if claim_value is not None and abs(calculated - claim_value) > DISCOUNT_PAIR_MAX_DIFFERENCE_PP:
         return parsed
 
     best = None
@@ -655,6 +983,7 @@ def _infer_stacked_price_pair(parsed: dict, lines: list[dict], width: int, heigh
     parsed["normal_price_candidate"] = high
     parsed["promo_price_candidate"] = low
     parsed["discount_calculated_percent"] = calculated
+    parsed["price_pair_method"] = "INFERENSI_GEOMETRI_SEJAJAR"
     parsed["candidate_note"] = (
         "Pasangan harga kandidat dikenali dari tata letak poster: harga lebih tinggi berada di atas harga lebih rendah "
         "dan kedua kotak sejajar pada area produk yang sama. Bukan bukti pasti harga coret; cocokkan sebelum TERIMA."
@@ -680,7 +1009,7 @@ def _local_product_name_suggestion(
     entries = []
     for line in lines:
         raw = str(line.get("text") or "").strip()
-        if not raw or extract_prices(raw) or DISCOUNT_RE.search(raw):
+        if not raw or extract_prices(raw) or DISCOUNT_RE.search(raw) or NON_SKU_PACKAGING_COPY_RE.search(raw):
             continue
         lx, ly = _line_center(line)
         dx, dy = abs(lx - center_x) / max(1, width), abs(ly - center_y) / max(1, height)
@@ -797,6 +1126,9 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
         for line in sorted_lines:
             lx, ly = _line_center(line)
             if left <= lx <= right and top <= ly <= bottom:
+                # Repeated campaign payment/legal footer text is not product metadata.
+                if CAMPAIGN_FOOTER_RE.search(str(line.get("text") or "")):
+                    continue
                 neighborhood.append(line)
         # Include price-anchor lines from this cluster even if their bbox center
         # lands just outside a boundary after rounding/long OCR boxes.
@@ -807,6 +1139,7 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
         neighborhood = sorted(neighborhood, key=lambda row: (_line_center(row)[1], _line_center(row)[0]))
         context = " | ".join(str(line.get("text") or "").strip() for line in neighborhood if str(line.get("text") or "").strip())
         parsed = interpret_price_pair(context, allow_unlabelled_pair=True)
+        promo_context = classify_promo_context(context)
         # Promo Gantung-style tiles frequently show the crossed-out normal price
         # above the larger promo price without verbal labels. Infer only when
         # two separate OCR boxes are vertically stacked and horizontally aligned.
@@ -845,6 +1178,8 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
         for line in sorted_lines:
             lx, ly = _line_center(line)
             if name_left <= lx <= name_right and name_top <= ly <= name_bottom:
+                if CAMPAIGN_FOOTER_RE.search(str(line.get("text") or "")):
+                    continue
                 name_lines.append(line)
         local_name = _local_product_name_suggestion(
             name_lines, cx, cy, width, height, max_dx=0.17, max_dy=0.25
@@ -860,6 +1195,16 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
             "ocr_confidence": round(line_conf, 4),
             "price_values": parsed["prices"],
             **{k: parsed[k] for k in ("normal_price_candidate", "promo_price_candidate", "discount_claim_percent", "discount_calculated_percent", "candidate_note")},
+            "discount_claim_source": parsed.get("discount_claim_source", "TIDAK_TERDETEKSI"),
+            "discount_claim_context": parsed.get("discount_claim_context", ""),
+            "ignored_packaging_percentages": parsed.get("ignored_packaging_percentages", ""),
+            "discount_claim_note": parsed.get("discount_claim_note", ""),
+            "price_pair_method": parsed.get("price_pair_method") or (
+                "LABEL_HARGA" if (LABEL_NORMAL_RE.search(context) or LABEL_PROMO_RE.search(context)) and parsed.get("normal_price_candidate") and parsed.get("promo_price_candidate")
+                else "HARGA_DAN_KLAIM_DISKON" if parsed.get("normal_price_candidate") and parsed.get("promo_price_candidate")
+                else "BELUM_DAPAT_DIPASANGKAN"
+            ),
+            **promo_context,
             "lines_in_context": neighborhood,
             "bucket_x": bucket_x,
             "bucket_y": bucket_y,
@@ -1072,8 +1417,8 @@ def _suggest_product(context: str, page_products: list[dict]) -> tuple[str, floa
     return "", best_score, "Kecocokan katalog ambigu; perlu pilih nama produk setelah membuka poster."
 
 
-def _discount_assessment(claim: object, calculated: object, *, tolerance_pp: float = 1.0) -> tuple[str, float | str]:
-    """Compare printed discount claim to math; tolerance is 1 percentage point."""
+def _discount_assessment(claim: object, calculated: object, *, tolerance_pp: float = DISCOUNT_REVIEW_MATCH_TOLERANCE_PP) -> tuple[str, float | str]:
+    """Compare a discount claim to math; review match tolerance is 1 pp."""
     try:
         claim_value = float(str(claim).replace("%", "").replace(",", ".").strip()) if str(claim or "").strip() else None
     except (TypeError, ValueError):
@@ -1243,6 +1588,14 @@ def build_candidates(
             "catalog_sku_score_3": sku_choices[2][1] if len(sku_choices) > 2 else "",
             "discount_validation_status": discount_status,
             "discount_difference_pp": discount_diff,
+            "price_pair_method": window.get("price_pair_method", "BELUM_DAPAT_DIPASANGKAN"),
+            "promo_context_tags": window.get("promo_context_tags", ""),
+            "purchase_condition": window.get("purchase_condition", ""),
+            "regional_scope": window.get("regional_scope", ""),
+            "member_price_candidate": window.get("member_price_candidate", ""),
+            "ignored_packaging_percentages": window.get("ignored_packaging_percentages", ""),
+            "discount_claim_source": window.get("discount_claim_source", "TIDAK_TERDETEKSI"),
+            "discount_claim_context": window.get("discount_claim_context", ""),
             "_bucket_x": int(window.get("bucket_x", 0)),
             "_bucket_y": int(window.get("bucket_y", 0)),
             "_center_x": float(window.get("center_x", 0)),
@@ -1305,6 +1658,24 @@ def build_candidates(
         if chosen.get("discount_claim_percent") in (None, "") and other.get("discount_claim_percent") not in (None, ""):
             chosen["discount_claim_percent"] = other["discount_claim_percent"]
             chosen["discount_calculated_percent"] = other.get("discount_calculated_percent")
+            chosen["discount_claim_source"] = other.get("discount_claim_source", chosen.get("discount_claim_source", ""))
+            chosen["discount_claim_context"] = other.get("discount_claim_context", chosen.get("discount_claim_context", ""))
+        if not chosen.get("ignored_packaging_percentages") and other.get("ignored_packaging_percentages"):
+            chosen["ignored_packaging_percentages"] = other["ignored_packaging_percentages"]
+        # Union classifier metadata from both overlapping OCR windows, but preserve
+        # its role as review hints rather than activating any offer automatically.
+        for field in ("promo_context_tags",):
+            combined = list(dict.fromkeys(
+                part.strip() for source in (chosen.get(field, ""), other.get(field, ""))
+                for part in str(source or "").split("; ") if part.strip()
+            ))
+            if combined:
+                chosen[field] = "; ".join(combined)
+        for field in ("purchase_condition", "regional_scope", "member_price_candidate"):
+            if chosen.get(field) in (None, "") and other.get(field) not in (None, ""):
+                chosen[field] = other[field]
+        if chosen.get("price_pair_method") in (None, "", "BELUM_DAPAT_DIPASANGKAN") and other.get("price_pair_method"):
+            chosen["price_pair_method"] = other["price_pair_method"]
         if not chosen.get("local_product_name_suggestion") and other.get("local_product_name_suggestion"):
             chosen["local_product_name_suggestion"] = other["local_product_name_suggestion"]
         if chosen.get("candidate_note") and other.get("candidate_note") and chosen.get("candidate_note") != other.get("candidate_note"):
@@ -1475,6 +1846,10 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
             candidate.get("catalog_sku_candidate_1", ""), candidate.get("catalog_sku_candidate_2", ""), candidate.get("catalog_sku_candidate_3", ""), NO_MATCH_SKU_SENTINEL,
             candidate.get("catalog_sku_score_1", ""), candidate.get("catalog_sku_score_2", ""), candidate.get("catalog_sku_score_3", ""),
             discount_status, discount_difference,
+            candidate.get("price_pair_method", ""), candidate.get("promo_context_tags", ""),
+            candidate.get("purchase_condition", ""), candidate.get("regional_scope", ""),
+            candidate.get("member_price_candidate") or "", candidate.get("ignored_packaging_percentages", ""),
+            candidate.get("discount_claim_source", ""), candidate.get("discount_claim_context", ""),
         ]
         ws.append(row_values)
         # Make both provenance URLs clickable in Excel so reviewers can open the
@@ -1490,7 +1865,7 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
     ws.row_dimensions[1].height = 42
-    widths = [15, 13, 38, 38, 22, 22, 20, 20, 16, 16, 45, 14, 76, 22, 48, 60, 70, 88, 38, 38, 38, 32, 13, 13, 13, 32, 20]
+    widths = [15, 13, 38, 38, 22, 22, 20, 20, 16, 16, 45, 14, 76, 22, 48, 60, 70, 88, 38, 38, 38, 32, 13, 13, 13, 32, 20, 28, 58, 34, 32, 22, 58, 30, 58]
     for idx, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(idx)].width = width
     for cell in ws[1]:
@@ -1510,7 +1885,7 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
         # Yellow = editable review input; grey = OCR-generated candidate only.
         for idx in (2, 3, 5, 6, 18):
             row[idx - 1].fill = PatternFill("solid", fgColor="FFF2CC")
-        for idx in (4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27):
+        for idx in (4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35):
             row[idx - 1].fill = PatternFill("solid", fgColor="E7E6E6")
         status_value = str(row[25].value or "")
         if status_value.startswith("TIDAK COCOK"):
@@ -1567,16 +1942,18 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     tips = [
         ["REVIEW HARGA DARI POSTER PROMO (OCR LOKAL)"],
         ["1. Buka URL Gambar untuk melihat poster asli; OCR dapat salah membaca digit atau menggabungkan dua SKU."],
-        ["2. Nama Produk untuk Review hanya diprefill jika ada kecocokan katalog yang kuat dan unik; ini bukan persetujuan. Sistem mencocokkan token inti produk; ukuran/varian atau kategori yang bertentangan akan menolak kandidat. Gunakan dropdown Kandidat SKU 1-3 di kolom S-U hanya jika nama, merek, ukuran dan varian sesuai poster. Kolom V menyediakan pilihan Tidak ada SKU yang cocok; pilihan ini mencegah label yang salah dipaksakan. Skor adalah ranking bantu, bukan probabilitas kebenaran."],
-        ["3. Harga Normal/Promo untuk Review adalah nilai kandidat yang boleh diedit, BUKAN persetujuan. Harga tanpa label/klaim hanya diusulkan bila dua kotak harga terpisah bertumpuk dan sejajar; pasangan ini tetap CEK."],
-        ["4. HANYA pilihan TERIMA pada kolom Keputusan yang mengaktifkan harga. Nama produk untuk review wajib diisi secara eksplisit; saran OCR tidak dipakai otomatis sebagai pengganti."],
-        ["5. Kolom Validasi Klaim Diskon membandingkan klaim OCR dengan hasil hitung. Toleransi status COCOK adalah maksimal 1,0 poin persentase; status TIDAK COCOK wajib diperiksa visual dan tidak boleh diterima otomatis."],
-        ["6. Jika harga normal dicoret dan harga promo tidak berlabel, pastikan dua kotak harga benar-benar berada di area produk yang sama. Pasangan hasil inferensi layout tetap berstatus CEK; jangan TERIMA bila posisi/klaimnya bertentangan."],
-        ["5. Setelah menyimpan dan menutup Excel, jalankan: python engine\\promo_poster_ocr.py --import-reviewed-only"],
-        ["6. Lalu perbarui katalog: python engine\\enrich_existing_promo_catalog_multisource.py. Harga dari poster hanya dipakai setelah TERIMA."],
-        ["7. Tidak ada AI generatif/tebakan harga. OCR menyalin teks/angka; keputusan harga tetap membutuhkan konteks bukti poster."],
-        ["8. Kandidat yang tidak punya kecocokan produk tetap bisa ditinjau, tetapi koreksi Nama Produk untuk Review sesuai SKU katalog dan cocokkan URL artikelnya."],
-        ["9. Beban laptop: OCR memakai CPU/RAM saat gambar diproses. Tanpa --force, gambar yang sudah berhasil dicache tidak diproses ulang; gunakan --limit 10 atau 25 untuk membatasi batch."],
+        ["2. Nama Produk untuk Review hanya diprefill jika ada kecocokan katalog yang kuat dan tidak ambigu. Saran OCR lokal bukan SKU terverifikasi dan bukan persetujuan harga; cek merek, ukuran, dan varian."],
+        ["3. Harga Normal/Promo untuk Review adalah kandidat yang boleh diedit, BUKAN persetujuan. Hanya keputusan TERIMA mengaktifkan nilai setelah validasi importer."],
+        ["4. Metode Pasangan Harga menjelaskan apakah pasangan berasal dari label harga, konteks matematika, atau inferensi geometri. Semua pasangan yang diinferensikan tetap perlu dicek visual."],
+        ["5. Validasi Klaim Diskon memakai toleransi COCOK maksimal 1,0 poin persentase. TIDAK COCOK atau KLAIM DISKON AMBIGU wajib ditinjau manual."],
+        ["6. Persentase kemasan seperti '30% lebih banyak sereal' dikecualikan dari klaim diskon harga. Kolom Persentase Kemasan Diabaikan dan Teks Klaim Diskon yang Dipakai membantu audit alasan parser."],
+        ["7. Crop OCR warna merah/kuning adalah jalur rescue lokal untuk label harga yang luput dari OCR halaman penuh; harga crop hanya masuk sebagai teks kandidat dan bukan persetujuan."],
+        ["8. Konteks promo, syarat pembelian, wilayah, dan harga member adalah petunjuk hasil aturan lokal. Jangan menganggap teks footer kampanye berlaku untuk SKU tertentu tanpa bukti poster."],
+        ["9. Untuk promo beli beberapa, gratis, harga member, harga spesial, atau cakupan wilayah, pastikan syarat dan basis harga (satuan/paket) dibaca benar sebelum TERIMA."],
+        ["10. Jika harga normal dicoret dan harga promo tidak berlabel, pastikan kedua kotak harga benar-benar berada di area produk yang sama."],
+        ["11. Setelah menyimpan dan menutup Excel, jalankan: python engine\\promo_poster_ocr.py --import-reviewed-only"],
+        ["12. Lalu perbarui katalog: python engine\\enrich_existing_promo_catalog_multisource.py. Harga dari poster hanya dipakai setelah TERIMA."],
+        ["13. Tanpa --force, gambar dengan cache versi pipeline terkini tidak diproses ulang. Upgrade ini mengubah versi OCR sehingga cache lama akan diproses ulang sekali; gunakan --limit 10/25 untuk menguji batch kecil lebih dahulu."],
     ]
     for tip in tips:
         helpws.append(tip)
@@ -1710,6 +2087,7 @@ def rebuild_review_from_cache(limit: int = 0) -> dict:
                 "line_no": n, "ocr_text": line.get("text", ""), "ocr_confidence": line.get("confidence", ""),
                 "x0": line.get("x0", ""), "y0": line.get("y0", ""), "x1": line.get("x1", ""), "y1": line.get("y1", ""),
                 "image_width": width, "image_height": height, "processed_at": stamp,
+                "recognition_method": line.get("recognition_method", "FULL_PAGE"),
             })
         product_rows = page_products.get(_canonical_article_url(image_record.get("article_url")), [])
         fallback_rows = _catalog_fallback_for_campaign(catalog_products, str(image_record.get("campaign_title") or ""))
@@ -1758,6 +2136,7 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
             r for r in images
             if str(r.get("image_url") or "") not in old_cache
             or str(old_cache.get(str(r.get("image_url") or ""), {}).get("ocr_status") or "").casefold() == "failed"
+            or str(old_cache.get(str(r.get("image_url") or ""), {}).get("ocr_pipeline_version") or "") != OCR_PIPELINE_VERSION
         ]
         if limit > 0:
             to_process = to_process[:limit]
@@ -1789,13 +2168,14 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
             previous_cache = old_cache.get(url)
             cache_to_store = None
             cache_row = dict(record)
-            cache_row.update({"image_sha256": "", "image_width": "", "image_height": "", "ocr_status": "failed", "ocr_backend": backend, "ocr_error": "", "processed_at": now_iso(), "lines_json": "[]"})
+            cache_row.update({"image_sha256": "", "image_width": "", "image_height": "", "ocr_status": "failed", "ocr_backend": backend, "ocr_pipeline_version": OCR_PIPELINE_VERSION, "ocr_error": "", "processed_at": now_iso(), "lines_json": "[]"})
             try:
                 body, image_hash = _download_image(session, url)
                 lines, width, height = recognize_image(body, engine, backend)
                 cache_row.update({
                     "image_sha256": image_hash, "image_width": width, "image_height": height,
                     "ocr_status": "ok" if lines else "no_text", "ocr_backend": backend,
+                    "ocr_pipeline_version": OCR_PIPELINE_VERSION,
                     "processed_at": now_iso(), "lines_json": json.dumps(lines, ensure_ascii=False, separators=(",", ":")),
                 })
                 if lines:
@@ -1843,6 +2223,7 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
                 "line_no": n, "ocr_text": line.get("text", ""), "ocr_confidence": line.get("confidence", ""),
                 "x0": line.get("x0", ""), "y0": line.get("y0", ""), "x1": line.get("x1", ""), "y1": line.get("y1", ""),
                 "image_width": width, "image_height": height, "processed_at": stamp,
+                "recognition_method": line.get("recognition_method", "FULL_PAGE"),
             })
         product_rows = page_products.get(_canonical_article_url(image_record.get("article_url")), [])
         fallback_rows = _catalog_fallback_for_campaign(catalog_products, str(image_record.get("campaign_title") or ""))
@@ -1876,7 +2257,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="OCR poster katalog promo secara lokal; tidak melakukan estimasi harga AI.")
     parser.add_argument("--limit", type=int, default=0, help="Maksimum gambar OCR baru; dengan --rebuild-review-only, buat workbook uji dari N cache terbaru.")
     parser.add_argument("--force", action="store_true", help="Paksa OCR ulang gambar yang sudah ada cache.")
-    parser.add_argument("--backend", choices=("auto", "paddleocr", "rapidocr", "tesseract"), default="auto", help="Mesin OCR lokal (default: RapidOCR/ONNX, lalu Tesseract; PaddleOCR bisa dipilih eksplisit).")
+    parser.add_argument("--backend", choices=("auto", "rapidocr", "tesseract"), default="auto", help="Mesin OCR lokal (default: RapidOCR/ONNX, lalu Tesseract).")
     parser.add_argument("--import-reviewed-only", action="store_true", help="Impor keputusan TERIMA/TOLAK dari workbook tanpa OCR ulang.")
     parser.add_argument("--rebuild-review-only", action="store_true", help="Bangun ulang workbook dari cache OCR tanpa mengunduh gambar atau menjalankan OCR.")
     args = parser.parse_args(argv)
@@ -1914,7 +2295,7 @@ def main(argv=None) -> int:
     for key, value in stats.items():
         print(f"{key}: {value}")
     print("Harga OCR belum dipakai ke katalog sampai keputusan Excel = TERIMA.")
-    print("Backend OCR: auto memprioritaskan RapidOCR/ONNX, lalu Tesseract. PaddleOCR hanya dipakai jika diminta lewat --backend paddleocr.")
+    print("Backend OCR: auto memprioritaskan RapidOCR/ONNX, lalu Tesseract. Crop warna label harga dipakai sebagai rescue lokal; tidak ada API OCR cloud.")
     print("Untuk impor manual setelah edit Excel: python engine\\promo_poster_ocr.py --import-reviewed-only")
     print("Setelah itu: python engine\\enrich_existing_promo_catalog_multisource.py")
     return 0

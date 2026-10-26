@@ -74,7 +74,7 @@ goto :no_python
 %PYTHON_CMD% -m pip install -r "%~dp0requirements-dev.txt"
 if errorlevel 1 goto :error
 
-%PYTHON_CMD% -c "import sys, requests, bs4, openpyxl, pytest, paddle, paddleocr, cv2, rapidocr, onnxruntime; print('Python:', sys.version.split()[0]); print('requests:', requests.__version__); print('beautifulsoup4: OK'); print('openpyxl:', openpyxl.__version__); print('pytest:', pytest.__version__); print('PaddlePaddle:', paddle.__version__); print('PaddleOCR: OK'); print('OpenCV:', cv2.__version__); print('RapidOCR fallback: OK'); print('ONNX Runtime:', onnxruntime.__version__)"
+%PYTHON_CMD% -c "import sys, requests, bs4, openpyxl, pytest, cv2, rapidocr, onnxruntime, PIL, pytesseract; print('Python:', sys.version.split()[0]); print('requests:', requests.__version__); print('beautifulsoup4: OK'); print('openpyxl:', openpyxl.__version__); print('pytest:', pytest.__version__); print('RapidOCR: OK'); print('ONNX Runtime:', onnxruntime.__version__); print('OpenCV:', cv2.__version__); print('Pillow:', PIL.__version__); print('pytesseract wrapper: OK; Tesseract executable is optional')"
 if errorlevel 1 goto :error
 
 echo.

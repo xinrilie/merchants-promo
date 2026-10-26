@@ -79,14 +79,14 @@ if not exist "%~dp0engine\enrich_existing_promo_catalog_multisource.py" goto :ba
 if not exist "%~dp0_internal" mkdir "%~dp0_internal"
 if not exist "%~dp0hasil" mkdir "%~dp0hasil"
 
-%PYTHON_CMD% -c "import requests, bs4, openpyxl, pytest, paddle, paddleocr, cv2, rapidocr, onnxruntime" >nul 2>nul
+%PYTHON_CMD% -c "import requests, bs4, openpyxl, pytest, cv2, rapidocr, onnxruntime, PIL, pytesseract" >nul 2>nul
 if errorlevel 1 (
     echo Dependensi belum lengkap. Memasang requirements-dev.txt...
     %PYTHON_CMD% -m pip install -r "%~dp0requirements-dev.txt"
     if errorlevel 1 goto :dependency_error
 )
 
-%PYTHON_CMD% -c "import requests, bs4, openpyxl, pytest, paddle, paddleocr, cv2, rapidocr, onnxruntime" >nul 2>nul
+%PYTHON_CMD% -c "import requests, bs4, openpyxl, pytest, cv2, rapidocr, onnxruntime, PIL, pytesseract" >nul 2>nul
 if errorlevel 1 goto :dependency_error
 
 if /I "%~1"=="--help" goto :help

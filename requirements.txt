@@ -3,12 +3,9 @@ requests>=2.31,<3
 beautifulsoup4>=4.12,<5
 openpyxl>=3.1,<4
 
-# Local image OCR (no generative AI or paid cloud API required)
-# PaddleOCR is preferred for poster text detection; PaddlePaddle is its local CPU runtime.
-paddlepaddle>=3.0,<4
-paddleocr>=3.0,<4
-# Smaller fallback backend if PaddleOCR cannot initialize.
+# Local OCR only; no cloud OCR API. RapidOCR runs on CPU through ONNX Runtime.
 rapidocr>=3.10,<4
 onnxruntime>=1.17,<2
-pytesseract>=0.3.13,<1
 Pillow>=10.0,<13
+opencv-python-headless>=4.8,<5
+pytesseract>=0.3.13,<1

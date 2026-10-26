@@ -30,19 +30,20 @@ Untuk menjalankan pipeline lengkap, termasuk kolektor, OCR poster, konsolidasi, 
 Jalankan_Promo.bat
 ```
 
-Dependensi utama: Python 3.10+, requests, BeautifulSoup, openpyxl, RapidOCR, ONNX Runtime, Pillow, pytesseract (fallback opsional), dan pytest.
+Dependensi utama: Python 3.10+, requests, BeautifulSoup, openpyxl, RapidOCR, ONNX Runtime, Pillow, OpenCV headless, pytesseract (wrapper opsional untuk fallback), dan pytest. PaddlePaddle/PaddleOCR tidak dipasang oleh paket ini. Tesseract executable juga opsional dan harus dipasang terpisah jika fallback tersebut ingin digunakan.
 
 ## Alur harga: teks sumber dahulu, OCR poster berikutnya
 
 1. Parser membaca harga normal/asli, harga promo, serta klaim diskon yang dinyatakan pada teks sumber.
-2. `engine/promo_poster_ocr.py` memproses URL gambar poster yang sudah dikumpulkan. OCR berjalan lokal memakai RapidOCR + ONNX Runtime; Tesseract lokal dapat digunakan sebagai fallback jika sudah tersedia.
+2. `engine/promo_poster_ocr.py` memproses URL gambar poster yang sudah dikumpulkan. OCR berjalan lokal memakai RapidOCR + ONNX Runtime; Tesseract lokal dapat digunakan sebagai fallback jika executable-nya sudah tersedia. Tidak ada EasyOCR atau API OCR cloud.
 3. OCR menyimpan teks dan kotak posisi ke `_internal/promo_poster_ocr_lines.csv`, kandidat ke `_internal/promo_poster_price_candidates.csv`, serta cache gambar ke `_internal/promo_poster_ocr_cache.csv`.
-4. Pengelompokan kandidat memakai posisi kotak harga dan kolom produk. Untuk pola poster seperti Promo Gantung Alfamart, dua harga yang terbaca sebagai kotak terpisah boleh diusulkan sebagai pasangan jika harga lebih tinggi berada di atas harga lebih rendah dan keduanya sejajar pada area yang sama. Ini hanya inferensi layout (bukan deteksi pasti garis coret); keputusan tetap `CEK` sampai ditinjau.
-5. Area pencarian nama produk diperluas ke bagian atas tile dengan batas kolom dan batas dari harga baris sebelumnya. Ini mencegah judul SKU yang berada agak jauh di atas harga terpotong atau tertukar dengan judul dari kolom sebelah.
-6. Pilihan SKU dropdown menggunakan ambang kemiripan yang lebih ketat. Jika tidak ada kandidat yang cukup kuat, nama katalog dibiarkan kosong dan pilihan "tidak ada SKU cocok" tetap tersedia.
-7. Kandidat harga masuk ke `hasil/Review_Harga_Poster_OCR.xlsx`. Kolom `URL Gambar` tetap menjadi sumber bukti visual saat kasus memang ambigu.
-8. Isi `Keputusan` dengan `TERIMA`, `TOLAK`, atau `CEK`. Koreksi nama produk, harga normal, dan harga promo sesuai poster. Jangan terima kandidat yang pasangannya ambigu atau ukuran/variannya berbeda.
-9. Simpan dan tutup Excel. Jalankan:
+4. Pengelompokan kandidat memakai posisi kotak harga dan kolom produk. Untuk pola poster seperti Promo Gantung Alfamart, dua harga yang terbaca sebagai kotak terpisah boleh diusulkan sebagai pasangan jika harga lebih tinggi berada di atas harga lebih rendah dan keduanya sejajar pada area yang sama. Jalur rescue tambahan mendeteksi label harga kuning/merah melalui OpenCV lalu menjalankan OCR lokal pada crop label jika angka luput dari OCR halaman penuh. Ini hanya inferensi layout, bukan bukti final; keputusan tetap `CEK` sampai ditinjau.
+5. Klaim persentase diperiksa menurut konteks. Teks kemasan seperti `30% lebih banyak sereal` dan `BUY 1 EXTRA 1` tidak otomatis dianggap diskon harga atau promo multi-item dari retailer. Metadata review juga menandai harga member, syarat pembelian, wilayah, harga spesial, dan ketentuan kampanye agar tidak otomatis ditempelkan ke SKU.
+6. Area pencarian nama produk diperluas ke bagian atas tile dengan batas kolom dan batas dari harga baris sebelumnya. Ini mencegah judul SKU yang berada agak jauh di atas harga terpotong atau tertukar dengan judul dari kolom sebelah.
+7. Pilihan SKU dropdown menggunakan ambang kemiripan yang lebih ketat. Jika tidak ada kandidat yang cukup kuat, nama katalog dibiarkan kosong dan pilihan "tidak ada SKU cocok" tetap tersedia.
+8. Kandidat harga masuk ke `hasil/Review_Harga_Poster_OCR.xlsx`. Kolom `URL Gambar` tetap menjadi sumber bukti visual saat kasus memang ambigu.
+9. Isi `Keputusan` dengan `TERIMA`, `TOLAK`, atau `CEK`. Koreksi nama produk, harga normal, dan harga promo sesuai poster. Jangan terima kandidat yang pasangannya ambigu atau ukuran/variannya berbeda.
+10. Simpan dan tutup Excel. Jalankan:
 
    ```cmd
    python engine\promo_poster_ocr.py --import-reviewed-only
@@ -59,7 +60,7 @@ OCR tidak bisa menjamin pembacaan digit pada poster yang kecil/buram. Label teks
 python engine\promo_poster_ocr.py --limit 25
 ```
 
-Memproses paling banyak 25 gambar yang belum memiliki cache. Jalankan tanpa `--limit` untuk memproses semua gambar yang belum memiliki cache. Gunakan `--force` untuk memproses ulang seluruh gambar. Gambar yang sempat gagal diunduh dicoba ulang pada pelaksanaan berikutnya; gambar yang berhasil tapi tidak mengandung teks tetap di-cache agar tidak diproses terus-menerus.
+Memproses paling banyak 25 gambar yang belum memiliki cache atau masih memakai versi pipeline lama. Jalankan tanpa `--limit` untuk memproses semua gambar yang membutuhkan OCR. Gunakan `--force` untuk memproses ulang seluruh gambar. Gambar yang sempat gagal diunduh/OCR dicoba ulang pada pelaksanaan berikutnya; gambar yang berhasil tapi tidak mengandung teks tetap di-cache agar tidak diproses terus-menerus. Upgrade `poster-ocr-v2.0` membuat cache lama dianggap perlu diproses ulang satu kali agar crop harga merah/kuning dan filter konteks persentase diterapkan. Untuk migrasi bertahap, jalankan `--limit 10` atau `--limit 25` beberapa kali sebelum menjalankan pipeline penuh.
 
 Untuk menguji perubahan parser pada 25 gambar yang paling baru masuk cache tanpa menimpa workbook utama, jalankan:
 
@@ -116,4 +117,4 @@ python engine\promo_multisource_collector.py --self-test
 python -m pytest -q engine
 ```
 
-Audit dan catatan perubahan untuk upgrade OCR ada di `AUDIT_RINGKASAN.md` dan `CATATAN_REVISI_P0.md`.
+Upgrade OCR poster v2 menambahkan rescue OCR crop label merah/kuning, filter persentase kemasan, klasifikasi konteks promo, kolom audit pada workbook review, dan invalidasi cache berdasarkan versi pipeline. Seluruh temuan tetap berstatus review; harga hanya aktif melalui `TERIMA` yang lolos importer.
