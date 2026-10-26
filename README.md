@@ -37,9 +37,12 @@ Dependensi utama: Python 3.10+, requests, BeautifulSoup, openpyxl, RapidOCR, ONN
 1. Parser membaca harga normal/asli, harga promo, serta klaim diskon yang dinyatakan pada teks sumber.
 2. `engine/promo_poster_ocr.py` memproses URL gambar poster yang sudah dikumpulkan. OCR berjalan lokal memakai RapidOCR + ONNX Runtime; Tesseract lokal dapat digunakan sebagai fallback jika sudah tersedia.
 3. OCR menyimpan teks dan kotak posisi ke `_internal/promo_poster_ocr_lines.csv`, kandidat ke `_internal/promo_poster_price_candidates.csv`, serta cache gambar ke `_internal/promo_poster_ocr_cache.csv`.
-4. Kandidat harga masuk ke `hasil/Review_Harga_Poster_OCR.xlsx`. Buka gambar dari kolom `URL Gambar` untuk memastikan produk, ukuran, harga normal yang dicoret, harga promo, serta klaim diskon memang satu SKU.
-5. Isi `Keputusan` dengan `TERIMA`, `TOLAK`, atau `CEK`. Koreksi `Nama Produk Disetujui`, `Harga Normal Disetujui (Rp)`, dan `Harga Promo Disetujui (Rp)` sesuai poster. Jangan terima kandidat yang pasangannya ambigu atau ukuran/variannya berbeda.
-6. Simpan dan tutup Excel. Jalankan:
+4. Pengelompokan kandidat memakai posisi kotak harga dan kolom produk. Untuk pola poster seperti Promo Gantung Alfamart, dua harga yang terbaca sebagai kotak terpisah boleh diusulkan sebagai pasangan jika harga lebih tinggi berada di atas harga lebih rendah dan keduanya sejajar pada area yang sama. Ini hanya inferensi layout (bukan deteksi pasti garis coret); keputusan tetap `CEK` sampai ditinjau.
+5. Area pencarian nama produk diperluas ke bagian atas tile dengan batas kolom dan batas dari harga baris sebelumnya. Ini mencegah judul SKU yang berada agak jauh di atas harga terpotong atau tertukar dengan judul dari kolom sebelah.
+6. Pilihan SKU dropdown menggunakan ambang kemiripan yang lebih ketat. Jika tidak ada kandidat yang cukup kuat, nama katalog dibiarkan kosong dan pilihan "tidak ada SKU cocok" tetap tersedia.
+7. Kandidat harga masuk ke `hasil/Review_Harga_Poster_OCR.xlsx`. Kolom `URL Gambar` tetap menjadi sumber bukti visual saat kasus memang ambigu.
+8. Isi `Keputusan` dengan `TERIMA`, `TOLAK`, atau `CEK`. Koreksi nama produk, harga normal, dan harga promo sesuai poster. Jangan terima kandidat yang pasangannya ambigu atau ukuran/variannya berbeda.
+9. Simpan dan tutup Excel. Jalankan:
 
    ```cmd
    python engine\promo_poster_ocr.py --import-reviewed-only
@@ -58,7 +61,15 @@ python engine\promo_poster_ocr.py --limit 25
 
 Memproses paling banyak 25 gambar yang belum memiliki cache. Jalankan tanpa `--limit` untuk memproses semua gambar yang belum memiliki cache. Gunakan `--force` untuk memproses ulang seluruh gambar. Gambar yang sempat gagal diunduh dicoba ulang pada pelaksanaan berikutnya; gambar yang berhasil tapi tidak mengandung teks tetap di-cache agar tidak diproses terus-menerus.
 
-Setelah mengubah workbook review, gunakan `--import-reviewed-only` di atas. Perintah OCR pada launcher juga mengimpor keputusan review yang ada, termasuk ketika tidak ada gambar baru untuk diproses.
+Untuk menguji perubahan parser pada 25 gambar yang paling baru masuk cache tanpa menimpa workbook utama, jalankan:
+
+```cmd
+python engine\promo_poster_ocr.py --rebuild-review-only --limit 25
+```
+
+Output terpisah: `hasil\Review_Harga_Poster_OCR_UjiTerbaru.xlsx`. Mode ini memakai cache, tidak mengunduh atau menjalankan OCR ulang, dan tidak mengubah persetujuan/harga aktif. `--rebuild-review-only` tanpa `--limit` tetap membangun ulang workbook utama dari seluruh cache.
+
+Setelah mengubah workbook review utama, gunakan `--import-reviewed-only` di atas. Perintah OCR pada launcher juga mengimpor keputusan review yang ada, termasuk ketika tidak ada gambar baru untuk diproses.
 
 ## Estimasi AI lama dinonaktifkan
 

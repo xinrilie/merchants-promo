@@ -524,3 +524,217 @@ def test_sku_dropdown_does_not_recommend_conflicting_variant_even_with_same_bran
     matched, score, note = _suggest_product("Sunlight Lime 910 ml", products)
     assert matched == "Sunlight Lime 910 ml"
     assert score >= 0.95
+
+
+def test_generic_local_title_does_not_borrow_neighboring_sku(monkeypatch):
+    import promo_poster_ocr as ocr
+
+    monkeypatch.setattr(ocr, "make_price_windows", lambda *args, **kwargs: [{
+        "context": "Sauce 250g | MC LEWIS Sambal Terasi Tempong 10's | Rp11.200 | Rp8.900",
+        "local_product_name_suggestion": "Sauce 250g",
+        "normal_price_candidate": "11200", "promo_price_candidate": "8900",
+        "discount_claim_percent": "", "discount_calculated_percent": "",
+        "ocr_confidence": .95, "price_values": [11200, 8900], "candidate_note": "",
+        "bucket_x": 1, "bucket_y": 1, "center_x": .5, "center_y": .5,
+        "image_width": 800, "image_height": 800, "lines_in_context": [],
+    }])
+    image = {"source_name": "Katalogpromosi.com", "campaign_title": "Promo", "article_url": "https://example.test/a", "image_url": "https://example.test/p.jpg"}
+    products = [{"product_text": "Mc Lewis Sambal Terasi Tempong 10 pcs", "product_validation_status": "eligible"}]
+    rows = ocr.build_candidates(image, [], 800, 800, products, products)
+    assert len(rows) == 1
+    assert rows[0]["matched_product_name"] == ""
+    assert rows[0]["catalog_sku_candidate_1"] == ""
+    assert "pencocokan SKU dinonaktifkan" in rows[0]["match_note"]
+
+
+def test_missing_local_title_does_not_match_against_broad_context(monkeypatch):
+    import promo_poster_ocr as ocr
+
+    monkeypatch.setattr(ocr, "make_price_windows", lambda *args, **kwargs: [{
+        "context": "JOHNSON'S Baby Cologne Happy Berries 100ml | Aloe Pntl Ref 375ml | Rp36.200 | Rp29.500",
+        "local_product_name_suggestion": "",
+        "normal_price_candidate": "36200", "promo_price_candidate": "29500",
+        "discount_claim_percent": "", "discount_calculated_percent": "",
+        "ocr_confidence": .92, "price_values": [36200, 29500], "candidate_note": "",
+        "bucket_x": 1, "bucket_y": 1, "center_x": .5, "center_y": .5,
+        "image_width": 800, "image_height": 800, "lines_in_context": [],
+    }])
+    image = {"source_name": "Katalogpromosi.com", "campaign_title": "Promo", "article_url": "https://example.test/a", "image_url": "https://example.test/p.jpg"}
+    products = [{"product_text": "Johnson's Baby Cologne Happy Berries 100 ml", "product_validation_status": "eligible"}]
+    rows = ocr.build_candidates(image, [], 800, 800, products, products)
+    assert len(rows) == 1
+    assert rows[0]["matched_product_name"] == ""
+    assert rows[0]["catalog_sku_candidate_1"] == ""
+
+
+def test_stacked_unlabelled_prices_are_candidate_pair_from_geometry_only():
+    from promo_poster_ocr import make_price_windows
+
+    lines = [
+        {"text": "SUNCO Minyak Goreng Pouch 2L", "confidence": .96, "x0": 105, "y0": 160, "x1": 360, "y1": 195},
+        {"text": "47.200", "confidence": .94, "x0": 120, "y0": 250, "x1": 205, "y1": 274},
+        {"text": "Rp41.900", "confidence": .97, "x0": 118, "y0": 280, "x1": 230, "y1": 310},
+    ]
+    windows = make_price_windows(lines, 800, 1000)
+    assert windows
+    candidate = next(row for row in windows if row["price_values"] == [47200, 41900])
+    assert candidate["normal_price_candidate"] == 47200
+    assert candidate["promo_price_candidate"] == 41900
+    assert "tata letak" in candidate["candidate_note"].lower()
+    assert "sebelum TERIMA" in candidate["candidate_note"]
+
+
+def test_product_title_search_reaches_above_price_window_without_crossing_previous_row():
+    from promo_poster_ocr import make_price_windows
+
+    lines = [
+        # Previous row price pair, used as the lower boundary for the next row's title region.
+        {"text": "22.900", "confidence": .93, "x0": 120, "y0": 180, "x1": 195, "y1": 204},
+        {"text": "Rp19.900", "confidence": .96, "x0": 118, "y0": 208, "x1": 222, "y1": 238},
+        # The next SKU title sits more than 11% of image height above its own price.
+        {"text": "SUNCO Minyak Goreng Pouch 2L", "confidence": .97, "x0": 110, "y0": 340, "x1": 380, "y1": 377},
+        {"text": "47.200", "confidence": .94, "x0": 120, "y0": 430, "x1": 205, "y1": 454},
+        {"text": "Rp41.900", "confidence": .97, "x0": 118, "y0": 460, "x1": 230, "y1": 490},
+    ]
+    windows = make_price_windows(lines, 800, 1200)
+    candidate = next(row for row in windows if row["price_values"] == [47200, 41900])
+    assert "SUNCO" in candidate["local_product_name_suggestion"]
+    assert "22.900" not in candidate["local_product_name_suggestion"]
+
+
+def test_side_by_side_prices_from_different_product_columns_are_not_paired():
+    from promo_poster_ocr import make_price_windows
+
+    lines = [
+        {"text": "Sunco Minyak Goreng 2L", "confidence": .96, "x0": 60, "y0": 100, "x1": 280, "y1": 136},
+        {"text": "Rp41.900", "confidence": .96, "x0": 80, "y0": 190, "x1": 190, "y1": 220},
+        {"text": "Indomie Goreng 5 pcs", "confidence": .96, "x0": 520, "y0": 100, "x1": 760, "y1": 136},
+        {"text": "Rp14.600", "confidence": .96, "x0": 550, "y0": 190, "x1": 670, "y1": 220},
+    ]
+    windows = make_price_windows(lines, 1000, 1000)
+    assert len(windows) == 2
+    assert all(not row["normal_price_candidate"] and not row["promo_price_candidate"] for row in windows)
+
+
+def test_layout_inferred_prices_still_require_explicit_review_approval(tmp_path):
+    from openpyxl import load_workbook
+    from promo_poster_ocr import build_candidates, make_review_workbook
+
+    lines = [
+        {"text": "SUNCO Minyak Goreng Pouch 2L", "confidence": .96, "x0": 105, "y0": 160, "x1": 360, "y1": 195},
+        {"text": "47.200", "confidence": .94, "x0": 120, "y0": 250, "x1": 205, "y1": 274},
+        {"text": "Rp41.900", "confidence": .97, "x0": 118, "y0": 280, "x1": 230, "y1": 310},
+    ]
+    image = {
+        "source_name": "Katalogpromosi.com", "campaign_title": "Promo Gantung Alfamart",
+        "article_url": "https://example.test/promo-gantung", "image_url": "https://example.test/poster.jpg",
+    }
+    candidates = build_candidates(image, lines, 800, 1000, page_products=[])
+    candidate = next(row for row in candidates if row["normal_price_candidate"] == 47200)
+    assert candidate["promo_price_candidate"] == 41900
+
+    workbook_path = tmp_path / "review.xlsx"
+    make_review_workbook(candidates, workbook_path)
+    wb = load_workbook(workbook_path, data_only=True)
+    ws = wb["Kandidat OCR"]
+    assert ws["B2"].value == "CEK"
+    assert ws["E2"].value == 47200
+    assert ws["F2"].value == 41900
+    wb.close()
+
+
+def test_limited_review_rebuild_uses_latest_cache_and_does_not_overwrite_main_files(tmp_path, monkeypatch):
+    import csv
+    import json
+    import promo_poster_ocr as ocr
+    from openpyxl import Workbook, load_workbook
+
+    def write_csv(path, rows, fields):
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    older_url = "https://images.example.test/older.jpg"
+    latest_url = "https://images.example.test/latest.jpg"
+    image_index = tmp_path / "images.csv"
+    products_csv = tmp_path / "products.csv"
+    cache_csv = tmp_path / "cache.csv"
+    lines_csv = tmp_path / "lines.csv"
+    candidates_csv = tmp_path / "candidates.csv"
+    review_xlsx = tmp_path / "review.xlsx"
+    overrides_csv = tmp_path / "overrides.csv"
+    write_csv(image_index, [
+        {"image_url": older_url, "source_name": "source", "campaign_title": "Older Campaign", "article_url": "https://example.test/older", "image_alt": "older", "period_status": "current"},
+        {"image_url": latest_url, "source_name": "source", "campaign_title": "Latest Campaign", "article_url": "https://example.test/latest", "image_alt": "latest", "period_status": "current"},
+    ], ["image_url", "source_name", "campaign_title", "article_url", "image_alt", "period_status"])
+    write_csv(products_csv, [], ["product_text", "source_url", "source_page_url", "product_validation_status", "merchant_name", "source_name"])
+    base_lines = [
+        {"text": "SUNCO Minyak Goreng Pouch 2L", "confidence": .96, "x0": 105, "y0": 160, "x1": 360, "y1": 195},
+        {"text": "47.200", "confidence": .94, "x0": 120, "y0": 250, "x1": 205, "y1": 274},
+        {"text": "Rp41.900", "confidence": .97, "x0": 118, "y0": 280, "x1": 230, "y1": 310},
+    ]
+    cache_rows = []
+    for url, campaign, article, stamp in [
+        (older_url, "Older Campaign", "https://example.test/older", "2026-10-20T10:00:00+07:00"),
+        (latest_url, "Latest Campaign", "https://example.test/latest", "2026-10-26T22:00:00+07:00"),
+    ]:
+        cache_rows.append({
+            "image_url": url, "source_name": "source", "campaign_title": campaign,
+            "article_url": article, "image_alt": campaign, "period_status": "current",
+            "scraped_at": "2026-10-26", "image_sha256": "hash", "image_width": "800", "image_height": "1000",
+            "ocr_status": "ok", "ocr_backend": "rapidocr", "ocr_error": "", "processed_at": stamp,
+            "lines_json": json.dumps(base_lines),
+        })
+    write_csv(cache_csv, cache_rows, ocr.CACHE_FIELDS)
+    for name, value in {
+        "IMAGE_INDEX": image_index, "PRODUCTS_CSV": products_csv, "CACHE_CSV": cache_csv,
+        "LINES_CSV": lines_csv, "CANDIDATES_CSV": candidates_csv, "REVIEW_XLSX": review_xlsx,
+        "OVERRIDES_CSV": overrides_csv,
+    }.items():
+        monkeypatch.setattr(ocr, name, value)
+
+    # Existing main outputs should be preserved exactly in latest-batch mode.
+    wb0 = Workbook(); wb0.active["A1"] = "MAIN REVIEW PRESERVE"; wb0.save(review_xlsx); wb0.close()
+    review_before = review_xlsx.read_bytes()
+    lines_csv.write_text("MAIN_LINES_PRESERVE", encoding="utf-8")
+    candidates_csv.write_text("MAIN_CANDIDATES_PRESERVE", encoding="utf-8")
+    overrides_csv.write_text("ACTIVE_OVERRIDES_PRESERVE", encoding="utf-8")
+
+    stats = ocr.rebuild_review_from_cache(limit=1)
+    assert stats["images_considered"] == 1
+    assert stats["candidate_count"] >= 1
+    assert stats["review_workbook"].endswith("Review_Harga_Poster_OCR_UjiTerbaru.xlsx")
+    assert review_xlsx.read_bytes() == review_before
+    assert lines_csv.read_text(encoding="utf-8") == "MAIN_LINES_PRESERVE"
+    assert candidates_csv.read_text(encoding="utf-8") == "MAIN_CANDIDATES_PRESERVE"
+    assert overrides_csv.read_text(encoding="utf-8") == "ACTIVE_OVERRIDES_PRESERVE"
+
+    from pathlib import Path
+    test_review = Path(stats["review_workbook"])
+    wb = load_workbook(test_review, data_only=True)
+    ws = wb["Kandidat OCR"]
+    headers = [cell.value for cell in ws[1]]
+    source_col = headers.index("Kampanye") + 1
+    campaigns = [ws.cell(row, source_col).value for row in range(2, ws.max_row + 1)]
+    assert campaigns and set(campaigns) == {"Latest Campaign"}
+    assert all(ws.cell(row, 2).value == "CEK" for row in range(2, ws.max_row + 1))
+    wb.close()
+
+
+def test_sku_fuzzy_typo_needs_an_exact_distinctive_anchor():
+    from promo_poster_ocr import _matched_core_tokens, _matching_score
+
+    # A one-word OCR typo may remain a manual hint, but must not be strong enough
+    # to auto-fill a catalog product solely from edit distance.
+    left, right = _matched_core_tokens({"sunligt"}, {"sunlight"})
+    assert "sunligt" in left and "sunlight" in right
+    typo_score, _ = _matching_score("Sunlight", "Sunligt")
+    assert 0 < typo_score <= 0.69
+    # When another distinctive token anchors the identity, conservative typo
+    # recovery remains available (e.g. one misspelled brand plus the exact variant).
+    left, right = _matched_core_tokens({"sunligt", "lemon"}, {"sunlight", "lemon"})
+    assert "lemon" in left and "lemon" in right
+    assert "sunligt" in left and "sunlight" in right
+    score, _ = _matching_score("Sunlight Lemon 910 ml", "Sunligt Lemon 910 ml")
+    assert score > 0
