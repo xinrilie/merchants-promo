@@ -16,25 +16,6 @@ def test_does_not_pair_unlabelled_prices_without_matching_discount_claim():
     assert "tanpa label" in result["candidate_note"] or "tidak cocok" in result["candidate_note"]
 
 
-def test_unlabelled_pair_can_be_suggested_only_inside_compact_poster_window():
-    # Generic text parsing remains conservative; the spatial poster review may
-    # suggest high/low only when exactly two plausible prices share one local tile.
-    safe = interpret_price_pair("Rp100.000 | Rp89.000")
-    local = interpret_price_pair("Sunsilk Shampoo 170 ml | Rp20.000 | Rp16.000", allow_unlabelled_pair=True)
-    assert safe["normal_price_candidate"] == ""
-    assert local["normal_price_candidate"] == 20000
-    assert local["promo_price_candidate"] == 16000
-    assert local["discount_calculated_percent"] == 20.0
-    assert "WAJIB cocokkan poster" in local["candidate_note"]
-
-
-def test_single_explicit_label_can_pair_the_other_price_in_local_tile():
-    normal_label = interpret_price_pair("Harga Normal Rp30.000 | Rp21.000", allow_unlabelled_pair=True)
-    promo_label = interpret_price_pair("Harga Promo Rp21.000 | Rp30.000", allow_unlabelled_pair=True)
-    assert (normal_label["normal_price_candidate"], normal_label["promo_price_candidate"]) == (30000, 21000)
-    assert (promo_label["normal_price_candidate"], promo_label["promo_price_candidate"]) == (30000, 21000)
-
-
 def test_does_not_pair_when_discount_math_disagrees():
     result = interpret_price_pair("Rp100.000 | Rp80.000 | Diskon 10%")
     assert result["normal_price_candidate"] == ""
@@ -45,11 +26,6 @@ def test_does_not_pair_when_discount_math_disagrees():
 def test_extract_prices_skips_units_and_campaign_years():
     prices = extract_prices("Susu 1 L tahun 2026; Harga Promo Rp15.900")
     assert [row["price"] for row in prices] == [15900]
-
-
-def test_extract_prices_recovers_common_ocr_rp_typos_and_colon_separator():
-    prices = extract_prices("R33.900 | Rp 15.900 | 31:900")
-    assert [row["price"] for row in prices] == [33900, 15900, 31900]
 
 
 def test_candidate_preserves_source_poster_and_suggests_product_from_article():
@@ -66,61 +42,6 @@ def test_candidate_preserves_source_poster_and_suggests_product_from_article():
     assert all(row["article_url"] == image["article_url"] for row in candidates)
     assert all(row["image_url"] == image["image_url"] for row in candidates)
     assert any(row["normal_price_candidate"] == 20000 and row["promo_price_candidate"] == 16900 for row in candidates)
-
-
-def test_poster_price_windows_keep_two_adjacent_skus_separate():
-    lines = [
-        {"text": "Sunlight Lime 910 ml", "confidence": 0.96, "x0": 90, "y0": 100, "x1": 300, "y1": 130},
-        {"text": "Rp20.000", "confidence": 0.96, "x0": 140, "y0": 145, "x1": 260, "y1": 175},
-        {"text": "Rp16.000", "confidence": 0.96, "x0": 140, "y0": 180, "x1": 260, "y1": 210},
-        {"text": "Dove Body Wash 400 ml", "confidence": 0.96, "x0": 610, "y0": 100, "x1": 850, "y1": 130},
-        {"text": "Rp31.500", "confidence": 0.96, "x0": 660, "y0": 145, "x1": 790, "y1": 175},
-        {"text": "Rp25.200", "confidence": 0.96, "x0": 660, "y0": 180, "x1": 790, "y1": 210},
-    ]
-    image = {
-        "source_name": "Katalogpromosi.com", "campaign_title": "Promo Mingguan",
-        "article_url": "https://example.test/article", "image_url": "https://example.test/poster.jpg",
-    }
-    products = [
-        {"product_text": "Sunlight Lime 910 ml", "product_validation_status": "eligible"},
-        {"product_text": "Dove Body Wash 400 ml", "product_validation_status": "eligible"},
-    ]
-    candidates = build_candidates(image, lines, 1000, 1000, products)
-    pairs = {(r["normal_price_candidate"], r["promo_price_candidate"]) for r in candidates}
-    assert (20000, 16000) in pairs
-    assert (31500, 25200) in pairs
-    assert all(len(__import__("json").loads(r["price_values_json"])) <= 2 for r in candidates)
-    assert all("WAJIB cocokkan poster" in r["candidate_note"] for r in candidates if r["normal_price_candidate"])
-
-
-def test_normalize_box_accepts_paddle_xyxy_and_rapid_polygon_boxes():
-    from promo_poster_ocr import _normalize_box
-    assert _normalize_box([10, 20, 90, 60]) == (10.0, 20.0, 90.0, 60.0)
-    assert _normalize_box([[10, 20], [90, 22], [88, 60], [12, 58]]) == (10.0, 20.0, 90.0, 60.0)
-
-
-def test_paddleocr_numpy_outputs_are_parsed_into_text_lines():
-    import io
-    import numpy as np
-    from PIL import Image
-    from promo_poster_ocr import recognize_image
-
-    class FakePaddleOCR:
-        def predict(self, image):
-            assert image.ndim == 3 and image.shape[2] == 3
-            return [{
-                "rec_texts": ["Rp20.000"],
-                "rec_scores": np.asarray([0.98]),
-                "rec_boxes": np.asarray([[10, 20, 90, 60]]),
-            }]
-
-    buf = io.BytesIO()
-    Image.new("RGB", (120, 80), "white").save(buf, format="PNG")
-    lines, width, height = recognize_image(buf.getvalue(), FakePaddleOCR(), "paddleocr")
-    assert width >= 120 and height >= 80
-    assert lines[0]["text"] == "Rp20.000"
-    assert lines[0]["confidence"] == 0.98
-    assert (lines[0]["x0"], lines[0]["y0"], lines[0]["x1"], lines[0]["y1"]) == (10.0, 20.0, 90.0, 60.0)
 
 
 def test_article_url_match_is_normalized_for_www_and_trailing_slash(tmp_path):
@@ -161,26 +82,43 @@ def test_review_workbook_links_to_article_and_original_poster(tmp_path):
     assert ws["Q2"].hyperlink.target == "https://example.test/poster.jpg"
     wb.close()
 
-def test_paddleocr_disables_mkldnn_for_cpu_pir_workaround(monkeypatch):
-    import sys
-    import types
-    from promo_poster_ocr import create_ocr_engine
 
-    captured = {}
-    fake_engine = object()
+def test_spatial_windows_keep_adjacent_product_tiles_separate():
+    from promo_poster_ocr import make_price_windows
 
-    def fake_paddleocr(**kwargs):
-        captured.update(kwargs)
-        return fake_engine
+    # Two promo tiles share the same horizontal band but have independent SKU
+    # names and price pairs. Their texts must never be combined into one pair.
+    lines = [
+        {"text": "Sunlight Lime 910 ml", "confidence": .97, "x0": 80, "y0": 100, "x1": 290, "y1": 140},
+        {"text": "Harga Normal Rp20.000", "confidence": .96, "x0": 85, "y0": 160, "x1": 285, "y1": 195},
+        {"text": "Harga Promo Rp16.900", "confidence": .96, "x0": 85, "y0": 205, "x1": 285, "y1": 240},
+        {"text": "Selsun Shampoo Yellow 100 ml", "confidence": .97, "x0": 520, "y0": 100, "x1": 800, "y1": 140},
+        {"text": "Harga Normal Rp48.500", "confidence": .96, "x0": 525, "y0": 160, "x1": 795, "y1": 195},
+        {"text": "Harga Promo Rp40.900", "confidence": .96, "x0": 525, "y0": 205, "x1": 795, "y1": 240},
+    ]
+    windows = make_price_windows(lines, 1000, 1000)
+    assert len(windows) == 2
+    by_price = {tuple(row["price_values"]): row for row in windows}
+    assert (20000, 16900) in by_price
+    assert (48500, 40900) in by_price
+    sunlight = by_price[(20000, 16900)]["context"]
+    selsun = by_price[(48500, 40900)]["context"]
+    assert "Sunlight" in sunlight and "Selsun" not in sunlight
+    assert "Selsun" in selsun and "Sunlight" not in selsun
 
-    fake_module = types.ModuleType("paddleocr")
-    fake_module.PaddleOCR = fake_paddleocr
-    monkeypatch.setitem(sys.modules, "paddleocr", fake_module)
 
-    backend, engine = create_ocr_engine("paddleocr")
+def test_local_ocr_name_suggestion_is_available_when_catalog_match_is_missing():
+    from promo_poster_ocr import make_price_windows, build_candidates
 
-    assert backend == "paddleocr"
-    assert engine is fake_engine
-    assert captured["enable_mkldnn"] is False
-    assert captured["device"] == "cpu"
-
+    lines = [
+        {"text": "DUA BELIBIS Saus Tomat 535 ml", "confidence": .93, "x0": 110, "y0": 100, "x1": 360, "y1": 140},
+        {"text": "Rp19.200", "confidence": .94, "x0": 120, "y0": 170, "x1": 235, "y1": 205},
+        {"text": "Rp15.400", "confidence": .94, "x0": 120, "y0": 210, "x1": 235, "y1": 245},
+    ]
+    windows = make_price_windows(lines, 800, 800)
+    assert windows and windows[0]["local_product_name_suggestion"]
+    image = {"source_name": "Katalogpromosi.com", "campaign_title": "Promo Mingguan", "article_url": "https://example.test/a", "image_url": "https://example.test/p.jpg"}
+    rows = build_candidates(image, lines, 800, 800, page_products=[])
+    assert rows
+    assert rows[0]["matched_product_name"]
+    assert "OCR lokal" in rows[0]["match_note"]

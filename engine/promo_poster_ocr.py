@@ -505,54 +505,210 @@ def _line_center(line: dict) -> tuple[float, float]:
     return ((float(line.get("x0", 0)) + float(line.get("x1", 0))) / 2, (float(line.get("y0", 0)) + float(line.get("y1", 0))) / 2)
 
 
+def _cluster_price_anchor_lines(lines: list[dict], width: int, height: int) -> list[list[dict]]:
+    """Group OCR price lines that likely belong to the same product tile.
+
+    A poster can have multiple OCR boxes for normal/promo prices in one tile.
+    Group close anchors first, then use neighbouring tile anchors to set safe
+    boundaries. This avoids one large rectangular context mixing adjacent SKUs.
+    """
+    anchors = [line for line in _sort_lines(lines) if extract_prices(str(line.get("text") or ""))]
+    if not anchors:
+        return []
+    centers = [_line_center(line) for line in anchors]
+    parent = list(range(len(anchors)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # Same-tile price labels are normally close together; neighbouring SKU
+    # tiles are much farther apart. Use both axes to avoid joining whole rows.
+    for i, (x1, y1) in enumerate(centers):
+        for j in range(i + 1, len(anchors)):
+            x2, y2 = centers[j]
+            if abs(x2 - x1) / width <= 0.085 and abs(y2 - y1) / height <= 0.055:
+                union(i, j)
+
+    grouped: dict[int, list[dict]] = defaultdict(list)
+    for index, line in enumerate(anchors):
+        grouped[find(index)].append(line)
+    return sorted(
+        grouped.values(),
+        key=lambda group: (_line_center(group[0])[1], _line_center(group[0])[0]),
+    )
+
+
+def _local_product_name_suggestion(lines: list[dict], center_x: float, center_y: float, width: int, height: int) -> str:
+    """Suggest OCR text near a price cluster; never implies catalogue validation."""
+    generic_re = re.compile(
+        r"(?i)\b(?:harga|normal|asli|reguler|promo|diskon|discount|hemat|off|"
+        r"beli|gratis|voucher|periode|berlaku|katalog|cashback|special|spesial|"
+        r"alfamart|alfamidi|indomaret|indogrosir|foodhall|weekend|mingguan|"
+        r"oktober|november|desember|januari|februari|maret|april|mei|juni|juli|"
+        r"agustus|september|202[0-9]|all\s+var(?:iant)?|semua\s+varian)\b"
+    )
+    candidates = []
+    for line in lines:
+        text = str(line.get("text") or "").strip()
+        if not text:
+            continue
+        lx, ly = _line_center(line)
+        # Only use text from the local tile, with a slight preference for text
+        # above/near the price rather than a distant slogan elsewhere on page.
+        dx, dy = abs(lx - center_x) / max(1, width), abs(ly - center_y) / max(1, height)
+        if dx > 0.105 or dy > 0.115:
+            continue
+        cleaned = RP_AMOUNT_RE.sub(" ", text)
+        cleaned = OCR_MISSING_P_R_AMOUNT_RE.sub(" ", cleaned)
+        cleaned = GROUPED_AMOUNT_RE.sub(" ", cleaned)
+        cleaned = PLAIN_AMOUNT_RE.sub(" ", cleaned)
+        cleaned = DISCOUNT_RE.sub(" ", cleaned)
+        cleaned = re.sub(r"(?i)\b(?:rp\.?|idr|harga\s*(?:normal|promo|asli|reguler|diskon)|normal\s*price|regular\s*price|promo\s*price|sale\s*price|price\s*after\s*discount)\b", " ", cleaned)
+        cleaned = re.sub(r"[|,:;_*~=+\-]+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-/")
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9'&./-]*", cleaned)
+        alpha_chars = sum(ch.isalpha() for ch in cleaned)
+        if alpha_chars < 5 or len(tokens) < 2 or len(tokens) > 12:
+            continue
+        if generic_re.search(cleaned):
+            # Drop generic campaign lines; retain meaningful product terms after
+            # generic phrases if the line contains both (e.g. "All Var SAJIKU").
+            kept = [token for token in tokens if token.casefold() not in {
+                "harga", "normal", "asli", "reguler", "promo", "diskon", "discount",
+                "hemat", "off", "beli", "gratis", "voucher", "periode", "berlaku",
+                "katalog", "cashback", "special", "spesial", "alfamart", "alfamidi",
+                "indomaret", "indogrosir", "foodhall", "weekend", "mingguan", "all", "var",
+                "variant", "variants", "semua", "varian"
+            }]
+            if len(kept) < 2:
+                continue
+            cleaned = " ".join(kept)
+        # Prefer text near the price, but avoid choosing a single brand logo as SKU.
+        score = (min(len(tokens), 7) * 0.15) + (alpha_chars / 80.0) - dx - (dy * 0.65)
+        candidates.append((score, cleaned, dy, dx))
+    if not candidates:
+        return ""
+    # Keep up to two nearby lines to allow a brand + variant/size to form a SKU.
+    candidates.sort(key=lambda item: (-item[0], item[2], item[3], len(item[1])))
+    chosen = []
+    seen = set()
+    for _, text, _, _ in candidates:
+        key = identity_key(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        chosen.append(text)
+        if len(chosen) == 2:
+            break
+    return " ".join(chosen)
+
+
 def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]:
     windows = []
-    seen = set()
     if not lines or width <= 0 or height <= 0:
         return windows
     sorted_lines = _sort_lines(lines)
-    for i, line in enumerate(sorted_lines):
-        this_text = str(line.get("text") or "").strip()
-        if not this_text or not extract_prices(this_text):
-            continue
-        cx, cy = _line_center(line)
+    anchor_groups = _cluster_price_anchor_lines(sorted_lines, width, height)
+    if not anchor_groups:
+        return windows
+
+    tile_centers = []
+    for group in anchor_groups:
+        points = [_line_center(line) for line in group]
+        tile_centers.append((statistics.mean(p[0] for p in points), statistics.mean(p[1] for p in points)))
+
+    for index, group in enumerate(anchor_groups):
+        cx, cy = tile_centers[index]
+        # Start with a conservative tile around the anchor. If neighbouring
+        # price clusters share a poster row/column, bisect the free space between
+        # their centers so a window cannot spill into the next SKU card.
+        left = cx - width * 0.11
+        right = cx + width * 0.11
+        top = cy - height * 0.13
+        bottom = cy + height * 0.13
+        for other_index, (ox, oy) in enumerate(tile_centers):
+            if other_index == index:
+                continue
+            dx, dy = ox - cx, oy - cy
+            ndx, ndy = abs(dx) / width, abs(dy) / height
+            if ndy <= 0.095 and ndx > 0.075:
+                if dx < 0:
+                    left = max(left, (ox + cx) / 2)
+                else:
+                    right = min(right, (ox + cx) / 2)
+            if ndx <= 0.115 and ndy > 0.055:
+                if dy < 0:
+                    top = max(top, (oy + cy) / 2)
+                else:
+                    bottom = min(bottom, (oy + cy) / 2)
+
         neighborhood = []
-        for other in sorted_lines:
-            ox, oy = _line_center(other)
-            dx, dy = abs(ox - cx) / width, abs(oy - cy) / height
-            # Full catalog pages contain many SKUs in a grid. The older wide
-            # window (19% width x 15% height) mixed neighbouring products and
-            # left almost every price pair blank. A tighter local tile window
-            # reduces cross-product contamination before a pair is proposed.
-            if dx <= 0.12 and dy <= 0.075:
-                neighborhood.append(other)
-        neighborhood = sorted(neighborhood, key=lambda x: (_line_center(x)[1], _line_center(x)[0]))
-        context = " | ".join(str(x.get("text") or "").strip() for x in neighborhood if str(x.get("text") or "").strip())
-        # Pairing here is only a suggestion because the spatial window is local;
-        # Excel review remains mandatory before prices affect the catalog.
+        for line in sorted_lines:
+            lx, ly = _line_center(line)
+            if left <= lx <= right and top <= ly <= bottom:
+                neighborhood.append(line)
+        # Include price-anchor lines from this cluster even if their bbox center
+        # lands just outside a boundary after rounding/long OCR boxes.
+        have = {str(row.get("text") or "") for row in neighborhood}
+        for line in group:
+            if str(line.get("text") or "") not in have:
+                neighborhood.append(line)
+        neighborhood = sorted(neighborhood, key=lambda row: (_line_center(row)[1], _line_center(row)[0]))
+        context = " | ".join(str(line.get("text") or "").strip() for line in neighborhood if str(line.get("text") or "").strip())
         parsed = interpret_price_pair(context, allow_unlabelled_pair=True)
         if not parsed["prices"]:
             continue
-        line_conf = statistics.mean(_confidence(x.get("confidence")) for x in neighborhood) if neighborhood else _confidence(line.get("confidence"))
-        # Quantized spatial position makes ids stable while keeping adjacent products separate.
-        bucket_x = int(cx / max(1, width * 0.10))
-        bucket_y = int(cy / max(1, height * 0.055))
+        line_conf = statistics.mean(_confidence(line.get("confidence")) for line in neighborhood) if neighborhood else 0.0
+        bucket_x = int(cx / max(1, width * 0.08))
+        bucket_y = int(cy / max(1, height * 0.045))
+        local_name = _local_product_name_suggestion(neighborhood, cx, cy, width, height)
         signature = json.dumps([context.casefold(), bucket_x, bucket_y, parsed["prices"]], ensure_ascii=False, sort_keys=True)
-        if signature in seen:
-            continue
-        seen.add(signature)
         windows.append({
             "context": context,
             "center_x": cx,
             "center_y": cy,
+            "image_width": width,
+            "image_height": height,
+            "local_product_name_suggestion": local_name,
             "ocr_confidence": round(line_conf, 4),
             "price_values": parsed["prices"],
             **{k: parsed[k] for k in ("normal_price_candidate", "promo_price_candidate", "discount_claim_percent", "discount_calculated_percent", "candidate_note")},
             "lines_in_context": neighborhood,
             "bucket_x": bucket_x,
             "bucket_y": bucket_y,
+            "_signature": signature,
         })
-    return windows
+
+    # One candidate per spatial price cluster. Collapse exact duplicate windows
+    # only when they share most of their OCR lines; equal prices alone are not
+    # enough evidence that two adjacent product tiles are the same SKU.
+    unique = []
+    for window in windows:
+        this_lines = {str(line.get("text") or "").strip() for line in window.get("lines_in_context", []) if str(line.get("text") or "").strip()}
+        duplicate_index = None
+        for pos, previous in enumerate(unique):
+            if window["price_values"] != previous["price_values"]:
+                continue
+            prev_lines = {str(line.get("text") or "").strip() for line in previous.get("lines_in_context", []) if str(line.get("text") or "").strip()}
+            overlap = len(this_lines & prev_lines) / max(1, min(len(this_lines), len(prev_lines)))
+            dx = abs(window["center_x"] - previous["center_x"]) / width
+            dy = abs(window["center_y"] - previous["center_y"]) / height
+            if overlap >= 0.60 and dx <= 0.055 and dy <= 0.045:
+                duplicate_index = pos
+                break
+        if duplicate_index is None:
+            unique.append(window)
+        elif len(window.get("lines_in_context", [])) > len(unique[duplicate_index].get("lines_in_context", [])):
+            unique[duplicate_index] = window
+    return unique
 
 
 def _matching_score(product_name: str, context: str) -> tuple[float, str]:
@@ -607,6 +763,10 @@ def build_candidates(
             if fallback_name and fallback_score >= 0.55:
                 suggested, score = fallback_name, fallback_score
                 match_note = "Saran nama dari katalog lain, bukan bukti langsung poster; verifikasi nama/ukuran. " + fallback_note
+        if not suggested and window.get("local_product_name_suggestion"):
+            suggested = str(window["local_product_name_suggestion"])
+            score = min(0.45, float(window.get("ocr_confidence") or 0) * 0.45)
+            match_note = "Saran nama dari teks OCR lokal, belum dicocokkan ke SKU katalog; verifikasi nama/ukuran di poster."
         price_values = window["price_values"]
         seed = "|".join([
             str(image_record.get("image_url") or ""),
@@ -634,6 +794,11 @@ def build_candidates(
             "candidate_note": window["candidate_note"],
             "_bucket_x": int(window.get("bucket_x", 0)),
             "_bucket_y": int(window.get("bucket_y", 0)),
+            "_center_x": float(window.get("center_x", 0)),
+            "_center_y": float(window.get("center_y", 0)),
+            "_image_width": int(window.get("image_width", 0)),
+            "_image_height": int(window.get("image_height", 0)),
+            "_local_product_name_suggestion": str(window.get("local_product_name_suggestion") or ""),
             "_context_lines": {str(line.get("text") or "").strip() for line in window.get("lines_in_context", []) if str(line.get("text") or "").strip()},
         })
 
@@ -652,7 +817,14 @@ def build_candidates(
             previous_values = (previous.get("price_values_json"), previous.get("normal_price_candidate"), previous.get("promo_price_candidate"))
             if candidate.get("image_url") != previous.get("image_url") or values != previous_values:
                 continue
-            if abs(candidate["_bucket_x"] - previous["_bucket_x"]) > 1 or abs(candidate["_bucket_y"] - previous["_bucket_y"]) > 1:
+            current_lines = candidate.get("_context_lines", set())
+            previous_lines = previous.get("_context_lines", set())
+            line_overlap = len(current_lines & previous_lines) / max(1, min(len(current_lines), len(previous_lines)))
+            image_width = max(1, int(candidate.get("_image_width") or previous.get("_image_width") or 1))
+            image_height = max(1, int(candidate.get("_image_height") or previous.get("_image_height") or 1))
+            center_dx = abs(float(candidate.get("_center_x") or 0) - float(previous.get("_center_x") or 0)) / image_width
+            center_dy = abs(float(candidate.get("_center_y") or 0) - float(previous.get("_center_y") or 0)) / image_height
+            if line_overlap < 0.60 or center_dx > 0.055 or center_dy > 0.045:
                 continue
             previous_product_key = identity_key(previous.get("matched_product_name"))
             if product_key and previous_product_key and product_key != previous_product_key:
@@ -686,6 +858,11 @@ def build_candidates(
     for candidate in merged:
         candidate.pop("_bucket_x", None)
         candidate.pop("_bucket_y", None)
+        candidate.pop("_center_x", None)
+        candidate.pop("_center_y", None)
+        candidate.pop("_image_width", None)
+        candidate.pop("_image_height", None)
+        candidate.pop("_local_product_name_suggestion", None)
         candidate.pop("_context_lines", None)
     return merged
 
