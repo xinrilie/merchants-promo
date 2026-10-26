@@ -68,7 +68,7 @@ def test_explicit_nominal_discount_is_not_misread_as_product_price():
     assert parsed["price_basis"] == "discount_amount_offer"
 
 
-def test_simple_sheet_estimates_percent_from_nominal_savings_and_matching_unit():
+def test_simple_sheet_does_not_use_legacy_estimate_for_nominal_savings():
     row = base_row(
         product_text="Yummy Choice Fried Chicken",
         original_product_text="Yummy Choice Fried Chicken",
@@ -86,9 +86,9 @@ def test_simple_sheet_estimates_percent_from_nominal_savings_and_matching_unit()
     simple = make_simple_excel_row(row)
     assert simple["Harga Promo (Rp)"] == "—"
     assert simple["Hemat (Rp)"] == 10000
-    assert simple["Harga Normal/Acuan (Rp)"] == 75000
-    assert simple["Diskon (%)"] == 13.3
-    assert "Estimasi" in simple["Status Diskon"]
+    assert simple["Harga Normal/Acuan (Rp)"] == "—"
+    assert simple["Diskon (%)"] == "Belum bisa dihitung"
+    assert "Estimasi" not in simple["Status Diskon"]
 
 
 def test_simple_sheet_calculates_explicit_same_offer_price_pair():
@@ -109,7 +109,7 @@ def test_simple_sheet_calculates_explicit_same_offer_price_pair():
     assert "tertulis" in simple["Status Diskon"].casefold()
 
 
-def test_simple_sheet_estimates_valid_bundle_discount_from_matching_reference():
+def test_simple_sheet_does_not_use_legacy_estimate_for_bundle_discount():
     row = base_row(
         product_text="Frisian Flag Susu Cair UHT Cokelat 225 ml",
         promo_price=9900,
@@ -124,11 +124,10 @@ def test_simple_sheet_estimates_valid_bundle_discount_from_matching_reference():
         reference_price_record_origin="user_supplied_estimate",
     )
     simple = make_simple_excel_row(row)
-    assert simple["Harga Normal/Acuan (Rp)"] == 12000
+    assert simple["Harga Normal/Acuan (Rp)"] == "—"
     assert simple["Harga Promo (Rp)"] == 9900
-    assert simple["Hemat (Rp)"] == 2100
-    assert simple["Diskon (%)"] == 17.5
-    assert "Estimasi" in simple["Status Diskon"]
+    assert simple["Diskon (%)"] == "Belum bisa dihitung"
+    assert "Estimasi" not in simple["Status Diskon"]
 
 
 def test_simple_sheet_does_not_calculate_implausibly_low_bundle_price():
@@ -147,7 +146,7 @@ def test_simple_sheet_does_not_calculate_implausibly_low_bundle_price():
     )
     simple = make_simple_excel_row(row)
     assert simple["Diskon (%)"] == "Belum bisa dihitung"
-    assert "review" in simple["Status Diskon"].casefold()
+    assert "pembanding" in simple["Status Diskon"].casefold()
 
 
 def test_every_simple_row_has_discount_cell_and_period_after_discount():

@@ -28,12 +28,13 @@ from promo_campaign_utils import (
     parse_explicit_discount, parse_period_details, promo_status, timestamp,
 )
 from promo_price_reference import (
-    PRICE_REFERENCE_MAX_AGE_DAYS, load_reference_database, update_reference_database,
+    PRICE_REFERENCE_MAX_AGE_DAYS, REFERENCE_FIELDS, load_reference_database, update_reference_database,
     find_reference_price, EXPLICIT_NORMAL_PRICE_LABEL_RE,
 )
-from promo_ai_price_finder import (
+from promo_market_prices import (
     MARKET_REFERENCE_CSV, load_market_reference_database, compare_market_prices,
 )
+from promo_poster_overrides import apply_reviewed_poster_prices, DEFAULT_OVERRIDES_CSV
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ENGINE_DIR.parent
@@ -1910,13 +1911,12 @@ def recover_explicit_normal_price_from_offer(row):
 
 
 def apply_price_reference(rows, references, today=TODAY, max_age_days=PRICE_REFERENCE_MAX_AGE_DAYS):
-    """Attach price references and calculate discounts where product prices are comparable.
+    """Attach source-backed historical prices; never use guessed/AI estimates.
 
-    If the current offer has no original price, a user-supplied range reference may
-    populate the display original price using its midpoint. The source original-price
-    field remains blank and the estimate is clearly labelled. Real observed merchant
-    prices are preferred to manual ranges by ``find_reference_price``.
+    User-supplied and AI-generated estimate rows from legacy databases are ignored.
+    An absent normal price is handled by reviewed poster OCR or remains blank.
     """
+    references = [ref for ref in references if str(ref.get("record_origin") or "").casefold() != "user_supplied_estimate"]
     summary = {
         "rows_checked": 0,
         "exact_recent_references_found": 0,
@@ -1950,10 +1950,11 @@ def apply_price_reference(rows, references, today=TODAY, max_age_days=PRICE_REFE
         row.setdefault("reference_primary_display_allowed", False)
         recovered_normal_price = recover_explicit_normal_price_from_offer(row)
         if as_int(row.get("normal_price")) is not None:
-            row["normal_price_provenance"] = "current_offer_evidence"
+            if row.get("normal_price_provenance") != "poster_ocr_reviewed":
+                row["normal_price_provenance"] = "current_offer_evidence"
             row["reference_price_match_status"] = "not_needed_current_normal_price_available"
             row["reference_primary_display_allowed"] = True
-            if recovered_normal_price:
+            if recovered_normal_price or row.get("normal_price_provenance") == "poster_ocr_reviewed":
                 promo = as_int(row.get("promo_price"))
                 normal = as_int(row.get("normal_price"))
                 if promo is not None and promo > 0 and normal is not None and normal > promo:
@@ -2669,7 +2670,11 @@ def make_clean_row(row, review=False):
     reference_normal = as_int(row.get("reference_normal_price"))
     if actual_normal is not None:
         item["display_normal_price"] = actual_normal
-        item["display_normal_price_basis"] = "Harga asli yang tercantum pada sumber promo"
+        item["display_normal_price_basis"] = (
+            "Harga normal pada poster promo (OCR ditinjau manual)"
+            if row.get("normal_price_provenance") == "poster_ocr_reviewed"
+            else "Harga asli yang tercantum pada sumber promo"
+        )
     elif reference_normal is not None and row.get("reference_primary_display_allowed"):
         item["display_normal_price"] = reference_normal
         if row.get("reference_price_record_origin") == "user_supplied_estimate":
@@ -3148,11 +3153,17 @@ def make_simple_excel_row(row):
 
     source_promo = _simple_parse_amount(row.get("promo_price"))
     source_normal = _simple_parse_amount(row.get("normal_price"))
-    ref_normal = _simple_reference_value(row, "reference_normal_price")
-    ref_low = _simple_reference_value(row, "reference_price_low")
-    ref_high = _simple_reference_value(row, "reference_price_high")
     reference_origin = str(row.get("reference_price_record_origin") or "").casefold()
-    reference_unit = str(row.get("reference_price_unit") or "").casefold()
+    # Old user/AI guess-only references remain in legacy backups for audit only.
+    # They must never become a display price or drive a discount calculation.
+    if reference_origin == "user_supplied_estimate":
+        ref_normal = ref_low = ref_high = None
+        reference_unit = ""
+    else:
+        ref_normal = _simple_reference_value(row, "reference_normal_price")
+        ref_low = _simple_reference_value(row, "reference_price_low")
+        ref_high = _simple_reference_value(row, "reference_price_high")
+        reference_unit = str(row.get("reference_price_unit") or "").casefold()
     quality_flags = str(row.get("price_quality_flag") or "")
     existing_discount = row.get("discount_percent")
     existing_basis = str(row.get("discount_percent_basis") or "").casefold()
@@ -3538,8 +3549,22 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
                 cell.number_format = '"Rp" #,##0'
             elif header == "Lebih Murah dari Median (%)" and isinstance(cell.value, (int, float)):
                 cell.number_format = '0.0"%"'
-    market_sheet.freeze_panes = "A2"
-    market_sheet.auto_filter.ref = market_sheet.dimensions
+    if not market_rows:
+        market_sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(market_headers))
+        note = market_sheet.cell(2, 1)
+        note.value = (
+            "Belum ada pembanding pasar terverifikasi. Harga normal dan diskon sebaiknya diambil dari teks sumber promo "
+            "atau poster promo yang sudah ditinjau manual melalui OCR. Untuk membandingkan dengan pasar, impor harga "
+            "produk yang sama dari minimal dua domain independen melalui Excel dengan URL halaman harga dan bukti harga terlihat."
+        )
+        note.alignment = Alignment(vertical="top", wrap_text=True)
+        note.font = Font(italic=True, color="7F6000")
+        market_sheet.row_dimensions[2].height = 54
+        market_sheet.freeze_panes = "A3"
+        market_sheet.auto_filter.ref = f"A1:M1"
+    else:
+        market_sheet.freeze_panes = "A2"
+        market_sheet.auto_filter.ref = market_sheet.dimensions
     market_sheet.sheet_view.showGridLines = False
     market_sheet.row_dimensions[1].height = 38
 
@@ -3591,8 +3616,20 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
         if isinstance(url_cell.value, str) and url_cell.value.startswith(("https://", "http://")):
             url_cell.hyperlink = url_cell.value
             url_cell.style = "Hyperlink"
-    candidate_sheet.freeze_panes = "A2"
-    candidate_sheet.auto_filter.ref = candidate_sheet.dimensions
+    if not candidate_records:
+        candidate_sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(candidate_headers))
+        note = candidate_sheet.cell(2, 1)
+        note.value = (
+            "Belum ada kandidat harga hasil pencarian yang menunggu validasi. Harga dari OCR poster hanya dipakai setelah ditinjau dan disetujui; kandidat pembanding pasar perlu URL serta bukti harga yang terlihat."
+        )
+        note.alignment = Alignment(vertical="top", wrap_text=True)
+        note.font = Font(italic=True, color="666666")
+        candidate_sheet.row_dimensions[2].height = 40
+        candidate_sheet.freeze_panes = "A3"
+        candidate_sheet.auto_filter.ref = "A1:K1"
+    else:
+        candidate_sheet.freeze_panes = "A2"
+        candidate_sheet.auto_filter.ref = candidate_sheet.dimensions
     candidate_sheet.sheet_view.showGridLines = False
     candidate_sheet.row_dimensions[1].height = 48
 
@@ -3601,7 +3638,7 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
     today_text = TODAY.isoformat()
     numeric_discounts = [r["Diskon (%)"] for r in simple_current if isinstance(r.get("Diskon (%)"), (int, float))]
     not_calculated = sum(not isinstance(r.get("Diskon (%)"), (int, float)) for r in simple_current)
-    estimated = sum("Estimasi" in str(r.get("Status Diskon", "")) for r in simple_current)
+    estimated_bundles = sum(r.get("estimated_bundle_discount_percent") not in (None, "") for r in current_rows)
     market_reference_count = sum((as_int(r.get("market_reference_source_count")) or 0) > 0 for r in current_rows)
     below_market_count = sum(r.get("market_reference_status") == "below_market_median" for r in current_rows)
     single_market_source_count = sum(r.get("market_reference_status") == "single_source_only" for r in current_rows)
@@ -3611,14 +3648,15 @@ def _build_simple_workbook_sheets(wb, current_rows, review_rows, header_fill, ti
         ["Promo pada daftar utama", len(simple_current)],
         ["Diskon bisa dihitung", len(numeric_discounts)],
         ["Diskon belum bisa dihitung", not_calculated],
-        ["Diskon berbasis estimasi", estimated],
+        ["Estimasi bundling (bukan diskon terkonfirmasi)", estimated_bundles],
+        ["Harga normal diambil dari poster OCR yang ditinjau", sum(r.get("normal_price_provenance") == "poster_ocr_reviewed" for r in current_rows)],
         ["Produk dengan pembanding harga pasar", market_reference_count],
         ["Promo di bawah median harga pasar", below_market_count],
         ["Pembanding hanya satu domain (belum kuat)", single_market_source_count],
         ["Kandidat harga belum terverifikasi", len(candidate_records)],
         ["Baris perlu diperiksa", len(combined_review)],
         ["Kolom utama", "Nama Produk · Kategori · Merchant · Harga Normal/Acuan · Harga Promo · Hemat · Diskon · Masa Berlaku"],
-        ["Cara membaca", "Diskon resmi dihitung dari bukti harga normal yang relevan. Tab Peluang Harga hanya berisi pembanding pasar terverifikasi dari minimal dua domain. Tab Kandidat Harga berisi petunjuk pencarian yang belum terverifikasi dan bukan dasar diskon."],
+        ["Cara membaca", "Harga normal dari poster hanya berlaku setelah ditinjau dan disetujui manual. Diskon dihitung dari harga normal dan promo yang cocok untuk SKU yang sama. Referensi pasar terpisah dari harga yang tercetak pada poster; tab Peluang Harga membutuhkan minimal dua domain independen."],
         ["Verifikasi", "Sumber agregator bukan verifikasi resmi retailer. Periksa sumber URL sebelum menganggap harga berlaku di semua toko/wilayah."],
         ["Riwayat", "Sheet audit teknis disimpan tersembunyi agar file utama sederhana. Data mentah dan log tetap ada di folder _internal."],
     ]
@@ -4267,6 +4305,38 @@ def current_source_run_metadata():
         }
     return results
 
+def archive_legacy_price_estimates():
+    # Preserve old guess-only price rows before the active database is rewritten.
+    if not PRICE_REFERENCE_CSV.exists():
+        return 0
+    try:
+        with PRICE_REFERENCE_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+            raw_rows = list(csv.DictReader(handle))
+    except (OSError, csv.Error):
+        return 0
+    legacy = [row for row in raw_rows if str(row.get("record_origin") or "").casefold() == "user_supplied_estimate"]
+    if not legacy:
+        return 0
+    archive_path = INTERNAL_DIR / "legacy_price_estimates_disabled.csv"
+    previous = {}
+    if archive_path.exists():
+        try:
+            with archive_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                previous = {str(row.get("reference_key") or ""): row for row in csv.DictReader(handle)}
+        except (OSError, csv.Error):
+            previous = {}
+    for row in legacy:
+        key = str(row.get("reference_key") or "") or "|".join(str(row.get(k) or "") for k in ("product_key", "normal_price", "observed_at"))
+        previous[key] = row
+    fields = list(dict.fromkeys([*REFERENCE_FIELDS, *[key for row in legacy for key in row.keys()]]))
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with archive_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(previous.values())
+    return len(legacy)
+
+
 def main():
     INTERNAL_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -4276,19 +4346,34 @@ def main():
             "Jalankan Jalankan_Promo.bat agar tiga sumber dikumpulkan terlebih dahulu."
         )
     multisource_rows = load_source(MULTISOURCE_CSV, MULTISOURCE_CSV.name)
+    poster_ocr_stats = apply_reviewed_poster_prices(multisource_rows, DEFAULT_OVERRIDES_CSV)
     if not multisource_rows:
         raise RuntimeError(
             "Collector menghasilkan 0 baris. Ekspor final dibatalkan agar katalog lama tidak ditimpa. "
             "Periksa promo_multisource_runlog.json."
         )
     print("Baris dari tiga sumber agregator:", len(multisource_rows))
+    print("Harga poster OCR yang disetujui cocok:", poster_ocr_stats.get("rows_updated", 0))
+    print("Konflik harga poster OCR (tidak diterapkan):", poster_ocr_stats.get("rows_conflicted", 0))
+    print("Koreksi poster OCR belum cocok dengan produk/sumber:", poster_ocr_stats.get("rows_unmatched", 0))
     all_loaded_rows = multisource_rows
+    archived_estimates = archive_legacy_price_estimates()
+    if archived_estimates:
+        print("Estimasi lama yang baru dipindahkan ke arsip:", archived_estimates)
+    archive_path = INTERNAL_DIR / "legacy_price_estimates_disabled.csv"
+    try:
+        with archive_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            archived_legacy_count = sum(1 for _ in csv.DictReader(handle))
+    except (OSError, csv.Error):
+        archived_legacy_count = 0
     price_reference_update = update_reference_database(PRICE_REFERENCE_CSV, all_loaded_rows, TODAY)
-    price_reference_records = load_reference_database(PRICE_REFERENCE_CSV)
+    all_price_reference_records = load_reference_database(PRICE_REFERENCE_CSV)
+    price_reference_records = [r for r in all_price_reference_records if r.get("record_origin") != "user_supplied_estimate"]
     market_reference_records = load_market_reference_database(MARKET_REFERENCE_CSV)
     print("Observasi harga normal baru tersimpan:", price_reference_update.get("observations_added", 0))
-    ai_estimate_count = sum(r.get("record_origin") == "user_supplied_estimate" for r in price_reference_records)
-    print("Estimasi harga AI/pengguna tersedia:", ai_estimate_count)
+    print("Referensi harga normal bersumber tersedia:", len(price_reference_records))
+    print("Estimasi AI/rentang lama hanya di arsip audit:", archived_legacy_count)
+    print("Estimasi AI/rentang yang dipakai aktif:", sum(1 for r in all_price_reference_records if r.get("record_origin") == "user_supplied_estimate"))
     print("Referensi harga pasar tervalidasi tersedia:", len(market_reference_records))
     rejected_product_rows = [r for r in all_loaded_rows if r.get("product_validation_status") == "rejected"]
     input_rows = [r for r in all_loaded_rows if r.get("product_validation_status") != "rejected"]
@@ -4464,7 +4549,7 @@ def main():
     print("overlapping offer rows absorbed:", consolidated_rows)
     print("equivalent cross-source offer groups merged:", equivalent_offer_groups)
     print("equivalent cross-source offer rows absorbed:", equivalent_offer_rows_absorbed)
-    print("current active (including estimated):", len(current))
+    print("Promo periode aktif (termasuk periode estimasi):", len(current))
     print("confirmed active:", len(confirmed))
     print("review rows:", len(review))
     print("rows with product discount:", report["rows_with_product_discount"])

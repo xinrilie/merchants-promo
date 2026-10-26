@@ -10,33 +10,83 @@ REM Offline checks only: Jalankan_Promo.bat --test-only
 REM =====================================================
 
 set "PYTHON_CMD="
-where py >nul 2>nul
-if not errorlevel 1 (
-    set "PYTHON_CMD=py -3"
-) else (
-    where python >nul 2>nul
-    if not errorlevel 1 set "PYTHON_CMD=python"
+
+REM First, test the user's relocated Python directly. Do not trust `where py` alone:
+REM the Python Launcher may still point at an uninstalled old directory.
+if exist "D:\Python312\python.exe" (
+    "D:\Python312\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_CMD=D:\Python312\python.exe"
+        goto :python_found
+    )
 )
 
-if not defined PYTHON_CMD goto :no_python
+REM Common explicit install locations, including paths with spaces.
+if exist "C:\Python312\python.exe" (
+    "C:\Python312\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_CMD=C:\Python312\python.exe"
+        goto :python_found
+    )
+)
+if exist "%LocalAppData%\Programs\Python\Python313\python.exe" (
+    "%LocalAppData%\Programs\Python\Python313\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_CMD="%LocalAppData%\Programs\Python\Python313\python.exe""
+        goto :python_found
+    )
+)
+if exist "%LocalAppData%\Programs\Python\Python312\python.exe" (
+    "%LocalAppData%\Programs\Python\Python312\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_CMD="%LocalAppData%\Programs\Python\Python312\python.exe""
+        goto :python_found
+    )
+)
+if exist "%LocalAppData%\Programs\Python\Python311\python.exe" (
+    "%LocalAppData%\Programs\Python\Python311\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_CMD="%LocalAppData%\Programs\Python\Python311\python.exe""
+        goto :python_found
+    )
+)
+if exist "%ProgramFiles%\Python312\python.exe" (
+    "%ProgramFiles%\Python312\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_CMD="%ProgramFiles%\Python312\python.exe""
+        goto :python_found
+    )
+)
 
-%PYTHON_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
-if errorlevel 1 goto :python_version_error
+REM Probe launcher/command by executing Python, not merely checking whether it exists.
+py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+if not errorlevel 1 (
+    set "PYTHON_CMD=py -3"
+    goto :python_found
+)
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+if not errorlevel 1 (
+    set "PYTHON_CMD=python"
+    goto :python_found
+)
 
+goto :no_python
+
+:python_found
 if not exist "%~dp0engine\promo_multisource_collector.py" goto :bad_project
 if not exist "%~dp0engine\enrich_existing_promo_catalog_multisource.py" goto :bad_project
 
 if not exist "%~dp0_internal" mkdir "%~dp0_internal"
 if not exist "%~dp0hasil" mkdir "%~dp0hasil"
 
-%PYTHON_CMD% -c "import requests, bs4, openpyxl, pytest" >nul 2>nul
+%PYTHON_CMD% -c "import requests, bs4, openpyxl, pytest, paddle, paddleocr, cv2, rapidocr, onnxruntime" >nul 2>nul
 if errorlevel 1 (
     echo Dependensi belum lengkap. Memasang requirements-dev.txt...
     %PYTHON_CMD% -m pip install -r "%~dp0requirements-dev.txt"
     if errorlevel 1 goto :dependency_error
 )
 
-%PYTHON_CMD% -c "import requests, bs4, openpyxl, pytest" >nul 2>nul
+%PYTHON_CMD% -c "import requests, bs4, openpyxl, pytest, paddle, paddleocr, cv2, rapidocr, onnxruntime" >nul 2>nul
 if errorlevel 1 goto :dependency_error
 
 if /I "%~1"=="--help" goto :help
@@ -81,17 +131,22 @@ echo Sumber: Hemat.id, Katalogpromosi.com, Scanharga.com
 echo =====================================================
 echo.
 
-echo [LIVE 1/2] Mengambil promo dari tiga sumber agregator...
+echo [LIVE 1/3] Mengambil promo dari tiga sumber agregator...
 %PYTHON_CMD% -u "%~dp0engine\promo_multisource_collector.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [LIVE 2/2] Menggabungkan sumber, memvalidasi, fuzzy matching, dan ekspor...
+echo [OCR POSTER] Membaca teks/harga dari poster dengan OCR lokal...
+%PYTHON_CMD% -u "%~dp0engine\promo_poster_ocr.py"
+if errorlevel 1 goto :error
+
+echo.
+echo [LIVE 2/3] Menggabungkan sumber, menerapkan harga poster yang ditinjau, validasi, dan ekspor...
 %PYTHON_CMD% -u "%~dp0engine\enrich_existing_promo_catalog_multisource.py"
 if errorlevel 1 goto :error
 
 echo.
-echo [MANUAL PRICE SEARCH] Membuat daftar produk tanpa harga normal...
+echo [LIVE 3/3] Membuat daftar referensi harga pasar manual yang masih diperlukan...
 %PYTHON_CMD% -u "%~dp0engine\export_manual_price_search.py"
 if errorlevel 1 goto :error
 
@@ -123,14 +178,8 @@ exit /b 0
 
 :no_python
 echo ERROR: Python tidak ditemukan.
-echo Pasang Python 3.10+ dari python.org, aktifkan Add Python to PATH,
-echo lalu buka terminal baru dan jalankan file ini kembali.
-pause
-exit /b 1
-
-:python_version_error
-echo ERROR: Python 3.10 atau lebih baru diperlukan.
-%PYTHON_CMD% --version
+echo Python 3.10+ tidak ditemukan atau launcher masih menunjuk ke jalur lama.
+echo Pastikan D:\Python312\python.exe bisa dijalankan, atau pasang Python 3.10+ dari python.org.
 pause
 exit /b 1
 

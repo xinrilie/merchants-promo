@@ -1,49 +1,54 @@
-# Ringkasan Audit Final — Katalog Promo Multi-Sumber
+# Audit Ringkas — Upgrade OCR Poster Promo
 
-Tanggal snapshot data: **25 Oktober 2026**. Paket dibangun dari file data collector yang sudah tersimpan; proses pemaketan ini tidak menjalankan scraping live.
+Tanggal paket: 26 Oktober 2026.
 
-## Status akhir
+## Keputusan desain
 
-- **97 tes lulus**, termasuk regresi parser diskon nominal. `compileall`, self-test normalisasi nama, dan self-test collector juga lulus.
-- `hasil/Katalog_Promo_Final.xlsx` berhasil dibuat ulang dan dibuka untuk verifikasi struktur.
-- Sheet yang ditujukan untuk pemakaian harian: `Ringkasan`, `Promo`, `Perlu Diperiksa`, dan `Ringkasan Kategori`. Pada workbook lampiran perbaikan ini, semua 16 tab terlihat karena metadata hidden tidak dipertahankan saat ekspor perbaikan; seluruh data audit tetap ada. Pipeline proyek yang dijalankan ulang memakai kode yang telah diperbaiki menerapkan pengaturan tampilan normal.
-- Sheet `Promo` memiliki **455 baris promo**, menggunakan 13 kolom. Urutan kolom `Diskon (%)` diikuti langsung oleh `Masa Berlaku`.
-- Sel `Diskon (%)`: **380 nilai numerik**, **75 bertanda `Belum bisa dihitung`**, dan **0 sel kosong**.
-- Pemeriksaan promo dengan teks potongan nominal menemukan nominal seperti `Diskon Rp10.000` ditampilkan di `Hemat (Rp)`, bukan dianggap sebagai `Harga Promo (Rp)`. Kasus yang dapat dibandingkan dengan rentang acuan satuan yang cocok ditandai jelas sebagai estimasi.
+- Estimasi harga AI dan seeding rentang perkiraan dinonaktifkan dari jalur katalog.
+- Sebanyak 257 rekaman `user_supplied_estimate` dipindahkan ke `_internal/legacy_price_estimates_disabled.csv`; database aktif sekarang hanya memuat referensi bersumber.
+- File sumber rentang dan alias lama dipindahkan ke `_internal/legacy_user_product_price_ranges_disabled.csv` serta `_internal/legacy_user_product_price_reference_aliases_disabled.csv`.
+- Harga normal yang hanya ada pada poster diproses oleh OCR lokal. OCR hanya menghasilkan kandidat; harga tidak digunakan sampai ada keputusan `TERIMA` di workbook review.
+- Referensi harga pasar tetap memakai workflow Excel manual yang terpisah dan membutuhkan URL halaman langsung serta bukti harga.
 
-## Perbaikan parser
+## Snapshot data sesudah regenerasi lokal
 
-- Regex untuk label `diskon`, `potongan`, dan `hemat` diperbaiki agar benar-benar mengenali batas kata dan spasi.
-- `parse_offer_text()` tidak lagi menganggap `Beli 5 pcs Diskon Rp. 10.000` sebagai produk dengan harga promo Rp10.000; hasilnya menempatkan nominal itu sebagai potongan nominal.
-- Fungsi Excel juga memperbaiki baris legacy ketika `promo_price` sebelumnya keliru memuat nilai diskon. Teks `raw_line` yang mengulang `offer_text` tidak membuat nominal yang sama dihitung dua kali.
-- Diskon dihitung hanya dari pasangan harga yang dapat dibandingkan atau dari acuan yang sesuai dengan satuan/kondisi; selain itu nilainya diberi status `Belum bisa dihitung`, bukan dibuat-buat.
+- Baris input dari tiga agregator: 497.
+- Baris terkonsolidasi: 492.
+- Promo pada katalog utama per 26 Oktober 2026: 306.
+- Promo terkonfirmasi aktif: 163.
+- Promo aktif dengan periode estimasi: 143.
+- Baris katalog dengan diskon terisi: 192.
+- Estimasi bundling yang tetap ditandai non-konfirmasi: 46.
+- Referensi harga normal bersumber yang tersedia: 228.
+- Referensi estimasi AI/rentang yang digunakan aktif: 0.
+- Estimasi lama yang disimpan di arsip audit: 257.
+- Referensi pembanding pasar yang terverifikasi: 0.
+- Harga normal yang diterapkan dari poster OCR yang sudah ditinjau: 0 (belum ada keputusan review pengguna).
 
-## Data referensi dan batasan
+Angka katalog berubah dari snapshot tanggal 25 Oktober ke tanggal 26 Oktober karena status periode promo diperhitungkan ulang; bukan semua perubahan disebabkan oleh penghapusan estimasi. Promo yang sudah berakhir tidak harus tetap ditampilkan sebagai aktif.
 
-- Daftar sumber referensi pengguna memuat **102 rentang harga** dan **89 alias katalog terpilih**. Database harga yang dibundel berisi 394 rekaman pada snapshot ini.
-- Rentang yang disediakan pengguna adalah **estimasi acuan**, bukan harga resmi merchant. Data dari situs agregator juga bukan verifikasi resmi retailer.
-- Harga/diskon berbasis perkiraan tetap diberi penanda pada `Status Diskon`; periksa `Sumber URL`, syarat transaksi, satuan, dan masa berlaku sebelum menganggap penawaran universal.
+## Cakupan gambar dan OCR
 
-## File utama
+- Indeks poster dalam snapshot: 412 catatan gambar, 391 URL gambar unik.
+- Mesin OCR: RapidOCR + ONNX Runtime sebagai backend utama; Tesseract hanya fallback jika binary lokal tersedia.
+- OCR menyimpan cache, baris teks/koordinat, kandidat harga, dan workbook review yang URL artikel serta gambar poster-nya dapat diklik.
+- Harga normal/promo berlabel dipasangkan terlebih dahulu. Dua harga tanpa label hanya diusulkan jika hitungan persentasenya cocok dengan klaim diskon dalam toleransi; pasangan ambigu dibiarkan untuk pemeriksaan.
+- Kandidat berdekatan yang membaca harga sama digabung untuk mengurangi duplikasi, tetapi dua nama SKU berbeda yang sama-sama cocok tetap dipisah.
+- Foto dari URL sumber yang sebenarnya tidak diunduh/diproses massal selama pembangunan paket ini. Smoke test OCR dilakukan pada poster sintetis lokal: backend Tesseract mengenali harga normal Rp31.500, harga promo Rp17.500, serta klaim diskon 44%; hitungan independen menjadi 44,4%. Ini memverifikasi jalur OCR/parser offline, bukan akurasi terhadap seluruh poster publik.
 
-- `hasil/Katalog_Promo_Final.xlsx` — workbook Excel ringkas dengan sheet audit tersembunyi.
-- `hasil/Katalog_Promo_Final.csv` — data CSV utama.
-- `_internal/` — data antara, log, laporan kualitas ekspor, kandidat review/duplikat, serta audit lengkap.
-- `Jalankan_Promo.bat` — jalankan tes dan pipeline lengkap di Windows.
-- `Jalankan_Promo.bat --test-only` — tes offline tanpa scraping live.
+## Verifikasi otomatis
 
-## Perbaikan kompatibilitas Excel — 25 Oktober 2026
+- `python -m compileall -q engine`: lulus.
+- `python engine/promo_names.py`: lulus.
+- `python engine/promo_multisource_collector.py --self-test`: lulus.
+- `python -m pytest -q engine`: 124 passed.
+- Regenerasi katalog lokal tanpa scraping live: sukses.
+- Regenerasi daftar harga pasar manual: sukses (134 produk yang belum memiliki harga normal bersumber, setelah menyaring di luar katalog, status review, dan nama generik).
 
-- Penyebab yang diidentifikasi: sheet `Promo` dan `Perlu Diperiksa` menuliskan `AutoFilter` worksheet pada rentang yang sama dengan AutoFilter bawaan Excel Table. Ini membuat Excel menawarkan perbaikan dengan menghapus fitur AutoFilter/tabel saat dibuka.
-- Kode pembuat workbook telah diperbaiki: untuk sheet yang menggunakan Excel Table, filter dikelola oleh tabel dan tidak lagi ditulis terpisah ke worksheet.
-- Workbook lampiran dibangun ulang dengan dua objek tabel tanpa AutoFilter duplikat. Struktur XLSX tervalidasi, seluruh 16 sheet dan data kunci dapat dibaca kembali, serta arsip XLSX lolos tes integritas.
-- Seluruh **97 tes lulus** setelah perubahan kode.
+## Batasan yang tersisa
 
-
-
-## Tindak lanjut P0 pada paket revisi ini
-
-- HTTP 404/410 dan error HTTP 4xx URL-level kini dicatat terpisah dari pemblokiran sumber; artikel lain tetap diproses. Status 401/403/429, 5xx, request error, dan redirect keluar domain tetap memicu penghentian sumber.
-- Ditambahkan `hasil/Katalog_Promo_Final_Ringkas.csv` dengan kolom dan nilai tampilan yang dihasilkan oleh transformasi yang sama dengan sheet Excel `Promo`. CSV utama tetap menjadi ekspor lebih rinci untuk pengolahan data.
-- Ditambahkan tes regresi untuk 404 pada satu artikel, kesamaan transformasi CSV ringkas dengan tampilan Excel, serta penolakan harga yang hanya muncul pada judul kampanye tanpa bukti harga di penawaran.
-- Verifikasi offline pada revisi: 101 tes otomatis lulus. Ini tidak menggantikan smoke test scraping live.
+- Pembacaan angka dari poster buram, kecil, atau tata letaknya padat perlu peninjauan manual.
+- OCR belum dapat membuktikan secara visual bahwa garis coret benar-benar menandai harga asli; konteks label/klaim membantu, keputusan akhir tetap pada reviewer.
+- Harga OCR hanya diterapkan jika sumber, URL artikel, dan identitas produk cocok serta nilai tidak bertentangan dengan harga sumber yang sudah ada.
+- Database pembanding harga pasar kosong, sehingga klaim “lebih murah dari pasar” belum dapat dihitung.
+- Sumber aktif pada paket tetap Hemat.id, Katalogpromosi.com, dan Scanharga.com; Momsmoney/Kontan belum aktif.

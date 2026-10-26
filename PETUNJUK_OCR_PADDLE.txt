@@ -1,0 +1,43 @@
+HOTFIX OCR POSTER PROMO — PaddleOCR + OpenCV
+============================================
+
+Hotfix ini untuk ditimpa ke folder proyek Merchants Promo yang sudah ada.
+Kode Python tidak memanggil Google Cloud Vision atau API berbayar.
+
+PERUBAHAN UTAMA
+- PaddleOCR 3.x menjadi backend lokal utama; RapidOCR dan Tesseract sebagai fallback.
+- Preprocessing Pillow + OpenCV CLAHE untuk memperjelas teks harga kecil/kurang kontras.
+- Jendela OCR dipersempit agar harga dari SKU yang bersebelahan tidak mudah dicampur.
+- Perbaikan parser nilai seperti Rp20.000 yang menempel tanpa spasi.
+- Pasangan dua harga lokal tanpa label dapat diusulkan sebagai kandidat untuk review, bukan langsung disetujui.
+- Nama produk dari katalog lain hanya menjadi saran; harga dari baris katalog lain tidak digunakan sebagai bukti OCR.
+- Excel review tetap mensyaratkan keputusan TERIMA sebelum harga dipakai katalog.
+- BAT disertakan dengan deteksi Python yang memprioritaskan D:\Python312\python.exe.
+
+CARA PASANG
+1. Ekstrak ZIP ke D:\Coding\Py\merchants-promo dan izinkan file yang sama ditimpa.
+2. Jalankan Install_Dependency.bat. PaddleOCR/PaddlePaddle cukup dipasang satu kali.
+3. Penggunaan PaddleOCR pertama kali memerlukan internet untuk mengunduh model OCR.
+4. Jalankan dari CMD:
+
+   python engine\promo_poster_ocr.py --force --limit 25
+
+5. Buka hasil\Review_Harga_Poster_OCR.xlsx. Periksa URL Gambar, nama/ukuran SKU,
+   harga kandidat, dan catatan. Harga hanya dipakai setelah keputusan TERIMA.
+6. Jika hasil batch awal terlihat baik, jalankan OCR penuh:
+
+   python engine\promo_poster_ocr.py --force
+
+7. Setelah mereview dan menyimpan Excel:
+
+   python engine\promo_poster_ocr.py --import-reviewed-only
+   python engine\enrich_existing_promo_catalog_multisource.py
+
+Jika PaddleOCR tidak tersedia/terinisialisasi, backend auto mencoba RapidOCR lalu
+Tesseract. Bisa memilih backend eksplisit dengan --backend paddleocr|rapidocr|tesseract.
+
+BATASAN
+OCR tetap bisa salah membaca angka, SKU, varian, atau harga yang dicoret. Pasangan
+harga tanpa label hanya usulan lokal. Jangan pilih TERIMA sebelum membuka poster asli.
+Tes otomatis memakai data sintetis untuk validasi parser, geometri, dan format OCR;
+keakuratan terhadap seluruh poster live tetap harus diperiksa dari workbook yang baru.

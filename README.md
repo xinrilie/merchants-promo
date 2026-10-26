@@ -1,157 +1,100 @@
 # Merchants Promo
 
-Pipeline Python untuk mengumpulkan promo produk dari tiga sumber agregator publik, memvalidasi data, mendeteksi duplikat, mengategorikan produk, menyimpan referensi harga, menerima prediksi harga AI melalui JSON, lalu mengekspor katalog ke Excel dan CSV.
+Pipeline Python untuk mengumpulkan katalog promo dari tiga sumber publik, membaca bukti harga dari teks sumber dan poster promo, memvalidasi SKU/harga/periode, serta menghasilkan Excel dan CSV. **Tidak ada prediksi harga AI tanpa sumber**. Jika harga normal hanya terlihat pada gambar, pipeline memakai OCR lokal dan meminta persetujuan manusia sebelum harga dipakai.
 
 ## Sumber aktif
 
 - **Hemat.id** — katalog/kartu promo.
-- **Katalogpromosi.com** — artikel katalog, teks penawaran, dan referensi brosur.
-- **Scanharga.com** — artikel promo dan referensi brosur.
+- **Katalogpromosi.com** — artikel katalog dan poster.
+- **Scanharga.com** — artikel promo dan poster.
 
-Pipeline hanya menggunakan tiga sumber tersebut; Momsmoney tidak digunakan sebagai sumber promo.
+Pipeline snapshot ini menggunakan tiga sumber tersebut; Momsmoney/Kontan belum menjadi sumber aktif.
 
-## Menjalankan di Windows (langsung dari CMD)
+## Menjalankan di Windows
 
-1. Ekstrak proyek dan buka CMD di folder utama proyek.
-2. Pastikan Python 3.10 atau lebih baru tersedia di PATH.
-3. Pasang dependensi dan jalankan pemeriksaan offline:
+Jalankan dari folder proyek di CMD. Untuk instalasi pertama:
+
+```cmd
+Install_Dependency.bat
+```
+
+Untuk pemeriksaan offline tanpa scraping:
+
+```cmd
+Jalankan_Promo.bat --test-only
+```
+
+Untuk menjalankan pipeline lengkap, termasuk kolektor, OCR poster, konsolidasi, dan ekspor:
+
+```cmd
+Jalankan_Promo.bat
+```
+
+Dependensi utama: Python 3.10+, requests, BeautifulSoup, openpyxl, RapidOCR, ONNX Runtime, Pillow, pytesseract (fallback opsional), dan pytest.
+
+## Alur harga: teks sumber dahulu, OCR poster berikutnya
+
+1. Parser membaca harga normal/asli, harga promo, serta klaim diskon yang dinyatakan pada teks sumber.
+2. `engine/promo_poster_ocr.py` memproses URL gambar poster yang sudah dikumpulkan. OCR berjalan lokal memakai RapidOCR + ONNX Runtime; Tesseract lokal dapat digunakan sebagai fallback jika sudah tersedia.
+3. OCR menyimpan teks dan kotak posisi ke `_internal/promo_poster_ocr_lines.csv`, kandidat ke `_internal/promo_poster_price_candidates.csv`, serta cache gambar ke `_internal/promo_poster_ocr_cache.csv`.
+4. Kandidat harga masuk ke `hasil/Review_Harga_Poster_OCR.xlsx`. Buka gambar dari kolom `URL Gambar` untuk memastikan produk, ukuran, harga normal yang dicoret, harga promo, serta klaim diskon memang satu SKU.
+5. Isi `Keputusan` dengan `TERIMA`, `TOLAK`, atau `CEK`. Koreksi `Nama Produk Disetujui`, `Harga Normal Disetujui (Rp)`, dan `Harga Promo Disetujui (Rp)` sesuai poster. Jangan terima kandidat yang pasangannya ambigu atau ukuran/variannya berbeda.
+6. Simpan dan tutup Excel. Jalankan:
 
    ```cmd
-   python -m pip install -r requirements-dev.txt
-   python -m compileall -q engine
-   python engine\promo_names.py
-   python engine\promo_multisource_collector.py --self-test
-   python -m pytest -q engine
-   ```
-
-4. Sebelum scraping, sinkronkan rentang referensi manual dengan database. Jalankan pipeline reguler:
-
-   ```cmd
-   python engine\seed_user_price_references.py
-   python engine\promo_multisource_collector.py
+   python engine\promo_poster_ocr.py --import-reviewed-only
    python engine\enrich_existing_promo_catalog_multisource.py
    ```
 
+   Harga yang disetujui ditautkan ke sumber artikel dan gambar poster. Harga normal yang disetujui bisa menjadi referensi normal dari sumber; harga promo mengisi kolom promo bila belum ada atau nilainya konsisten. Harga sumber yang berbeda tidak ditimpa diam-diam: dicatat sebagai konflik untuk ditinjau.
 
-## Struktur proyek
+OCR tidak bisa menjamin pembacaan digit pada poster yang kecil/buram. Label teks, posisi, dan kecocokan perhitungan diskon hanya dipakai untuk mengusulkan pasangan; persetujuan di Excel tetap menjadi gerbang penggunaan harga.
 
-```text
-merchants-promo-revisi-harga/
-├── engine/
-│   ├── promo_multisource_collector.py
-│   ├── enrich_existing_promo_catalog_multisource.py
-│   ├── promo_price_reference.py
-│   ├── export_manual_price_search.py
-│   ├── import_manual_price_references.py
-│   ├── seed_user_price_references.py
-│   └── test_*.py
-├── input/
-│   └── category_review_list.csv
-├── data/
-│   ├── product_price_reference.csv          # referensi historis + estimasi AI/pengguna
-│   ├── product_market_price_reference.csv   # harga pasar yang disertai bukti sumber
-│   ├── user_product_price_ranges.csv
-│   └── user_product_price_reference_aliases.csv
-├── hasil/       # workbook dan CSV final
-└── _internal/   # log, data antara, laporan kualitas dan audit
-```
-
-## Tampilan Excel untuk pemakaian sehari-hari
-
-Sheet yang ditampilkan di awal workbook disederhanakan menjadi:
-
-- `Ringkasan` — jumlah promo, jumlah diskon yang bisa dihitung, baris estimasi, serta baris yang perlu diperiksa.
-- `Promo` — katalog utama dengan 13 kolom yang ringkas.
-- `Perlu Diperiksa` — daftar promo yang membutuhkan pemeriksaan harga, satuan, diskon, atau masa berlaku.
-- `Ringkasan Kategori` — jumlah promo per kategori.
-- `Peluang Harga` — produk yang harga promonya dapat dibandingkan dengan harga pasar dari minimal dua domain berbeda; persentase menunjukkan posisi terhadap median pasar, **bukan diskon resmi retailer**. Referensi dari satu domain tetap ditampilkan tetapi tidak diberi persentase potensi lebih murah.
-- `Kandidat Harga` — judul, URL, cuplikan, dan petunjuk nominal dari halaman pencarian yang belum lolos verifikasi otomatis. Angkanya hanya petunjuk untuk diperiksa manual, bukan harga normal terverifikasi dan bukan dasar menghitung diskon.
-
-Di sheet `Promo`, urutan kolom harga adalah `Harga Normal/Acuan (Rp)` → `Harga Promo (Rp)` → `Hemat (Rp)` → `Diskon (%)` → `Masa Berlaku`. Jadi, `Masa Berlaku` langsung mengikuti `Diskon (%)`.
-
-Sel `Diskon (%)` pada sheet `Promo` selalu diisi angka jika dasar hitungnya memadai, atau teks `Belum bisa dihitung` bila bukti harga/satuan tidak cukup. Sel tidak dibiarkan kosong dan sistem tidak mengarang persentase. Estimasi dari rentang harga pengguna atau bundling diberi penanda di `Status Diskon`. File `Katalog_Promo_Final_Ringkas.csv` menggunakan transformasi baris yang sama agar hasil tampilannya identik dengan sheet tersebut. CSV utama `Katalog_Promo_Final.csv` tetap mempertahankan nilai numerik kosong untuk field yang tidak tersedia dan kolom provenance yang lebih lengkap.
-
-Sheet teknis seperti `Aktif`, `Periode Pasti`, `Perlu Review`, `Referensi Harga`, `Referensi Harga Pasar`, `Kemungkinan Duplikat`, dan audit lainnya tetap tersedia di workbook dalam keadaan tersembunyi untuk pemeriksaan mendalam; tampilan harian tidak dipenuhi sheet teknis.
-
-## Urutan kolom pada sheet audit
-
-Di sheet audit `Aktif`, `Periode Pasti`, dan `Perlu Review`, kolom harga rinci diawali dengan urutan:
-
-1. `Harga Asli (Rp)`
-2. `Harga Promo (Rp)`
-3. `Diskon (%)`
-
-Lalu ada `Basis Harga Asli`, `Harga Asli dari Sumber (Rp)`, `Harga Normal Referensi (Rp)`, `Rentang Referensi Harga (Rp)`, dan `Dasar Diskon`.
-
-- `Harga Asli (Rp)` memakai harga asli yang disebut sumber promo jika tersedia. Jika tidak ada, kolom dapat memakai titik tengah dari rentang referensi **hanya jika** identitas/SKU dan satuan cocok serta nilai promo masuk akal terhadap rentang.
-- `Harga Asli dari Sumber (Rp)` hanya menandai nominal asli yang memang tercantum atau berhasil diekstrak dari teks detail penawaran; kolom ini tetap kosong untuk nilai estimasi referensi.
-- `Harga Normal Referensi (Rp)` berisi titik tengah estimasi. `Rentang Referensi Harga (Rp)` mempertahankan batas minimum–maksimum agar titik tengah tidak dianggap angka pasti.
-- `Basis Harga Asli`, `Status Referensi Harga`, `Merchant Acuan Referensi`, dan `Dasar Diskon` menandai apakah nilai berasal dari sumber promo atau hanya perbandingan estimasi.
-- Klaim diskon dari sumber yang berbeda cukup jauh dari hitungan harga dipindah ke `Klaim Diskon Sumber (Review) (%)`; nilainya tidak dibuang.
-- Penawaran bersyarat seperti beli beberapa item, promo member/pembayaran, bundling, harga di luar rentang, rentang terlalu lebar, atau indikasi beda SKU/satuan tidak dipaksakan menjadi diskon per item.
-
-## Database harga referensi
-
-### File sumber referensi manual
-
-- `data/user_product_price_ranges.csv` berisi **102 rentang harga** yang dikumpulkan pengguna. Harga ini adalah acuan perkiraan dan tidak diklaim sebagai harga pasar yang telah diverifikasi.
-- `data/user_product_price_reference_aliases.csv` berisi variasi nama katalog yang telah diaudit agar dapat dicocokkan secara presisi. Perubahan/penghapusan alias tersinkron saat skrip seeder dijalankan.
-- `engine/seed_user_price_references.py` memasukkan rentang manual dan alias yang aktif ke `data/product_price_reference.csv`. Skrip ini membangun ulang rekaman `user_supplied_estimate` dari file sumber, sekaligus mempertahankan rekaman hasil pengamatan sumber yang berdiri sendiri.
-
-### Aturan pemilihan dan pembaruan
-
-- **Merchant yang sama diprioritaskan.** Jika tidak ada referensi baru yang layak pada merchant tersebut, sistem dapat menggunakan referensi dari merchant lain atau acuan umum, dan menandainya sebagai fallback.
-- Harga normal eksplisit terbaru dari sumber yang memenuhi validasi menggantikan harga sebelumnya untuk kombinasi produk/ukuran/varian + merchant + kanal + asal rekaman yang sama. Harga naik maupun turun akan diterapkan; database bukan arsip harga harian.
-- Referensi scrape terbaru yang memenuhi syarat diprioritaskan dibanding rentang manual. Rentang manual hanya menjadi fallback dan titik tengahnya digunakan sebagai estimasi.
-- Harga hasil agregator berstatus `aggregator_only`, bukan bukti harga resmi retailer. Rentang yang diberikan pengguna berstatus `user_supplied_estimate`.
-- Harga referensi sumber otomatis maksimal berumur 30 hari untuk perhitungan. Harga lama, konflik nominal pada waktu yang sama, transaksi bersyarat, bundling, hadiah lintas-SKU, atau perbedaan ukuran/satuan tidak digunakan untuk menghitung diskon normal per unit.
-- Detail penawaran yang secara eksplisit menyebut “harga normal/asli/reguler” dapat dipakai memulihkan harga asli ketika parser awal melewatkannya, kecuali konteksnya mengindikasikan bundling atau syarat transaksi.
-
-## Sheet workbook
-
-Sheet yang terlihat di awal file: `Ringkasan`, `Promo`, `Perlu Diperiksa`, `Ringkasan Kategori`, `Peluang Harga`, dan `Kandidat Harga`. Sheet rinci `Mulai Di Sini`, `Referensi Kategori`, `Daftar Filter Produk`, `Aktif`, `Periode Pasti`, `Perlu Review`, `Ditolak (Audit)`, `Audit Kategori` (jika ada perubahan klasifikasi), `Kemungkinan Duplikat`, `Variasi Nama`, `Referensi Harga`, dan `Rentang Referensi Pengguna` tetap disimpan tetapi disembunyikan agar workbook harian ringkas.
-
-`Referensi Harga` memuat harga normal historis dan estimasi pengguna/AI; setiap estimasi diberi label non-verifikasi. `Referensi Harga Pasar` khusus untuk harga yang memiliki sumber dan bukti halaman yang dapat ditelusuri. Prediksi AI tanpa sumber tidak pernah masuk ke database harga pasar terverifikasi. `Rentang Referensi Pengguna` menampilkan acuan yang disimpan terpisah dari pengamatan harga sumber.
-
-## Prediksi Harga AI Tanpa Sumber (JSON)
-
-Kalau tujuanmu hanya membutuhkan perkiraan agar bisa membandingkan harga promo, AI tidak perlu mengembalikan URL, nama toko, bukti halaman, atau tanggal pengecekan. Setelah `Jalankan_Promo.bat` selesai, buka `hasil\Daftar_Produk_Untuk_AI.json` dan unggah ke AI bersama `hasil\PROMPT_AI_CARI_HARGA.txt`. Prompt itu meminta satu nilai estimasi per produk dan keluaran JSON ringkas:
-
-```json
-{
-  "estimates": [
-    {"product_name": "nama produk persis dari antrean", "estimated_price": 61500}
-  ]
-}
-```
-
-Simpan jawaban AI sebagai `hasil\Referensi_Harga_AI.json`, lalu jalankan:
+### Mengelola OCR
 
 ```cmd
-python engine\import_manual_price_references.py
+python engine\promo_poster_ocr.py --limit 25
+```
+
+Memproses paling banyak 25 gambar yang belum memiliki cache. Jalankan tanpa `--limit` untuk memproses semua gambar yang belum memiliki cache. Gunakan `--force` untuk memproses ulang seluruh gambar. Gambar yang sempat gagal diunduh dicoba ulang pada pelaksanaan berikutnya; gambar yang berhasil tapi tidak mengandung teks tetap di-cache agar tidak diproses terus-menerus.
+
+Setelah mengubah workbook review, gunakan `--import-reviewed-only` di atas. Perintah OCR pada launcher juga mengimpor keputusan review yang ada, termasuk ketika tidak ada gambar baru untuk diproses.
+
+## Estimasi AI lama dinonaktifkan
+
+Harga yang sebelumnya dihasilkan oleh AI atau rentang perkiraan pengguna **tidak lagi digunakan untuk mengisi harga normal atau menghitung diskon**. Sebelum paket ini dibangun, 257 rekaman estimasi lama dipindahkan ke `_internal/legacy_price_estimates_disabled.csv`; sumber rentang lama disimpan sebagai `legacy_user_product_price_ranges_disabled.csv` dan `legacy_user_product_price_reference_aliases_disabled.csv` di `_internal/`. Arsip ini hanya untuk audit/rujukan; pipeline aktif tidak memuatnya.
+
+`engine/promo_ai_price_finder.py`, antrean/prompt/JSON prediksi AI di folder hasil, dan tes khusus pencarian AI telah dihapus. `engine/seed_user_price_references.py` kini menjadi perintah aman yang hanya memberi informasi bahwa seeding estimasi dinonaktifkan.
+
+## Referensi harga pasar adalah fitur terpisah
+
+Jika ingin mengetahui apakah harga promo lebih rendah dibanding toko lain, jalankan:
+
+```cmd
+python engine\export_manual_price_search.py
+```
+
+Isi `hasil\Daftar_Cari_Harga_Manual.xlsx` berdasarkan halaman harga langsung: `Harga Referensi (Rp) - isi manual`, `Nama Sumber`, `URL Halaman Harga`, `Bukti Harga pada Halaman`, `Tanggal Cek (YYYY-MM-DD)`, dan jenis referensi. Simpan dan tutup Excel, lalu impor dengan:
+
+```cmd
+python engine\import_manual_price_references.py hasil\Daftar_Cari_Harga_Manual.xlsx
 python engine\enrich_existing_promo_catalog_multisource.py
 ```
 
-Importer menerima format baru `estimates` dan juga format lama `references` yang pernah dibuat dengan prompt sebelumnya. Field `source_url`, `source_name`, serta `evidence_text` pada JSON lama akan diabaikan; angka hanya disimpan sebagai **estimasi AI**, bukan harga yang berhasil diverifikasi dari toko. Hasil masuk ke `data\product_price_reference.csv` sebagai `user_supplied_estimate`, bukan ke database harga pasar terverifikasi. Jika estimasi sebelumnya dibuat oleh workflow AI ini, impor berikutnya dapat memperbaruinya. Rentang asumsi ±20% dibuat otomatis di belakang layar, sedangkan rentang referensi pengguna yang sudah ada dipertahankan.
+Sumber pasar harus memiliki URL dan bukti harga yang bisa ditelusuri. Median harga pasar/persentase lebih murah baru dihitung jika ada minimal dua domain independen yang cocok dengan SKU/ukuran/varian. Ini berbeda dari diskon promo yang dihitung langsung dari harga normal dan promo pada sumber yang sama.
 
-Estimasi dapat membantu memperkirakan potensi diskon, tetapi akurasinya tidak dijamin. Pipeline tetap menandai perhitungan berdasarkan estimasi sebagai keyakinan rendah; jangan menyebutnya harga normal resmi. Untuk harga pasar yang benar-benar teramati, gunakan jalur Excel manual di bawah.
+## Output utama
 
-## File teknis utama
+- `hasil/Katalog_Promo_Final.xlsx` — workbook katalog dan sheet audit.
+- `hasil/Katalog_Promo_Final.csv` — CSV lengkap dengan provenance.
+- `hasil/Katalog_Promo_Final_Ringkas.csv` — sesuai dengan sheet `Promo` yang ringkas.
+- `hasil/Review_Harga_Poster_OCR.xlsx` — antrean review kandidat dari poster.
+- `hasil/Daftar_Cari_Harga_Manual.xlsx` — antrean input harga pasar manual, jalur terpisah.
+- `_internal/` — data antara, OCR, audit kualitas, konflik, dan arsip estimasi lama.
 
-- `engine/promo_multisource_collector.py` mengumpulkan data, mencatat bukti harga/diskon/periode, log request, dan status kesehatan sumber.
-- `engine/enrich_existing_promo_catalog_multisource.py` menggabungkan data, memvalidasi harga/periode, menjalankan quality gate, mengupdate database referensi, dan menghasilkan Excel/CSV serta audit.
-- `engine/promo_price_reference.py` menangani penyimpanan harga normal historis, prioritas merchant, batas umur referensi, pencocokan, dan penandaan asal referensi.
-- `engine/export_manual_price_search.py` membuat daftar Excel, antrean produk JSON, dan prompt prediksi harga AI.
-- `engine/import_manual_price_references.py` mengimpor prediksi harga AI tanpa sumber ke database estimasi, atau referensi harga bersumber dari Excel ke database pasar.
-- `engine/seed_user_price_references.py` menyinkronkan rentang pengguna dan alias katalog ke database.
+Sheet utama Excel menyederhanakan tampilan harian: `Ringkasan`, `Promo`, `Perlu Diperiksa`, `Ringkasan Kategori`, `Peluang Harga`, dan `Kandidat Harga`. Sheet teknis tetap tersedia dalam keadaan tersembunyi untuk audit.
 
-## Prinsip validasi dan batasan
-
-- Status `Aktif` bukan bukti resmi retailer; status periode, validasi produk, dan verifikasi sumber dipisahkan.
-- Harga promo hanya diambil jika dapat ditelusuri ke teks penawaran yang relevan. Nominal QRIS/cashback, cashback pembayaran, syarat minimum belanja, judul editorial, dan nama produk kosong tidak dianggap harga SKU.
-- Diskon kampanye tidak otomatis diwariskan ke semua produk; harga referensi hanya alat pembanding dan tetap diberi label estimasi.
-- Bundling beli-gratis dan hadiah lintas-SKU tidak disamakan dengan diskon produk tunggal. Periode yang diinferensikan tetap berstatus estimasi.
-- Situs dapat mengubah struktur, membatasi request, atau mengembalikan data tidak lengkap. Verifikasi resmi langsung pada retailer dan OCR brosur tidak dijalankan otomatis.
+Pada sheet `Promo`, urutan harga adalah `Harga Normal/Acuan (Rp)`, `Harga Promo (Rp)`, `Hemat (Rp)`, `Diskon (%)`, lalu `Masa Berlaku`. Harga normal tidak diisi dari prediksi AI. Jika sumber tidak memberi harga normal dan OCR belum disetujui, diskon resmi akan tetap belum bisa dihitung; itu lebih baik daripada menampilkan tebakan sebagai fakta.
 
 ## Pengujian
 
@@ -162,32 +105,4 @@ python engine\promo_multisource_collector.py --self-test
 python -m pytest -q engine
 ```
 
-
-## Pencarian harga manual (tanpa API)
-
-Jika produk hanya memiliki harga promo dan harga normal tidak tercantum, buat daftar produk yang mudah dicari:
-
-```cmd
-python engine\export_manual_price_search.py
-```
-
-**Cara AI tanpa sumber (JSON):** setelah menjalankan pipeline, unggah `hasil\Daftar_Produk_Untuk_AI.json` ke AI dan berikan prompt dari `hasil\PROMPT_AI_CARI_HARGA.txt`. AI cukup menghasilkan `product_name` dan `estimated_price` untuk setiap produk. Simpan jawabannya sebagai `hasil\Referensi_Harga_AI.json`, lalu jalankan `python engine\import_manual_price_references.py` dan perbarui katalog dengan `python engine\enrich_existing_promo_catalog_multisource.py`. Nama produk harus dipertahankan persis agar pencocokan referensi berhasil. Estimasi AI tidak membutuhkan sumber, namun harus dibaca sebagai perkiraan berkeyakinan rendah.
-
-**Cara Excel tetap tersedia:** buka `hasil\Daftar_Cari_Harga_Manual.xlsx`, salin kolom **Kata Kunci Pencarian (copy)** ke Google/Google AI Mode. Untuk setiap sumber harga yang cocok, isi:
-- `Harga Referensi (Rp)`
-- `Nama Sumber`
-- `URL Halaman Harga` (URL halaman produk/harga, bukan URL halaman hasil pencarian)
-- `Bukti Harga pada Halaman` (teks yang terlihat pada halaman, termasuk nama/ukuran dan nominal)
-- `Tanggal Cek (YYYY-MM-DD)`
-- `Jenis Referensi (pasar/normal)`
-
-Kalau ingin membandingkan harga dari beberapa toko, duplikasi baris produk lalu isi satu sumber berbeda per baris. Jangan masukkan perkiraan tanpa bukti. Simpan dan tutup Excel, kemudian impor dengan menunjuk file Excel secara eksplisit (agar JSON AI yang mungkin tersimpan tidak diprioritaskan):
-
-```cmd
-python engine\import_manual_price_references.py hasil\Daftar_Cari_Harga_Manual.xlsx
-python engine\enrich_existing_promo_catalog_multisource.py
-```
-
-Referensi dari jalur Excel manual masuk ke `data\product_market_price_reference.csv` dan dapat dipakai oleh tab `Peluang Harga`. Satu domain akan ditandai sebagai pembanding tunggal; perbandingan median/potensi lebih murah baru dihitung jika ada minimal dua domain yang cocok. Prediksi dari jalur JSON masuk ke `data\product_price_reference.csv` sebagai estimasi berkeyakinan rendah dan tidak dihitung sebagai harga pasar terverifikasi.
-
-Daftar pencarian dibuat ulang berdasarkan produk terbaru. Jika file sudah ada, isian manual untuk produk yang sama dipertahankan. Untuk keamanan, lakukan salinan cadangan sebelum penggantian besar atau perubahan struktur kolom.
+Audit dan catatan perubahan untuk upgrade OCR ada di `AUDIT_RINGKASAN.md` dan `CATATAN_REVISI_P0.md`.

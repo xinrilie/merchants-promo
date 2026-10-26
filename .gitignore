@@ -19,5 +19,10 @@ _internal/*
 .coverage
 htmlcov/
 
-# Runtime AI price-finder cache (generated locally)
-data/ai_price_search_cache.csv
+# Local OCR review/caches and manually approved poster price overrides are runtime artifacts.
+_internal/promo_poster_ocr_cache.csv
+_internal/promo_poster_ocr_lines.csv
+_internal/promo_poster_price_candidates.csv
+_internal/promo_poster_price_overrides.csv
+/hasil/Review_Harga_Poster_OCR.xlsx
+/hasil/Daftar_Cari_Harga_Manual.xlsx

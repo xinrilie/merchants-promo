@@ -1611,7 +1611,7 @@ def main() -> None:
             "output_files": [OUT_ALL.name, OUT_ACTIVE.name, OUT_REVIEW.name, OUT_ARTICLES.name, OUT_IMAGES.name, OUT_REJECTED_CANDIDATES.name, OUT_LOG.name],
             "limitations": [
                 "Data aggregator diberi verification_status=aggregator_only; bukan verifikasi resmi retailer.",
-                "Brosur yang hanya berupa gambar dicatat di catalog_images.csv; OCR tidak dijalankan dan produk tidak ditebak dari gambar.",
+                "Poster/gambar promo dicatat di catalog_images.csv lalu diproses oleh engine/promo_poster_ocr.py; harga OCR hanya diterapkan setelah keputusan TERIMA pada workbook review.",
                 "Artikel tanpa periode eksplisit dapat berstatus active_estimated atau unknown dan perlu diperiksa.",
                 "Situs yang mengembalikan 401/403/429 tidak dicoba dilewati.",
             ],

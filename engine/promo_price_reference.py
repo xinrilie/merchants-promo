@@ -28,7 +28,7 @@ REFERENCE_FIELDS = [
     "verification_status", "region_or_channel", "campaign_title", "reference_key",
     "normal_price_low", "normal_price_high", "price_unit", "reference_note",
 ]
-ALLOWED_ORIGINS = {"observed_scrape", "manual_verified", "user_supplied_estimate"}
+ALLOWED_ORIGINS = {"observed_scrape", "manual_verified", "reviewed_poster_ocr"}
 EXPLICIT_NORMAL_PRICE_LABEL_RE = re.compile(
     r"\b(?:harga\s+(?:normal|asli|reguler|sebelum\s+promo)|normal\s+price|regular\s+price)\b",
     re.I,
@@ -247,7 +247,10 @@ def update_reference_database(
         evidence = str(source_row.get("normal_price_evidence_text") or "").strip()
         source_url = str(source_row.get("source_url") or source_row.get("source_page_url") or "").strip()
         source_name = str(source_row.get("source_name") or "").strip()
-        observed_at = str(source_row.get("scraped_at") or "").strip()
+        if str(source_row.get("price_parse_method") or "") == "poster_ocr_reviewed_manual":
+            observed_at = str(source_row.get("poster_ocr_reviewed_at") or source_row.get("scraped_at") or "").strip()
+        else:
+            observed_at = str(source_row.get("scraped_at") or "").strip()
         source_status = str(source_row.get("freshness_status") or "").casefold()
         origin_type = str(source_row.get("source_type") or "aggregator").casefold()
         flags = {piece.strip() for piece in str(source_row.get("price_quality_flag") or "").split("|") if piece.strip()}
@@ -283,8 +286,8 @@ def update_reference_database(
             "source_name": source_name,
             "source_url": source_url,
             "evidence_text": evidence,
-            "record_origin": "observed_scrape",
-            "verification_status": str(source_row.get("verification_status") or "aggregator_only"),
+            "record_origin": "reviewed_poster_ocr" if source_row.get("price_parse_method") == "poster_ocr_reviewed_manual" else "observed_scrape",
+            "verification_status": "poster_ocr_reviewed" if source_row.get("price_parse_method") == "poster_ocr_reviewed_manual" else str(source_row.get("verification_status") or "aggregator_only"),
             "region_or_channel": source_row.get("region_or_channel") or "",
             "campaign_title": source_row.get("campaign_title") or "",
         }))
@@ -391,17 +394,13 @@ def find_reference_price(
     def choose(candidates: list[dict], scope: str) -> dict | None:
         if not candidates:
             return None
-        # Prefer a recent observed price over a manual estimate, even if the estimate
-        # was entered more recently. Fall back to the user-supplied range only when
-        # no observed price in this merchant scope is fresh enough.
+        # Only source-backed observations and human-reviewed poster OCR records
+        # are loadable here. Guess-only legacy estimates are excluded by the loader.
         fresh_candidates = [
             row for row in candidates
             if (today - _parse_date(row.get("observed_at"))).days <= max_age_days
         ]
-        observed_fresh = [row for row in fresh_candidates if row.get("record_origin", "") != "user_supplied_estimate"]
-        if observed_fresh:
-            candidates = observed_fresh
-        elif fresh_candidates:
+        if fresh_candidates:
             candidates = fresh_candidates
         latest_sort = max(_timestamp_sort_key(row.get("observed_at")) for row in candidates)
         latest = [row for row in candidates if _timestamp_sort_key(row.get("observed_at")) == latest_sort]
