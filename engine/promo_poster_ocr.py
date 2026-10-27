@@ -2040,9 +2040,28 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
         # inspect nearby campaign lines, but those lines are not eligible SKU text.
         promo_context = classify_promo_context(" | ".join(part for part in (context, name_context, campaign_context) if part))
         display_context = " | ".join(dict.fromkeys(part for part in (context, name_context, campaign_context) if part))
-        raw_local_name_visible = raw_local_name if (
-            campaign_context and raw_local_name and identity_key(raw_local_name) != identity_key(local_name)
-        ) else ""
+        # Keep the cleaned hypothesis and the excluded source lines together for
+        # audit. The helper used for ``raw_local_name`` still applies SKU cleanup,
+        # so it may already equal ``local_name`` even when the OCR source contained
+        # payment/footer copy (for example, NUTRIBRA + a nearby GoPay line). Do not
+        # let that early cleanup erase the evidence from the review workbook.
+        raw_audit_parts = []
+        if raw_local_name:
+            raw_audit_parts.append(raw_local_name)
+        for line in campaign_lines:
+            source_text = str(line.get("text") or "").strip()
+            if source_text:
+                raw_audit_parts.append(source_text)
+        raw_audit_parts = list(dict.fromkeys(part for part in raw_audit_parts if part))
+        has_excluded_context = bool(campaign_lines)
+        raw_local_name_visible = (
+            " | ".join(raw_audit_parts)
+            if raw_audit_parts and (
+                has_excluded_context
+                or (raw_local_name and identity_key(raw_local_name) != identity_key(local_name))
+            )
+            else ""
+        )
         signature = json.dumps([context.casefold(), bucket_x, bucket_y, parsed["prices"]], ensure_ascii=False, sort_keys=True)
         windows.append({
             # Keep the public context field inclusive for callers/tests/review;
