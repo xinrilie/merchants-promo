@@ -49,7 +49,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REQUEST_TIMEOUT = (5, 15)
 OCR_PIPELINE_VERSION = "poster-ocr-v2.1-fast-crop"
 # Parser-only upgrades can rebuild price candidates from cached OCR boxes without re-running ONNX.
-CANDIDATE_PIPELINE_VERSION = "poster-ocr-v2.6.2-campaign-title-guard"
+CANDIDATE_PIPELINE_VERSION = "poster-ocr-campaign-cleanup"
 # Bound per-image crop inference time. Full-page OCR remains the primary pass;
 # color crops are only a rescue path for labels whose price was not read.
 MAX_COLOR_PRICE_CROPS_PER_IMAGE = 6
@@ -199,11 +199,19 @@ CAMPAIGN_STEP_PREFIX_RE = re.compile(
 )
 CAMPAIGN_SLOGAN_RE = re.compile(
     r"(?i)\b(?:peralatan\s+dapur\s+praktis|koleksi\s+kebutuhan\s+dapur\s+praktis|"
-    r"segarnya\s*juara|dipilih\s+pakai\s+hati|mudah\s+dan|produk\s+di\s*bawah\s+ini)\b"
+    r"segarnya\s*juara|dipilih\s+pakai\s+hati|mudah\s+dan|produk\s+di\s*bawah\s+ini|"
+    r"dapatkan\s+mulai\s+dari|dua\s+warna\s+sejuta\s+rasa)\b"
 )
 TEBUS_STICKER_CONDITION_TAIL_RE = re.compile(
-    r"(?i)\s+(?:dengan|dengon|pakai|menggunakan)\s+\d{1,2}\s*(?:digital\s*)?stiker\b.*$"
+    r"(?i)\s+(?:(?:dengan|dengon|pakai|menggunakan)\s+)?\d{1,2}\s*(?:digital\s*)?stiker\b.*$"
 )
+DIGITAL_STICKER_ONLY_RE = re.compile(r"(?i)^\s*\d{1,2}\s*(?:digital\s*)?stiker\s*$")
+TEBUS_CONNECTOR_ONLY_RE = re.compile(r"(?i)^\s*(?:dengan|dengon|pakai|menggunakan)\s*$")
+CAMPAIGN_CTA_FRAGMENT_RE = re.compile(r"(?i)^\s*(?:dapatkan|mulai\s+dari|dapatkan\s+mulai\s+dari)\s*$")
+# This exact OCR phrase is a small corner-mark/byline-like artifact on the
+# Super Indo poster supplied for exploration. Do not generalize this to names
+# in general; it is excluded only for the known isolated text/its OCR variants.
+POSTER_CORNER_MARK_RE = re.compile(r"(?i)^\s*carl\s+(?:schrin|schin|sehin|schirin)\s+seh[o0]\s*$")
 OCR_PAYMENT_LATER_TYPO_RE = re.compile(
     r"(?i)\b(?:pay\s*)?later\s+(?:i[xl1]|tx|1x)\s*/?\s*(?:user|usor)?\s*/?\s*(?:periode|poriode)\b|"
     r"\b(?:di\s+)?aplik(?:asi|osi)\s+(?:limit|timit|linit)\s+(?:tx|i[xl1]|1x)\b|"
@@ -1081,6 +1089,11 @@ def _strip_campaign_instruction_slogan(text: object) -> str:
     cleaned = str(text or "").strip()
     if not cleaned:
         return ""
+    # Isolated sticker counts, connector fragments, and CTA fragments often
+    # appear in separate OCR boxes. They are offer mechanics, never SKU titles.
+    if (DIGITAL_STICKER_ONLY_RE.fullmatch(cleaned) or TEBUS_CONNECTOR_ONLY_RE.fullmatch(cleaned)
+            or CAMPAIGN_CTA_FRAGMENT_RE.fullmatch(cleaned) or POSTER_CORNER_MARK_RE.fullmatch(cleaned)):
+        return ""
 
     step = CAMPAIGN_STEP_PREFIX_RE.match(cleaned)
     if step:
@@ -1125,6 +1138,9 @@ def _is_campaign_legal_line(text: object) -> bool:
     raw = str(text or "").strip()
     if not raw:
         return False
+    if (POSTER_CORNER_MARK_RE.fullmatch(raw) or DIGITAL_STICKER_ONLY_RE.fullmatch(raw)
+            or CAMPAIGN_CTA_FRAGMENT_RE.fullmatch(raw) or TEBUS_CONNECTOR_ONLY_RE.fullmatch(raw)):
+        return True
     if MEMBER_LABEL_ONLY_RE.fullmatch(raw):
         return True
     stripped_instruction = _strip_campaign_instruction_slogan(raw)
@@ -1505,6 +1521,8 @@ def _clean_local_product_line(text: str) -> str:
     cleaned = str(text or "").strip()
     if not cleaned:
         return ""
+    if POSTER_CORNER_MARK_RE.fullmatch(cleaned):
+        return ""
     cleaned = _strip_campaign_instruction_slogan(cleaned)
     if not cleaned:
         return ""
@@ -1827,7 +1845,10 @@ def _local_product_name_suggestion(
         if key and key not in seen:
             seen.add(key)
             text_parts.append(item["text"])
-    return " ".join(text_parts)
+    # OCR often splits offer mechanics across neighboring boxes, so line-level
+    # cleanup alone is insufficient. Sanitize the assembled title a second time.
+    assembled = " ".join(text_parts).strip()
+    return _clean_local_product_line(assembled) if assembled else ""
 
 
 def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]:
