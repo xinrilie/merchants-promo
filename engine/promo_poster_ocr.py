@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from difflib import SequenceMatcher
 import hashlib
 import io
 import ipaddress
@@ -43,11 +44,12 @@ LINES_CSV = ROOT / "_internal" / "promo_poster_ocr_lines.csv"
 CANDIDATES_CSV = ROOT / "_internal" / "promo_poster_price_candidates.csv"
 REVIEW_XLSX = DEFAULT_REVIEW_XLSX
 OVERRIDES_CSV = ROOT / "_internal" / "promo_poster_price_overrides.csv"
+IMAGE_SUMMARY_CSV = ROOT / "_internal" / "promo_poster_ocr_image_summary.csv"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REQUEST_TIMEOUT = (5, 15)
 OCR_PIPELINE_VERSION = "poster-ocr-v2.1-fast-crop"
 # Parser-only upgrades can rebuild price candidates from cached OCR boxes without re-running ONNX.
-CANDIDATE_PIPELINE_VERSION = "poster-ocr-v2.2-spatial-context"
+CANDIDATE_PIPELINE_VERSION = "poster-ocr-v2.4-context-quarantine"
 # Bound per-image crop inference time. Full-page OCR remains the primary pass;
 # color crops are only a rescue path for labels whose price was not read.
 MAX_COLOR_PRICE_CROPS_PER_IMAGE = 6
@@ -76,6 +78,9 @@ CANDIDATE_FIELDS = [
     "discount_validation_status", "discount_difference_pp",
     "price_pair_method", "promo_context_tags", "purchase_condition", "regional_scope",
     "member_price_candidate", "ignored_packaging_percentages", "discount_claim_source", "discount_claim_context",
+    "local_product_name_suggestion_raw", "local_product_name_suggestion_status",
+    "local_product_name_suggestion_risk", "local_product_name_quarantine_reason",
+    "payment_campaign_cue_count", "review_priority", "review_priority_reason",
 ]
 REVIEW_HEADERS = [
     "ID Kandidat", "Keputusan", "Nama Produk untuk Review", "Saran Nama Produk (OCR Lokal)",
@@ -89,6 +94,8 @@ REVIEW_HEADERS = [
     "Metode Pasangan Harga", "Konteks Promo (aturan lokal)", "Syarat Pembelian Terdeteksi",
     "Cakupan Wilayah Terdeteksi", "Kandidat Harga Member (Rp)",
     "Persentase Kemasan Diabaikan", "Sumber Klaim Diskon", "Teks Klaim Diskon yang Dipakai",
+    "Status Saran Nama OCR", "Saran Nama Ditahan (OCR)", "Alasan Nama Ditahan/Dipisahkan",
+    "Jumlah Petunjuk Promo Pembayaran", "Prioritas Review", "Alasan Prioritas Review",
 ]
 
 PRICE_CUE_RE = re.compile(r"(?i)\b(?:rp\.?|idr|harga|price|promo|normal|asli|reguler|diskon|discount|hemat|off|potongan)\b")
@@ -132,11 +139,19 @@ PACKAGING_EXTRA_RE = re.compile(
 )
 MEMBER_CUE_RE = re.compile(r"(?i)\b(?:member|kartu\s+member|member\s+alfamart|alfamart\s+member)\b")
 REGION_CUE_RE = re.compile(r"(?i)\b(?:luar\s+(?:pulau\s+)?jawa|non[- ]?jawa|jabodetabek|jawa\s+dan\s+luar\s+jawa|wilayah\s+(?:tertentu|berlaku))\b")
-PAYMENT_PROMO_RE = re.compile(r"(?i)\b(?:shopeepay|spaylater|cashback|e[- ]?wallet|voucher\s+(?:pembayaran|transaksi)|minimal\s+belanja)\b")
+PAYMENT_PROMO_RE = re.compile(
+    r"(?i)\b(?:shopee\s*pay|shopeepay|spay\s*later|spaylater|go\s*pay|gopay|ovo|dana|linkaja|qris|"
+    r"cashback|cash\s*back|e[- ]?wallet|bayar\s+pakai|pakai\s+(?:gopay|ovo|dana|qris|shopeepay)|"
+    r"voucher\s+(?:pembayaran|transaksi)|diskon\s+aplikasi|min(?:imum)?\s+belanja|"
+    r"pengguna\s+baru|per\s*periode|kuota\s+(?:terbatas|berlaku)|metode\s+pembayaran|promo\s+pembayaran)\b"
+)
 CAMPAIGN_FOOTER_RE = re.compile(
-    r"(?i)(?:diskon\s+aplikasi|shopeepay|spaylater|minimal\s+belanja|minimum\s+belanja|"
-    r"1x\s*/?\s*pengguna|per\s*periode|kuota\s+(?:terbatas|berlaku)|"
-    r"tidak\s+berlaku|promo\s+tidak\s+berlaku|tersedia\s+juga\s+di\s+alfagift)"
+    r"(?i)\b(?:diskon\s+aplikasi|shopee\s*pay|shopeepay|spay\s*later|spaylater|"
+    r"go\s*pay|gopay|ovo|dana|linkaja|qris|bayar\s+pakai|cashback|cash\s*back|"
+    r"e[- ]?wallet|voucher\s+(?:pembayaran|transaksi)|metode\s+pembayaran|promo\s+pembayaran|"
+    r"minimal\s+belanja|minimum\s+belanja|pengguna\s+baru|1x\s*/?\s*pengguna|"
+    r"per\s*periode|kuota\s+(?:terbatas|berlaku)|tidak\s+berlaku|promo\s+tidak\s+berlaku|"
+    r"tersedia\s+juga\s+di\s+alfagift)\b"
 )
 NON_SKU_PACKAGING_COPY_RE = re.compile(
     r"(?i)\b(?:sumber\s+serat|lebih\s+banyak\s+sereal|ayo\s+sarapan|"
@@ -146,6 +161,78 @@ NON_SKU_PACKAGING_COPY_RE = re.compile(
 SPECIAL_PRICE_RE = re.compile(r"(?i)\b(?:harga\s+spesial|special\s+price|harga\s+khusus)\b")
 DISCOUNT_PAIR_MAX_DIFFERENCE_PP = 3.0
 DISCOUNT_REVIEW_MATCH_TOLERANCE_PP = 1.0
+
+def _contains_payment_campaign_cue(text: object) -> bool:
+    """Detect payment/footer wording, including a small set of common OCR typos.
+
+    Exact regex cues are preferred. Fuzzy detection is intentionally limited to
+    paired payment verbs or recognisable provider names, not arbitrary single
+    product words, to avoid over-filtering SKU titles.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    # A generic campaign condition (for example "Tidak berlaku di Ambon") is
+    # not necessarily a payment cue. Keep the payment detector narrower than the
+    # footer classifier so the payment-cue metric does not overcount regional or
+    # ordinary promotion text. Generic footer lines are handled separately below.
+    if PAYMENT_PROMO_RE.search(raw):
+        return True
+    tokens = re.findall(r"[a-z0-9]+", raw.casefold())
+    def near_any(token: str, candidates: tuple[str, ...], threshold: float = 0.78) -> bool:
+        if len(token) < 4:
+            return token in candidates
+        return any(
+            SequenceMatcher(None, token, target, autojunk=False).ratio() >= threshold
+            for target in candidates if len(target) >= 4
+        )
+    has_bayar = any(near_any(t, ("bayar", "bayaran"), 0.78) for t in tokens)
+    has_pakai = any(near_any(t, ("pakai", "pake"), 0.76) for t in tokens)
+    has_application = any(near_any(t, ("aplikasi",), 0.78) for t in tokens)
+    provider_tokens = ("gopay", "shopeepay", "spaylater", "linkaja")
+    has_provider = any(near_any(t, provider_tokens, 0.76) for t in tokens)
+    if has_bayar and has_pakai:
+        return True
+    if has_application and has_provider:
+        return True
+    if has_provider and (has_bayar or has_pakai or "pay" in tokens):
+        return True
+    return False
+
+
+_PAYMENT_COPY_STRIP_RE = re.compile(
+    r"(?i)\b(?:aplikasi|bayar|bayear|bayaran|pakai|pdkai|pake|pay|payment|pembayaran|"
+    r"gopay|go\s*pay|ovo|dana|linkaja|qris|shopeepay|shopee\s*pay|spaylater|spay\s*later|"
+    r"cashback|cash\s*back|e[- ]?wallet|voucher|transaksi|pengguna|baru|minimal|minimum|belanja|"
+    r"kuota|periode|coins|khusus)\b"
+)
+
+
+def _strip_payment_campaign_copy(text: object, *, enabled: bool) -> str:
+    """Remove only known campaign/payment tokens when a local block has campaign evidence."""
+    cleaned = str(text or "").strip()
+    if not enabled or not cleaned:
+        return cleaned
+    # Remove compound phrases first so leftover numbers/words do not look like a SKU.
+    for pattern in (
+        r"(?i)\b(?:bayar|bayear|bayaran)\s+(?:pakai|pdkai|pake)(?:\s+[A-Za-z0-9]+){0,5}",
+        r"(?i)\baplikasi\s+(?:gopay|go\s*pay|ovo|dana|linkaja|qris|shopeepay|shopee\s*pay|spaylater|spay\s*later)(?:\s+[A-Za-z0-9]+){0,4}",
+        r"(?i)\b(?:voucher\s+(?:pembayaran|transaksi)|diskon\s+aplikasi|promo\s+pembayaran|metode\s+pembayaran)",
+    ):
+        cleaned = re.sub(pattern, " ", cleaned)
+    cleaned = _PAYMENT_COPY_STRIP_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"[|,:;_*~=+\-]+", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip(" .-/")
+
+
+IMAGE_SUMMARY_FIELDS = [
+    "source_name", "campaign_title", "article_url", "image_url", "ocr_status", "ocr_backend",
+    "ocr_pipeline_version", "processed_at", "line_count", "candidate_count", "candidate_price_pair_count",
+    "candidate_catalog_match_count", "candidate_local_name_suggestion_count", "candidate_local_name_visible_count",
+    "candidate_product_name_quarantined_count", "candidate_payment_context_count",
+    "candidate_discount_ambiguous_count", "candidate_purchase_condition_ambiguous_count",
+    "candidate_high_review_priority_count", "image_result_status",
+]
 
 
 def now_iso() -> str:
@@ -1035,6 +1122,9 @@ def _clean_local_product_line(text: str) -> str:
     cleaned = GROUPED_AMOUNT_RE.sub(" ", cleaned)
     cleaned = PLAIN_AMOUNT_RE.sub(" ", cleaned)
     cleaned = DISCOUNT_RE.sub(" ", cleaned)
+    # Remove a known packaging-marketing callout only when it is explicitly
+    # introduced by "Baru". Preserve ordinary quantity/package wording otherwise.
+    cleaned = re.sub(r"(?i)\bbaru\s*[!.,:-]*\s*isi\s+\d{1,2}\s+bungkus\b", " ", cleaned)
     cleaned = re.sub(
         r"(?i)\b(?:rp\.?|idr|harga\s*(?:normal|promo|asli|reguler|diskon)|normal\s*price|regular\s*price|promo\s*price|sale\s*price|price\s*after\s*discount)\b",
         " ", cleaned,
@@ -1143,9 +1233,14 @@ def _infer_stacked_price_pair(parsed: dict, lines: list[dict], width: int, heigh
 
 def _local_product_name_suggestion(
     lines: list[dict], center_x: float, center_y: float, width: int, height: int,
-    *, max_dx: float = 0.09, max_dy: float = 0.11,
+    *, max_dx: float = 0.09, max_dy: float = 0.11, allow_campaign_copy: bool = False,
 ) -> str:
-    """Suggest one local SKU name; never concatenate text from different-sized products."""
+    """Suggest a local SKU title from one spatial block.
+
+    By default, payment/campaign lines are excluded. ``allow_campaign_copy`` is
+    reserved for diagnostic extraction only; that output must never be used as
+    a SKU match without passing the separate context-quarantine step.
+    """
     generic_only_re = re.compile(
         r"(?i)\b(?:harga|normal|asli|reguler|promo|diskon|discount|hemat|off|"
         r"beli|gratis|voucher|periode|berlaku|katalog|cashback|special|spesial|"
@@ -1157,6 +1252,8 @@ def _local_product_name_suggestion(
     for line in lines:
         raw = str(line.get("text") or "").strip()
         if not raw or extract_prices(raw) or DISCOUNT_RE.search(raw) or NON_SKU_PACKAGING_COPY_RE.search(raw):
+            continue
+        if not allow_campaign_copy and (PAYMENT_PROMO_RE.search(raw) or CAMPAIGN_FOOTER_RE.search(raw)):
             continue
         lx, ly = _line_center(line)
         dx, dy = abs(lx - center_x) / max(1, width), abs(ly - center_y) / max(1, height)
@@ -1361,13 +1458,12 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
             # name, which can sit noticeably above its own price.
             name_top = max(name_top, max(above_same_column) + height * 0.015)
         name_bottom = min(float(height), cy + height * 0.01)
-        name_lines = []
+        name_region_lines = []
         for line in sorted_lines:
             lx, ly = _line_center(line)
             if name_left <= lx <= name_right and name_top <= ly <= name_bottom:
                 # The name-search region is separate from the price region. Do not
-                # reintroduce a neighbouring price via product-title context (for
-                # example Rp299.900 beside the Lotte Chocopie label).
+                # reintroduce a neighbouring price via product-title context.
                 if extract_prices(str(line.get("text") or "")):
                     continue
                 lx0, lx1 = float(line.get("x0", 0)), float(line.get("x1", 0))
@@ -1375,17 +1471,98 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
                 horizontal_overlap = max(0.0, min(lx1, name_right) - max(lx0, name_left)) / line_width
                 if horizontal_overlap < 0.65:
                     continue
-                if CAMPAIGN_FOOTER_RE.search(str(line.get("text") or "")):
-                    continue
-                name_lines.append(line)
+                name_region_lines.append(line)
+
+        # Preserve the raw title hypothesis for audit, but keep all explicit
+        # payment/campaign copy out of the SKU-name path. This handles posters
+        # where GoPay/QRIS/footer text is spatially close to a product tile.
+        raw_local_name = _local_product_name_suggestion(
+            name_region_lines, cx, cy, width, height, max_dx=0.17, max_dy=0.25,
+            allow_campaign_copy=True,
+        )
+        campaign_lines = [
+            line for line in name_region_lines
+            if _contains_payment_campaign_cue(str(line.get("text") or ""))
+            or CAMPAIGN_FOOTER_RE.search(str(line.get("text") or ""))
+        ]
+        payment_lines = [line for line in name_region_lines if _contains_payment_campaign_cue(str(line.get("text") or ""))]
+        payment_block_detected = bool(payment_lines)
+        name_lines = []
+        for line in name_region_lines:
+            raw_line_text = str(line.get("text") or "").strip()
+            if not raw_line_text:
+                continue
+            cleaned_line_text = _strip_payment_campaign_copy(raw_line_text, enabled=payment_block_detected)
+            # Payment/footer-only lines vanish; mixed lines retain the non-campaign
+            # product prefix (e.g. "AQUA Air Mineral PET 600ml Aplikasi" -> product only).
+            if not cleaned_line_text or CAMPAIGN_FOOTER_RE.fullmatch(cleaned_line_text):
+                continue
+            copy_line = dict(line)
+            copy_line["text"] = cleaned_line_text
+            name_lines.append(copy_line)
         local_name = _local_product_name_suggestion(
             name_lines, cx, cy, width, height, max_dx=0.17, max_dy=0.25
         )
+        # A joined title can still contain an OCR misspelling of payment copy;
+        # fail closed rather than let that title drive a catalogue match.
+        if local_name and _contains_payment_campaign_cue(local_name):
+            local_name = ""
+        campaign_context = " | ".join(dict.fromkeys(
+            str(line.get("text") or "").strip() for line in campaign_lines
+            if str(line.get("text") or "").strip()
+        ))
         name_context = " | ".join(str(line.get("text") or "").strip() for line in name_lines if str(line.get("text") or "").strip())
-        # Parse prices only from the tight price area. Context tags/conditions may
-        # use the tightly bounded product-title area as additional evidence.
-        promo_context = classify_promo_context(" | ".join(part for part in (context, name_context) if part))
-        display_context = " | ".join(dict.fromkeys(part for part in (context, name_context) if part))
+        payment_cue_count = len(payment_lines)
+        if payment_block_detected:
+            if local_name:
+                name_status = "DIPISAHKAN DARI TEKS KAMPANYE"
+                name_risk = "SEDANG"
+                name_quarantine_reason = (
+                    "Teks pembayaran ditemukan di area judul; saran SKU hanya memakai baris non-pembayaran. "
+                    "Periksa poster sebelum menerima nama."
+                )
+            else:
+                name_status = "DIKARANTINA — TIDAK ADA NAMA PRODUK AMAN"
+                name_risk = "TINGGI"
+                name_quarantine_reason = (
+                    "Area judul mengandung teks pembayaran dan tidak menghasilkan judul produk bersih yang cukup spesifik. "
+                    "Saran mentah tidak digunakan untuk pencocokan SKU."
+                )
+        elif campaign_lines:
+            # Generic campaign conditions (e.g. regional restrictions, period,
+            # or multibuy offer copy) should be kept out of SKU titles, but they
+            # must not be mislabeled as payment contamination or high-risk
+            # quarantine when there is no actual payment-provider cue.
+            if local_name:
+                name_status = "DIPISAHKAN DARI TEKS PROMOSI/KETENTUAN"
+                name_risk = "SEDANG"
+                name_quarantine_reason = (
+                    "Teks promosi/ketentuan ditemukan di area judul; saran SKU hanya memakai baris non-ketentuan. "
+                    "Periksa poster sebelum menerima nama."
+                )
+            else:
+                name_status = "TIDAK ADA SARAN NAMA YANG CUKUP SPESIFIK"
+                name_risk = "SEDANG"
+                name_quarantine_reason = (
+                    "Area berdekatan berisi ketentuan promosi, tetapi tidak ditemukan nama produk yang cukup spesifik. "
+                    "Nama harus diperiksa pada poster asli."
+                )
+        elif local_name:
+            name_status = "SARAN OCR LOKAL — PERLU VERIFIKASI"
+            name_risk = "RENDAH"
+            name_quarantine_reason = "Tidak ditemukan petunjuk pembayaran/kampanye pada blok nama terpilih. Nama tetap belum terverifikasi."
+        else:
+            name_status = "TIDAK ADA SARAN NAMA YANG CUKUP SPESIFIK"
+            name_risk = "SEDANG"
+            name_quarantine_reason = "Teks lokal tidak cukup spesifik untuk mengusulkan nama SKU dengan aman."
+
+        # Parse prices only from the tight price area. Context classifier may also
+        # inspect nearby campaign lines, but those lines are not eligible SKU text.
+        promo_context = classify_promo_context(" | ".join(part for part in (context, name_context, campaign_context) if part))
+        display_context = " | ".join(dict.fromkeys(part for part in (context, name_context, campaign_context) if part))
+        raw_local_name_visible = raw_local_name if (
+            campaign_context and raw_local_name and identity_key(raw_local_name) != identity_key(local_name)
+        ) else ""
         signature = json.dumps([context.casefold(), bucket_x, bucket_y, parsed["prices"]], ensure_ascii=False, sort_keys=True)
         windows.append({
             # Keep the public context field inclusive for callers/tests/review;
@@ -1399,6 +1576,13 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
             "image_width": width,
             "image_height": height,
             "local_product_name_suggestion": local_name,
+            "local_product_name_suggestion_raw": raw_local_name_visible,
+            "local_product_name_suggestion_status": name_status,
+            "local_product_name_suggestion_risk": name_risk,
+            "local_product_name_quarantine_reason": name_quarantine_reason,
+            "payment_campaign_cue_count": payment_cue_count,
+            "review_priority": "",
+            "review_priority_reason": "",
             "ocr_confidence": round(line_conf, 4),
             "price_values": parsed["prices"],
             **{k: parsed[k] for k in ("normal_price_candidate", "promo_price_candidate", "discount_claim_percent", "discount_calculated_percent", "candidate_note")},
@@ -1502,7 +1686,6 @@ def _matched_core_tokens(left: set[str], right: set[str]) -> tuple[set[str], set
     """
     matched_left = left & right
     matched_right = set(matched_left)
-    from difflib import SequenceMatcher
     fuzzy_only = not matched_left
     for a in sorted(left - matched_left):
         if len(a) < 5:
@@ -1701,6 +1884,125 @@ def _is_legacy_generated_review_note(note: str) -> bool:
     return text.startswith(legacy_prefixes)
 
 
+def _visible_local_suggestion(candidate: dict) -> str:
+    """Mirror the workbook rule that suppresses a local suggestion identical to its catalog match."""
+    local = str(candidate.get("local_product_name_suggestion") or "").strip()
+    matched = str(candidate.get("matched_product_name") or "").strip()
+    if local and matched and identity_key(local) == identity_key(matched):
+        return ""
+    return local
+
+
+def _review_priority(candidate: dict) -> tuple[str, str]:
+    """Triage review attention only; this never approves or rejects a candidate."""
+    high_reasons = []
+    medium_reasons = []
+    name_risk = str(candidate.get("local_product_name_suggestion_risk") or "").upper()
+    name_status = str(candidate.get("local_product_name_suggestion_status") or "").upper()
+    discount_source = str(candidate.get("discount_claim_source") or "").upper()
+    discount_status = str(candidate.get("discount_validation_status") or "").upper()
+    purchase = str(candidate.get("purchase_condition") or "").upper()
+    pair_method = str(candidate.get("price_pair_method") or "").upper()
+    try:
+        confidence = float(candidate.get("ocr_confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    if name_risk == "TINGGI" or name_status.startswith("DIKARANTINA"):
+        high_reasons.append("Nama OCR dikarantina karena kontaminasi teks kampanye/produk tidak cukup spesifik")
+    if discount_source == "KLAIM_DISKON_AMBIGU" or discount_status.startswith("TIDAK COCOK"):
+        high_reasons.append("Klaim diskon ambigu atau tidak sesuai dengan hasil hitung")
+    if purchase.startswith("AMBIGU"):
+        high_reasons.append("Syarat jumlah pembelian ambigu")
+    if name_risk == "SEDANG":
+        medium_reasons.append("Teks kampanye dipisahkan dari area nama produk")
+    if pair_method == "INFERENSI_GEOMETRI_SEJAJAR":
+        medium_reasons.append("Pasangan harga diinferensikan dari geometri poster")
+    if confidence < 0.90:
+        medium_reasons.append(f"Confidence OCR rendah ({confidence:.2f})")
+    if not candidate.get("normal_price_candidate") or not candidate.get("promo_price_candidate"):
+        medium_reasons.append("Pasangan harga belum lengkap")
+    if not str(candidate.get("local_product_name_suggestion") or "").strip() and not str(candidate.get("matched_product_name") or "").strip():
+        medium_reasons.append("Nama produk belum diidentifikasi")
+
+    if high_reasons:
+        return "TINGGI", "; ".join(dict.fromkeys(high_reasons + medium_reasons))
+    if medium_reasons:
+        return "SEDANG", "; ".join(dict.fromkeys(medium_reasons))
+    return "RENDAH", "Tidak ada pemicu prioritas otomatis yang terdeteksi; kandidat tetap memerlukan keputusan manusia."
+
+
+def _candidate_metrics(candidates: list[dict]) -> dict:
+    """Return consistent counts for raw candidate output and workbook-visible fields."""
+    return {
+        "candidate_count": len(candidates),
+        "candidate_price_pair_count": sum(bool(r.get("normal_price_candidate")) and bool(r.get("promo_price_candidate")) for r in candidates),
+        "candidate_product_suggestion_count": sum(bool(r.get("matched_product_name") or r.get("local_product_name_suggestion")) for r in candidates),
+        "candidate_catalog_match_count": sum(bool(r.get("matched_product_name")) for r in candidates),
+        "candidate_local_name_suggestion_count": sum(bool(r.get("local_product_name_suggestion")) for r in candidates),
+        "review_local_name_suggestion_count": sum(bool(_visible_local_suggestion(r)) for r in candidates),
+        "candidate_product_name_quarantined_count": sum(str(r.get("local_product_name_suggestion_status") or "").upper().startswith("DIKARANTINA") for r in candidates),
+        "candidate_payment_context_count": sum(int(r.get("payment_campaign_cue_count") or 0) > 0 for r in candidates),
+        "candidate_discount_ambiguous_count": sum(str(r.get("discount_claim_source") or "").upper() == "KLAIM_DISKON_AMBIGU" for r in candidates),
+        "candidate_purchase_condition_ambiguous_count": sum(str(r.get("purchase_condition") or "").upper().startswith("AMBIGU") for r in candidates),
+        "candidate_high_review_priority_count": sum(str(r.get("review_priority") or "").upper() == "TINGGI" for r in candidates),
+    }
+
+
+def _image_summary_rows(
+    images: list[dict], cache: dict[str, dict], candidates: list[dict],
+    *, included_urls: set[str] | None = None,
+) -> list[dict]:
+    """Build one auditable summary row for every indexed image, including zero-candidate images.
+
+    During a limited preview, indexed images outside the preview must not be
+    mislabeled as OCR-successful pages with zero candidates.
+    """
+    by_url: dict[str, list[dict]] = defaultdict(list)
+    for candidate in candidates:
+        by_url[str(candidate.get("image_url") or "")].append(candidate)
+    rows = []
+    for image in images:
+        url = str(image.get("image_url") or "")
+        cache_row = cache.get(url, {})
+        current = _is_current_ocr_cache(cache_row)
+        lines = _line_records(cache_row) if current else []
+        image_candidates = by_url.get(url, [])
+        if included_urls is not None and url not in included_urls:
+            result_status = "TIDAK_TERMASUK_CAKUPAN_PREVIEW"
+        elif not current:
+            result_status = "CACHE_HILANG_ATAU_KEDALUWARSA"
+        elif not lines:
+            result_status = "OCR_TANPA_TEKS"
+        elif not image_candidates:
+            result_status = "OCR_ADA_TAPI_TIDAK_ADA_KANDIDAT_HARGA"
+        else:
+            result_status = "KANDIDAT_DIHASILKAN"
+        rows.append({
+            "source_name": image.get("source_name", ""),
+            "campaign_title": image.get("campaign_title", ""),
+            "article_url": image.get("article_url", ""),
+            "image_url": url,
+            "ocr_status": cache_row.get("ocr_status", "") if current else "",
+            "ocr_backend": cache_row.get("ocr_backend", "") if current else "",
+            "ocr_pipeline_version": cache_row.get("ocr_pipeline_version", ""),
+            "processed_at": cache_row.get("processed_at", "") if current else "",
+            "line_count": len(lines),
+            "candidate_count": len(image_candidates),
+            "candidate_price_pair_count": sum(bool(c.get("normal_price_candidate")) and bool(c.get("promo_price_candidate")) for c in image_candidates),
+            "candidate_catalog_match_count": sum(bool(c.get("matched_product_name")) for c in image_candidates),
+            "candidate_local_name_suggestion_count": sum(bool(c.get("local_product_name_suggestion")) for c in image_candidates),
+            "candidate_local_name_visible_count": sum(bool(_visible_local_suggestion(c)) for c in image_candidates),
+            "candidate_product_name_quarantined_count": sum(str(c.get("local_product_name_suggestion_status") or "").upper().startswith("DIKARANTINA") for c in image_candidates),
+            "candidate_payment_context_count": sum(int(c.get("payment_campaign_cue_count") or 0) > 0 for c in image_candidates),
+            "candidate_discount_ambiguous_count": sum(str(c.get("discount_claim_source") or "").upper() == "KLAIM_DISKON_AMBIGU" for c in image_candidates),
+            "candidate_purchase_condition_ambiguous_count": sum(str(c.get("purchase_condition") or "").upper().startswith("AMBIGU") for c in image_candidates),
+            "candidate_high_review_priority_count": sum(str(c.get("review_priority") or "").upper() == "TINGGI" for c in image_candidates),
+            "image_result_status": result_status,
+        })
+    return rows
+
+
 def _build_review_note(candidate: dict, old_note: object = "") -> str:
     old = str(old_note or "").strip()
     # Keep user-authored notes but discard stale generated notes from earlier builds.
@@ -1723,6 +2025,18 @@ def _build_review_note(candidate: dict, old_note: object = "") -> str:
         base += f" Klaim diskon {claim}% terbaca, tetapi pasangan harga belum lengkap; belum dapat dibandingkan."
     else:
         base += " Klaim diskon tidak terbaca; validasi matematis tidak tersedia."
+    quarantine_reason = str(candidate.get("local_product_name_quarantine_reason") or "").strip()
+    risk_status = str(candidate.get("local_product_name_suggestion_status") or "").strip()
+    if risk_status:
+        base += f" Status saran nama: {risk_status}."
+    if quarantine_reason:
+        base += f" {quarantine_reason}"
+    priority = str(candidate.get("review_priority") or "").strip()
+    priority_reason = str(candidate.get("review_priority_reason") or "").strip()
+    if priority:
+        base += f" Prioritas review: {priority}."
+    if priority_reason:
+        base += f" Alasan prioritas: {priority_reason}."
     auto = "REVIEW OCR AUTO: " + base
     return f"{manual} | {auto}" if manual else auto
 
@@ -1769,7 +2083,7 @@ def build_candidates(
             identity_key(context), ",".join(map(str, price_values)),
         ])
         candidate_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:14].upper()
-        raw_candidates.append({
+        candidate_row = {
             "candidate_id": candidate_id,
             "candidate_pipeline_version": CANDIDATE_PIPELINE_VERSION,
             "source_name": image_record.get("source_name", ""),
@@ -1787,6 +2101,13 @@ def build_candidates(
             "matched_product_name": suggested,
             "matched_product_score": score,
             "local_product_name_suggestion": local_suggestion,
+            "local_product_name_suggestion_raw": window.get("local_product_name_suggestion_raw", ""),
+            "local_product_name_suggestion_status": window.get("local_product_name_suggestion_status", ""),
+            "local_product_name_suggestion_risk": window.get("local_product_name_suggestion_risk", ""),
+            "local_product_name_quarantine_reason": window.get("local_product_name_quarantine_reason", ""),
+            "payment_campaign_cue_count": window.get("payment_campaign_cue_count", 0),
+            "review_priority": window.get("review_priority", ""),
+            "review_priority_reason": window.get("review_priority_reason", ""),
             "match_note": match_note,
             "candidate_note": window["candidate_note"],
             "catalog_sku_candidate_1": sku_choices[0][0] if len(sku_choices) > 0 else "",
@@ -1812,7 +2133,15 @@ def build_candidates(
             "_image_width": int(window.get("image_width", 0)),
             "_image_height": int(window.get("image_height", 0)),
             "_context_lines": {str(line.get("text") or "").strip() for line in (list(window.get("lines_in_context", [])) + list(window.get("lines_in_product_context", []))) if str(line.get("text") or "").strip()},
-        })
+        }
+        priority, priority_reason = _review_priority(candidate_row)
+        candidate_row["review_priority"] = priority
+        candidate_row["review_priority_reason"] = priority_reason
+        if candidate_row.get("local_product_name_suggestion_risk") == "TINGGI":
+            candidate_row["match_note"] = (
+                str(candidate_row.get("match_note") or "") + " Saran nama mentah dikarantina; tidak digunakan untuk pencocokan SKU."
+            ).strip()
+        raw_candidates.append(candidate_row)
 
     # OCR produces one window around each price line. Adjacent windows often
     # describe the same offer, e.g. one sees normal+promo and the next sees
@@ -1887,6 +2216,36 @@ def build_candidates(
             chosen["price_pair_method"] = other["price_pair_method"]
         if not chosen.get("local_product_name_suggestion") and other.get("local_product_name_suggestion"):
             chosen["local_product_name_suggestion"] = other["local_product_name_suggestion"]
+        for field in (
+            "local_product_name_suggestion_raw", "local_product_name_suggestion_status",
+            "local_product_name_suggestion_risk", "local_product_name_quarantine_reason",
+        ):
+            if not chosen.get(field) and other.get(field):
+                chosen[field] = other[field]
+        try:
+            chosen_payment_cues = int(chosen.get("payment_campaign_cue_count") or 0)
+        except (TypeError, ValueError):
+            chosen_payment_cues = 0
+        try:
+            other_payment_cues = int(other.get("payment_campaign_cue_count") or 0)
+        except (TypeError, ValueError):
+            other_payment_cues = 0
+        chosen["payment_campaign_cue_count"] = max(chosen_payment_cues, other_payment_cues)
+        if chosen["payment_campaign_cue_count"]:
+            if chosen.get("local_product_name_suggestion"):
+                chosen["local_product_name_suggestion_status"] = "DIPISAHKAN DARI TEKS KAMPANYE"
+                chosen["local_product_name_suggestion_risk"] = "SEDANG"
+                if not chosen.get("local_product_name_quarantine_reason"):
+                    chosen["local_product_name_quarantine_reason"] = (
+                        "Teks pembayaran/kampanye ditemukan di salah satu window yang digabung; judul SKU memakai baris non-kampanye."
+                    )
+            else:
+                chosen["local_product_name_suggestion_status"] = "DIKARANTINA — TIDAK ADA NAMA PRODUK AMAN"
+                chosen["local_product_name_suggestion_risk"] = "TINGGI"
+                if not chosen.get("local_product_name_quarantine_reason"):
+                    chosen["local_product_name_quarantine_reason"] = (
+                        "Window yang digabung mengandung teks pembayaran/kampanye tanpa judul produk yang cukup spesifik."
+                    )
         if chosen.get("candidate_note") and other.get("candidate_note") and chosen.get("candidate_note") != other.get("candidate_note"):
             chosen["candidate_note"] = chosen.get("candidate_note") + " Window OCR bertumpang tindih digabung; tetap periksa poster."
         # Preserve the union of SKU dropdown candidates across overlapping windows.
@@ -1916,6 +2275,9 @@ def build_candidates(
         merged[match_index] = chosen
 
     for candidate in merged:
+        priority, priority_reason = _review_priority(candidate)
+        candidate["review_priority"] = priority
+        candidate["review_priority_reason"] = priority_reason
         candidate.pop("_bucket_x", None)
         candidate.pop("_bucket_y", None)
         candidate.pop("_center_x", None)
@@ -2082,6 +2444,28 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     for candidate in candidates:
         cid = candidate["candidate_id"]
         old = prior.get(cid, {})
+        if old:
+            old_decision = str(old.get("Keputusan") or "CEK").strip().upper()
+            old_name = str(
+                old.get("Saran Nama Produk (OCR Lokal)")
+                or old.get("Nama Produk untuk Review")
+                or old.get("Nama Produk Saran")
+                or ""
+            ).strip()
+            new_name = str(
+                candidate.get("local_product_name_suggestion")
+                or candidate.get("matched_product_name")
+                or ""
+            ).strip()
+            new_name_status = str(candidate.get("local_product_name_suggestion_status") or "").upper()
+            # Even an identical candidate ID is not enough when the new parser
+            # has quarantined its title or materially changed the product identity.
+            # Requiring CEK here prevents a past TERIMA from silently approving a
+            # reinterpreted neighbor/campaign title after a parser-only upgrade.
+            identity_changed = bool(old_name and new_name and not _review_product_context_compatible(old, candidate))
+            newly_quarantined = new_name_status.startswith("DIKARANTINA") and old_decision == "TERIMA"
+            if identity_changed or newly_quarantined:
+                old = {}
         if not old:
             fingerprint = _review_pair_fingerprint(candidate)
             matches = old_fp_rows.get(fingerprint, []) if fingerprint else []
@@ -2151,6 +2535,12 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
             candidate.get("purchase_condition", ""), candidate.get("regional_scope", ""),
             candidate.get("member_price_candidate") or "", candidate.get("ignored_packaging_percentages", ""),
             candidate.get("discount_claim_source", ""), candidate.get("discount_claim_context", ""),
+            candidate.get("local_product_name_suggestion_status", ""),
+            candidate.get("local_product_name_suggestion_raw", ""),
+            candidate.get("local_product_name_quarantine_reason", ""),
+            candidate.get("payment_campaign_cue_count", 0),
+            candidate.get("review_priority", ""),
+            candidate.get("review_priority_reason", ""),
         ]
         ws.append(row_values)
         # Make both provenance URLs clickable in Excel so reviewers can open the
@@ -2166,7 +2556,7 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
     ws.row_dimensions[1].height = 42
-    widths = [15, 13, 38, 38, 22, 22, 20, 20, 16, 16, 45, 14, 76, 22, 48, 60, 70, 88, 38, 38, 38, 32, 13, 13, 13, 32, 20, 28, 58, 34, 32, 22, 58, 30, 58]
+    widths = [15, 13, 38, 38, 22, 22, 20, 20, 16, 16, 45, 14, 76, 22, 48, 60, 70, 88, 38, 38, 38, 32, 13, 13, 13, 32, 20, 28, 58, 34, 32, 22, 58, 30, 58, 32, 40, 68, 22, 18, 70]
     for idx, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(idx)].width = width
     for cell in ws[1]:
@@ -2186,7 +2576,7 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
         # Yellow = editable review input; grey = OCR-generated candidate only.
         for idx in (2, 3, 5, 6, 18):
             row[idx - 1].fill = PatternFill("solid", fgColor="FFF2CC")
-        for idx in (4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35):
+        for idx in range(4, len(REVIEW_HEADERS) + 1):
             row[idx - 1].fill = PatternFill("solid", fgColor="E7E6E6")
         status_value = str(row[25].value or "")
         if status_value.startswith("TIDAK COCOK"):
@@ -2195,6 +2585,12 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
             row[25].fill = PatternFill("solid", fgColor="D9EAD3")
         elif status_value == "BELUM BISA DIBANDINGKAN":
             row[25].fill = PatternFill("solid", fgColor="FCE5CD")
+        priority_col = REVIEW_HEADERS.index("Prioritas Review")
+        priority_value = str(row[priority_col].value or "").upper()
+        if priority_value == "TINGGI":
+            row[priority_col].fill = PatternFill("solid", fgColor="F4CCCC")
+        elif priority_value == "SEDANG":
+            row[priority_col].fill = PatternFill("solid", fgColor="FCE5CD")
     ws["B1"].comment = Comment(
         "CEK = belum disetujui. Hanya TERIMA yang mengaktifkan nilai pada kolom review; TOLAK menutup kandidat.",
         "Merchants Promo",
@@ -2205,6 +2601,18 @@ def make_review_workbook(candidates: list[dict], path: Path = REVIEW_XLSX, prior
     )
     ws["D1"].comment = Comment(
         "Saran dari teks OCR lokal pada area harga. Ini bukan kecocokan katalog terverifikasi; jangan mengandalkannya tanpa melihat poster.",
+        "Merchants Promo",
+    )
+    ws.cell(1, REVIEW_HEADERS.index("Status Saran Nama OCR") + 1).comment = Comment(
+        "Status penyaring saran nama secara heuristik. Ini alat triase, bukan penilaian otomatis bahwa produk benar/salah.",
+        "Merchants Promo",
+    )
+    ws.cell(1, REVIEW_HEADERS.index("Saran Nama Ditahan (OCR)") + 1).comment = Comment(
+        "Hipotesis nama mentah yang ditahan karena terkontaminasi teks pembayaran/kampanye; bukan nama SKU yang disetujui.",
+        "Merchants Promo",
+    )
+    ws.cell(1, REVIEW_HEADERS.index("Prioritas Review") + 1).comment = Comment(
+        "Prioritas hanya untuk mengurutkan pemeriksaan manusia. Semua kandidat tetap harus diperiksa dan keputusan awal tetap CEK.",
         "Merchants Promo",
     )
     ws["E1"].comment = Comment(
@@ -2347,6 +2755,7 @@ def rebuild_review_from_cache(limit: int = 0) -> dict:
     review_path = REVIEW_XLSX
     lines_path = LINES_CSV
     candidates_path = CANDIDATES_CSV
+    image_summary_path = IMAGE_SUMMARY_CSV
 
     # A limited rebuild is always a sandbox preview based only on valid current-version OCR caches.
     # A full rebuild is allowed only when every indexed image has a valid result from this OCR version.
@@ -2374,6 +2783,7 @@ def rebuild_review_from_cache(limit: int = 0) -> dict:
         review_path = REVIEW_XLSX.with_name("Review_Harga_Poster_OCR_UjiTerbaru.xlsx")
         lines_path = LINES_CSV.with_name("promo_poster_ocr_lines_review_latest.csv")
         candidates_path = CANDIDATES_CSV.with_name("promo_poster_price_candidates_review_latest.csv")
+        image_summary_path = IMAGE_SUMMARY_CSV.with_name("promo_poster_ocr_image_summary_review_latest.csv")
         print(
             f"Mode review uji: memakai {len(images)} cache OCR valid terbaru; "
             "tidak mengunduh/OCR ulang dan tidak menimpa review utama.", flush=True
@@ -2423,6 +2833,12 @@ def rebuild_review_from_cache(limit: int = 0) -> dict:
     candidate_map = {candidate["candidate_id"]: candidate for candidate in candidates}
     candidates = sorted(candidate_map.values(), key=lambda row: (row.get("source_name", ""), row.get("campaign_title", ""), row.get("candidate_id", "")))
     _write_csv(candidates_path, candidates, CANDIDATE_FIELDS)
+    included_urls = {str(record.get("image_url") or "") for record in images}
+    _write_csv(
+        image_summary_path,
+        _image_summary_rows(all_images, old_cache, candidates, included_urls=included_urls),
+        IMAGE_SUMMARY_FIELDS,
+    )
     prior = _load_old_review(review_path)
     make_review_workbook(candidates, review_path, prior)
     if limit <= 0:
@@ -2436,13 +2852,10 @@ def rebuild_review_from_cache(limit: int = 0) -> dict:
         "cache_missing_or_stale_images": missing_or_stale_count,
         "cache_coverage_percent": round(100.0 * current_cache_count / max(1, len(all_images)), 1),
         "ocr_ok": 0, "ocr_failed_or_empty": 0, "ocr_backend": "cache-reuse",
-        "line_count": len(line_rows), "candidate_count": len(candidates),
-        "candidate_price_pair_count": sum(bool(r.get("normal_price_candidate")) and bool(r.get("promo_price_candidate")) for r in candidates),
-        "candidate_product_suggestion_count": sum(bool(r.get("matched_product_name") or r.get("local_product_name_suggestion")) for r in candidates),
-        "candidate_catalog_match_count": sum(bool(r.get("matched_product_name")) for r in candidates),
-        "candidate_local_name_suggestion_count": sum(bool(r.get("local_product_name_suggestion")) for r in candidates),
+        "line_count": len(line_rows),
+        **_candidate_metrics(candidates),
         "cache_csv": str(CACHE_CSV), "lines_csv": str(lines_path), "candidate_csv": str(candidates_path),
-        "review_workbook": str(review_path),
+        "image_summary_csv": str(image_summary_path), "review_workbook": str(review_path),
         "approved_override_count": import_stats.get("active_overrides", 0),
     }
     return stats
@@ -2487,6 +2900,7 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
             "cache_missing_or_stale_images": cache_missing_or_stale,
             "cache_coverage_percent": round(100.0 * cache_usable / max(1, len(images)), 1),
             "ocr_ok": 0, "ocr_failed": 0, "candidate_count": 0,
+            "cache_csv": str(CACHE_CSV), "image_summary_csv": str(IMAGE_SUMMARY_CSV),
             "approved_override_count": import_stats.get("active_overrides", 0),
         }
 
@@ -2555,6 +2969,7 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
         review_path = REVIEW_XLSX
         lines_path = LINES_CSV
         candidates_path = CANDIDATES_CSV
+        image_summary_path = IMAGE_SUMMARY_CSV
         print("Cakupan cache 100%; membangun review utama dari seluruh indeks.", flush=True)
     else:
         review_images = [
@@ -2564,6 +2979,7 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
         review_path = REVIEW_XLSX.with_name("Review_Harga_Poster_OCR_UjiTerbaru.xlsx")
         lines_path = LINES_CSV.with_name("promo_poster_ocr_lines_review_latest.csv")
         candidates_path = CANDIDATES_CSV.with_name("promo_poster_price_candidates_review_latest.csv")
+        image_summary_path = IMAGE_SUMMARY_CSV.with_name("promo_poster_ocr_image_summary_review_latest.csv")
         coverage_pct = 100.0 * cache_usable / max(1, len(images))
         print(
             f"Cakupan cache belum lengkap ({cache_usable}/{len(images)}; {coverage_pct:.1f}%). "
@@ -2602,6 +3018,12 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
         candidate_map[candidate["candidate_id"]] = candidate
     candidates = sorted(candidate_map.values(), key=lambda row: (row.get("source_name", ""), row.get("campaign_title", ""), row.get("candidate_id", "")))
     _write_csv(candidates_path, candidates, CANDIDATE_FIELDS)
+    included_urls = {str(record.get("image_url") or "") for record in review_images}
+    _write_csv(
+        image_summary_path,
+        _image_summary_rows(images, old_cache, candidates, included_urls=included_urls),
+        IMAGE_SUMMARY_FIELDS,
+    )
     prior = _load_old_review(review_path)
     make_review_workbook(candidates, review_path, prior)
     if review_is_complete:
@@ -2621,14 +3043,11 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
         "cache_missing_or_stale_images": cache_missing_or_stale,
         "cache_coverage_percent": round(100.0 * cache_usable / max(1, len(images)), 1),
         "ocr_ok": ok, "ocr_failed_or_empty": failed, "ocr_backend": backend,
-        "line_count": len(line_rows), "candidate_count": len(candidates),
-        "candidate_price_pair_count": sum(bool(r.get("normal_price_candidate")) and bool(r.get("promo_price_candidate")) for r in candidates),
-        "candidate_product_suggestion_count": sum(bool(r.get("matched_product_name") or r.get("local_product_name_suggestion")) for r in candidates),
-        "candidate_catalog_match_count": sum(bool(r.get("matched_product_name")) for r in candidates),
-        "candidate_local_name_suggestion_count": sum(bool(r.get("local_product_name_suggestion")) for r in candidates),
+        "line_count": len(line_rows),
+        **_candidate_metrics(candidates),
         "approved_override_count": import_stats.get("active_overrides", 0),
         "cache_csv": str(CACHE_CSV), "lines_csv": str(lines_path), "candidate_csv": str(candidates_path),
-        "review_workbook": str(review_path),
+        "image_summary_csv": str(image_summary_path), "review_workbook": str(review_path),
     }
 
 
