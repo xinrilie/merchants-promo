@@ -49,7 +49,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REQUEST_TIMEOUT = (5, 15)
 OCR_PIPELINE_VERSION = "poster-ocr-v2.1-fast-crop"
 # Parser-only upgrades can rebuild price candidates from cached OCR boxes without re-running ONNX.
-CANDIDATE_PIPELINE_VERSION = "poster-ocr-v2.6-offer-context"
+CANDIDATE_PIPELINE_VERSION = "poster-ocr-v2.6.1-context-precision"
 # Bound per-image crop inference time. Full-page OCR remains the primary pass;
 # color crops are only a rescue path for labels whose price was not read.
 MAX_COLOR_PRICE_CROPS_PER_IMAGE = 6
@@ -142,6 +142,19 @@ TEBUS_MURAH_GENERIC_RE = re.compile(
 MEMBER_PRICE_LABEL_RE = re.compile(
     r"(?i)\b(?:khusus\s+member|harga\s+(?:khusus\s+)?member|member\s+price)\b"
 )
+# A member label (sometimes merged with a packaging size by OCR) is context,
+# not a product name by itself. Keep the suffix recognizer separate so valid
+# titles such as "Sunlight 750 ml Khusus Member" can retain their product part.
+MEMBER_LABEL_ONLY_RE = re.compile(
+    r"(?i)^\s*(?:(?:harga\s+)?khusus\s+member|member)"
+    r"(?:\s+(?:my\s+super\s+indo|super\s+indo|alfamart|alfamidi|indomaret))?"
+    r"(?:\s+\d+(?:[.,]\d+)?\s*(?:g|gr|gram|ml|kg|mg|l|liter|pcs?|pc|buah))?"
+    r"\s*(?:rp\.?)?\s*$"
+)
+MEMBER_LABEL_SUFFIX_RE = re.compile(
+    r"(?i)\b(?:harga\s+(?:khusus\s+)?member|khusus\s+member"
+    r"(?:\s+(?:my\s+super\s+indo|super\s+indo|alfamart|alfamidi|indomaret))?|member\s+price)\b.*$"
+)
 REGION_LIST_MARKER_RE = re.compile(r"(?i)\b(?:p\.?\s*jowo|p\.?\s*jawa|kec\.?|kecamatan)\b")
 REGION_TRAILER_RE = re.compile(r"(?i)\s*[\(\[]?\s*kec(?:\.|amatan)?\s+[A-Za-z]{2,}[\)\]]?\s*$")
 # Purchase quantity may be stated in the offer title ("BELI 5 INDOMIE") or
@@ -181,14 +194,16 @@ CAMPAIGN_LEGAL_RE = re.compile(
 )
 REGIONAL_RESTRICTION_RE = re.compile(r"(?i)\b(?:tidak\s+berlaku\s+di|berlaku\s+(?:khusus\s+)?di|khusus\s+wilayah|wilayah\s+tertentu)\b")
 PAYMENT_PROMO_RE = re.compile(
-    r"(?i)\b(?:shopee\s*pay|shopeepay|spay\s*later|spaylater|go\s*pay|gopay|ovo|dana|linkaja|qris|"
+    r"(?i)\b(?:shopee\s*pay|shopeepay|spay\s*later|spaylater|go\s*pay|gopay|indodana|pay\s*later|paylater|ovo|dana|linkaja|qris|"
+    r"limit\s*(?:\d{1,2}\s*)?x\s*/?\s*user(?:\s*/?\s*periode)?|\d{1,2}x\s*/?\s*user(?:\s*/?\s*periode)?|"
     r"cashback|cash\s*back|e[- ]?wallet|bayar\s+pakai|pakai\s+(?:gopay|ovo|dana|qris|shopeepay)|"
     r"voucher\s+(?:pembayaran|transaksi)|diskon\s+aplikasi|min(?:imum)?\s+belanja|"
     r"pengguna\s+baru|per\s*periode|kuota\s+(?:terbatas|berlaku)|metode\s+pembayaran|promo\s+pembayaran)\b"
 )
 CAMPAIGN_FOOTER_RE = re.compile(
     r"(?i)\b(?:diskon\s+aplikasi|shopee\s*pay|shopeepay|spay\s*later|spaylater|"
-    r"go\s*pay|gopay|ovo|dana|linkaja|qris|bayar\s+pakai|cashback|cash\s*back|"
+    r"go\s*pay|gopay|indodana|pay\s*later|paylater|limit\s*(?:\d{1,2}\s*)?x\s*/?\s*user(?:\s*/?\s*periode)?|"
+    r"\d{1,2}x\s*/?\s*user(?:\s*/?\s*periode)?|ovo|dana|linkaja|qris|bayar\s+pakai|cashback|cash\s*back|"
     r"e[- ]?wallet|voucher\s+(?:pembayaran|transaksi)|metode\s+pembayaran|promo\s+pembayaran|"
     r"minimal\s+belanja|minimum\s+belanja|pengguna\s+baru|1x\s*/?\s*pengguna|"
     r"per\s*periode|kuota\s+(?:terbatas|berlaku)|tidak\s+berlaku|promo\s+tidak\s+berlaku|"
@@ -245,27 +260,40 @@ def _contains_payment_campaign_cue(text: object) -> bool:
 
 _PAYMENT_COPY_STRIP_RE = re.compile(
     r"(?i)\b(?:aplikasi|bayar|bayear|bayaran|pakai|pdkai|pake|pay|payment|pembayaran|"
-    r"gopay|go\s*pay|ovo|dana|linkaja|qris|shopeepay|shopee\s*pay|spaylater|spay\s*later|"
-    r"cashback|cash\s*back|e[- ]?wallet|voucher|transaksi|pengguna|baru|minimal|minimum|belanja|"
+    r"gopay|go\s*pay|indodana|paylater|pay\s*later|ovo|dana|linkaja|qris|shopeepay|shopee\s*pay|spaylater|spay\s*later|"
+    r"cashback|cash\s*back|e[- ]?wallet|voucher|transaksi|pengguna|user|limit|baru|minimal|minimum|belanja|"
     r"kuota|periode|coins|khusus)\b"
 )
 
 
 def _strip_payment_campaign_copy(text: object, *, enabled: bool) -> str:
-    """Remove only known campaign/payment tokens when a local block has campaign evidence."""
+    """Remove known payment/footer wording only when its context is already established.
+
+    A product prefix remains available when a line contains both a real title and
+    payment terms. Context-only lines such as "Indodana PayLater Limit x/user/periode"
+    collapse to an empty string instead of becoming a SKU suggestion.
+    """
     cleaned = str(text or "").strip()
     if not enabled or not cleaned:
         return cleaned
-    # Remove compound phrases first so leftover numbers/words do not look like a SKU.
+    # Compound phrases first; the OCR frequently separates these into a title plus
+    # provider/limit suffix on the same line.
     for pattern in (
+        r"(?i)\b(?:khusus\s+)?(?:indodana\s+)?(?:pay\s*later|paylater)(?:\s+limit\s*(?:\d{1,2}\s*)?x\s*/?\s*user(?:\s*/?\s*periode)?)?",
+        r"(?i)\b(?:pay\s*)?later\s+limit\s*(?:\d{1,2}\s*)?x\s*/?\s*user(?:\s*/?\s*periode)?",
+        r"(?i)\blimit\s*(?:\d{1,2}\s*)?x\s*/?\s*user(?:\s*/?\s*periode)?",
+        r"(?i)\b\d{1,2}x\s*/?\s*user(?:\s*/?\s*periode)?",
         r"(?i)\b(?:bayar|bayear|bayaran)\s+(?:pakai|pdkai|pake)(?:\s+[A-Za-z0-9]+){0,5}",
-        r"(?i)\baplikasi\s+(?:gopay|go\s*pay|ovo|dana|linkaja|qris|shopeepay|shopee\s*pay|spaylater|spay\s*later)(?:\s+[A-Za-z0-9]+){0,4}",
+        r"(?i)\baplikasi\s+(?:gopay|go\s*pay|indodana|pay\s*later|paylater|ovo|dana|linkaja|qris|shopeepay|shopee\s*pay|spaylater|spay\s*later)(?:\s+[A-Za-z0-9]+){0,4}",
         r"(?i)\b(?:voucher\s+(?:pembayaran|transaksi)|diskon\s+aplikasi|promo\s+pembayaran|metode\s+pembayaran)",
     ):
         cleaned = re.sub(pattern, " ", cleaned)
+    # Remove the simple remainder tokens only after compound campaign phrases
+    # have been removed; this avoids leaving "Limit x/user" as a fake product.
     cleaned = _PAYMENT_COPY_STRIP_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"(?i)\b(?:x\s*/?\s*user(?:\s*/?\s*periode)?|1x\s*/?\s*user(?:\s*/?\s*periode)?)\b", " ", cleaned)
     cleaned = re.sub(r"[|,:;_*~=+\-]+", " ", cleaned)
-    return re.sub(r"\s+", " ", cleaned).strip(" .-/")
+    return re.sub(r"\s+", " ", cleaned).strip(" .-/•●▪◦")
 
 
 IMAGE_SUMMARY_FIELDS = [
@@ -893,16 +921,36 @@ def _extract_purchase_condition(text: str) -> str:
         # words into part of the SKU title later in _clean_local_product_line.
         tebus = TEBUS_MURAH_OFFER_RE.search(segment)
         if tebus:
-            # OCR often emits "TEBUS MURAH", "dengon", and "5 DIGITALSTIKER"
-            # as three adjacent boxes. Join a short look-ahead only for the
-            # already-detected offer marker so we do not scan arbitrary copy.
+            # OCR can split a specific condition into "TEBUS MURAH | dengon | 5 DIGITALSTIKER".
+            # Inspect a short local look-ahead, but do not attach a generic campaign heading
+            # ("Bisa Tebus Murah Produk di bawah ini") to every product candidate.
             local_offer_text = " ".join(segments[segment_index:segment_index + 4])
-            tebus_local = TEBUS_MURAH_OFFER_RE.search(local_offer_text) or tebus
-            phrase = re.sub(r"\s+", " ", tebus_local.group(0)).strip()
-            phrase = re.sub(r"(?i)\bdengon\b", "dengan", phrase)
-            phrase = re.sub(r"(?i)digitalstiker", "digital stiker", phrase)
-            if phrase:
-                offer_phrases.append(phrase[:100].capitalize())
+            explicit_sticker_condition = bool(re.search(
+                r"(?i)\b(?:dengan|dengon|pakai|menggunakan)\s+\d{1,2}\s*(?:digital\s*)?stiker\b",
+                local_offer_text,
+            ))
+            prefix = segment[:tebus.start()].strip(" ,;/|:-")
+            prefix_tokens = re.findall(r"[A-Za-z]{2,}", prefix)
+            prefix_is_product_like = bool(prefix_tokens) and identity_key(prefix) not in {
+                "", "bisa", "produk", "produk dibawah ini", "harga", "promo", "pwp"
+            } and not re.search(
+                r"(?i)\b(?:dapat|tambahan|potongan|belanja|minimal|minimum|syarat|ketentuan|berlaku|voucher|harga|promo|tebus|stiker|digital)\b",
+                prefix,
+            )
+            generic_heading = bool(TEBUS_MURAH_GENERIC_RE.search(local_offer_text)) and not prefix_is_product_like
+            bare_tebus = not explicit_sticker_condition and not prefix_is_product_like and not re.search(
+                r"(?i)\b(?:beli|buy)\s*\d{1,2}\b", local_offer_text
+            )
+            if generic_heading or bare_tebus:
+                tebus_local = None
+            else:
+                tebus_local = TEBUS_MURAH_OFFER_RE.search(local_offer_text) or tebus
+            if tebus_local and explicit_sticker_condition:
+                phrase = re.sub(r"\s+", " ", tebus_local.group(0)).strip()
+                phrase = re.sub(r"(?i)\bdengon\b", "dengan", phrase)
+                phrase = re.sub(r"(?i)digitalstiker", "digital stiker", phrase)
+                if phrase:
+                    offer_phrases.append(phrase[:100].capitalize())
         # Explicit multi-buy/gift terms are more specific than a bare quantity.
         multi = MULTIBUY_OFFER_RE.search(segment)
         if multi:
@@ -986,6 +1034,8 @@ def _is_campaign_legal_line(text: object) -> bool:
     raw = str(text or "").strip()
     if not raw:
         return False
+    if MEMBER_LABEL_ONLY_RE.fullmatch(raw):
+        return True
     tebus = TEBUS_MURAH_OFFER_RE.search(raw)
     if tebus:
         prefix = raw[:tebus.start()].strip(" ,;/|:-")
@@ -1357,8 +1407,16 @@ def _clean_local_product_line(text: str) -> str:
     cleaned = str(text or "").strip()
     if not cleaned:
         return ""
-    if _is_campaign_legal_line(cleaned):
+    if _is_campaign_legal_line(cleaned) or MEMBER_LABEL_ONLY_RE.fullmatch(cleaned):
         return ""
+
+    # When a mixed OCR line includes a recognizable payment cue, retain only a
+    # product-like remainder. The call is context-gated to avoid stripping a
+    # genuine title just because it happens to contain a common word.
+    if _contains_payment_campaign_cue(cleaned):
+        cleaned = _strip_payment_campaign_copy(cleaned, enabled=True)
+        if not cleaned:
+            return ""
 
     # Remove the tebus-murah mechanism from the product title while preserving
     # a real product name on either side. Examples:
@@ -1413,6 +1471,18 @@ def _clean_local_product_line(text: str) -> str:
         r"(?i)\b(?:setiap\s+belanja(?:\s+produk)?|ada\s+yang\s+baru(?:\s+nih)?|buat\s+kamu|potongan\s+harga|promo\s+eksklusif|min(?:imum)?\s+belanja|berlaku\s+kelipatan)\b",
         " ", cleaned,
     )
+    member_suffix = MEMBER_LABEL_SUFFIX_RE.search(cleaned)
+    if member_suffix:
+        prefix = cleaned[:member_suffix.start()].strip(" ,;/|:-")
+        alpha_words = re.findall(r"[A-Za-z]{2,}", prefix)
+        has_package_size = bool(product_name_size_signature(prefix))
+        # A single brand/title plus its pack size can be a valid title, e.g.
+        # "Sunlight 750 ml Khusus Member". A bare member label is already
+        # handled by MEMBER_LABEL_ONLY_RE above.
+        if len(alpha_words) >= 2 or (len(alpha_words) >= 1 and has_package_size):
+            cleaned = prefix
+        else:
+            return ""
     # Keep a product prefix where the same OCR line continues into footer copy.
     # Standalone legal lines have already returned empty above.
     suffix_match = re.search(
@@ -1430,7 +1500,8 @@ def _clean_local_product_line(text: str) -> str:
     cleaned = _strip_region_list_prefix(cleaned)
     cleaned = _strip_regional_restriction(cleaned)
     cleaned = re.sub(r"[|,:;_*~=+\-]+", " ", cleaned)
-    return re.sub(r"\s+", " ", cleaned).strip(" .-/")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-/•●▪◦")
+    return cleaned if re.search(r"[A-Za-z]{2,}", cleaned) else ""
 
 
 def _horizontal_overlap_ratio(a: dict, b: dict) -> float:
@@ -1780,6 +1851,7 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
             if _contains_payment_campaign_cue(str(line.get("text") or ""))
             or CAMPAIGN_FOOTER_RE.search(str(line.get("text") or ""))
             or _is_campaign_legal_line(str(line.get("text") or ""))
+            or MEMBER_LABEL_ONLY_RE.fullmatch(str(line.get("text") or "").strip())
             or _is_regional_pricing_segment(str(line.get("text") or ""))
         ]
         payment_lines = [line for line in name_region_lines if _contains_payment_campaign_cue(str(line.get("text") or ""))]

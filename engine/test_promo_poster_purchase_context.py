@@ -133,3 +133,31 @@ def test_image_summary_reports_raw_names_separately_from_hard_quarantine(monkeyp
     assert row["candidate_member_price_count"] == 1
     assert row["candidate_regional_price_context_count"] == 1
     assert row["candidate_tebus_murah_count"] == 1
+
+
+def test_member_only_labels_are_not_product_name_suggestions():
+    assert ocr._clean_local_product_line("KHUSUS MEMBER") == ""
+    assert ocr._clean_local_product_line("Khusus Member 750gRp") == ""
+    assert ocr._clean_local_product_line("KHUSUS MEMBER MY SUPER INDO") == ""
+
+
+def test_member_label_suffix_preserves_a_real_product_title():
+    assert ocr._clean_local_product_line("Product 350g Khusus Member") == "Product 350g"
+    assert ocr._clean_local_product_line("Sunlight 750 ml Khusus Member") == "Sunlight 750 ml"
+
+
+def test_paylater_limit_copy_is_quarantined_but_product_prefix_is_preserved():
+    standalone = "Khusus Indodana PayLater Limit x/user/periode"
+    assert ocr._contains_payment_campaign_cue(standalone)
+    assert ocr._clean_local_product_line(standalone) == ""
+    assert ocr._contains_payment_campaign_cue("• / Later Limit 1x/user")
+    assert ocr._clean_local_product_line("• / Later Limit 1x/user") == ""
+    mixed = "AQUA Air Mnrl PET 600ml Aplikasi GoPay Bayar Pakai Pay"
+    assert ocr._clean_local_product_line(mixed) == "AQUA Air Mnrl PET 600ml"
+
+
+def test_bare_or_generic_tebus_murah_is_not_broadcast_as_product_condition():
+    assert not ocr.classify_promo_context("Bisa Tebus Murah Produk dibawah ini")["purchase_condition"]
+    assert not ocr.classify_promo_context("TEBUS MURAH")["purchase_condition"]
+    result = ocr.classify_promo_context("TEBUS MURAH | dengon | 5 DIGITALSTIKER")
+    assert result["purchase_condition"] == "Tebus murah dengan 5 digital stiker"
