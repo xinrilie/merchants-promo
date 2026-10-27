@@ -2544,12 +2544,39 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
     # Write cache only for current images and previous cached entries; retaining prior
     # rows allows OCR to be incremental across runs even when an article disappears.
     _write_csv(CACHE_CSV, [old_cache[k] for k in sorted(old_cache)], CACHE_FIELDS)
-    cache_rows = [old_cache.get(str(r.get("image_url") or ""), {}) for r in images]
+    cache_usable, cache_missing_or_stale = _cache_coverage(images, old_cache)
+    review_is_complete = cache_missing_or_stale == 0
+
+    # Critical safety gate: an incremental OCR run must not replace the main
+    # review workbook or import decisions when only part of the image index has
+    # a current-version cache. Build a separate preview from current valid caches.
+    if review_is_complete:
+        review_images = images
+        review_path = REVIEW_XLSX
+        lines_path = LINES_CSV
+        candidates_path = CANDIDATES_CSV
+        print("Cakupan cache 100%; membangun review utama dari seluruh indeks.", flush=True)
+    else:
+        review_images = [
+            record for record in images
+            if _is_current_ocr_cache(old_cache.get(str(record.get("image_url") or ""), {}))
+        ]
+        review_path = REVIEW_XLSX.with_name("Review_Harga_Poster_OCR_UjiTerbaru.xlsx")
+        lines_path = LINES_CSV.with_name("promo_poster_ocr_lines_review_latest.csv")
+        candidates_path = CANDIDATES_CSV.with_name("promo_poster_price_candidates_review_latest.csv")
+        coverage_pct = 100.0 * cache_usable / max(1, len(images))
+        print(
+            f"Cakupan cache belum lengkap ({cache_usable}/{len(images)}; {coverage_pct:.1f}%). "
+            "Review utama dan override tidak disentuh; hasil disimpan sebagai preview terpisah.",
+            flush=True,
+        )
+
     line_rows = []
     candidates = []
     page_products = _load_page_products()
     catalog_products = _load_catalog_products()
-    for image_record, cache_row in zip(images, cache_rows):
+    for image_record in review_images:
+        cache_row = old_cache.get(str(image_record.get("image_url") or ""), {})
         lines = _line_records(cache_row)
         width = int(cache_row.get("image_width") or 0)
         height = int(cache_row.get("image_height") or 0)
@@ -2568,17 +2595,20 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
         fallback_rows = _catalog_fallback_for_campaign(catalog_products, str(image_record.get("campaign_title") or ""))
         candidates.extend(build_candidates(image_record, lines, width, height, product_rows, fallback_rows))
 
-    _write_csv(LINES_CSV, line_rows, LINE_FIELDS)
+    _write_csv(lines_path, line_rows, LINE_FIELDS)
     # De-duplicate candidates when one image has repeated identical price windows.
     candidate_map = {}
     for candidate in candidates:
         candidate_map[candidate["candidate_id"]] = candidate
     candidates = sorted(candidate_map.values(), key=lambda row: (row.get("source_name", ""), row.get("campaign_title", ""), row.get("candidate_id", "")))
-    _write_csv(CANDIDATES_CSV, candidates, CANDIDATE_FIELDS)
-    prior = _load_old_review(REVIEW_XLSX)
-    make_review_workbook(candidates, REVIEW_XLSX, prior)
-    import_stats = import_reviewed_prices(REVIEW_XLSX, OVERRIDES_CSV)
-    cache_usable, cache_missing_or_stale = _cache_coverage(images, old_cache)
+    _write_csv(candidates_path, candidates, CANDIDATE_FIELDS)
+    prior = _load_old_review(review_path)
+    make_review_workbook(candidates, review_path, prior)
+    if review_is_complete:
+        import_stats = import_reviewed_prices(REVIEW_XLSX, OVERRIDES_CSV)
+    else:
+        import_stats = {"active_overrides": "tidak disentuh (cakupan cache belum lengkap)"}
+
     to_process_urls = {str(record.get("image_url") or "") for record in to_process}
     reused_count = sum(
         str(record.get("image_url") or "") not in to_process_urls
@@ -2597,8 +2627,8 @@ def run_ocr(limit: int = 0, force: bool = False, backend_preference: str = "auto
         "candidate_catalog_match_count": sum(bool(r.get("matched_product_name")) for r in candidates),
         "candidate_local_name_suggestion_count": sum(bool(r.get("local_product_name_suggestion")) for r in candidates),
         "approved_override_count": import_stats.get("active_overrides", 0),
-        "cache_csv": str(CACHE_CSV), "lines_csv": str(LINES_CSV), "candidate_csv": str(CANDIDATES_CSV),
-        "review_workbook": str(REVIEW_XLSX),
+        "cache_csv": str(CACHE_CSV), "lines_csv": str(lines_path), "candidate_csv": str(candidates_path),
+        "review_workbook": str(review_path),
     }
 
 
