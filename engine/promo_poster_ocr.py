@@ -49,7 +49,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REQUEST_TIMEOUT = (5, 15)
 OCR_PIPELINE_VERSION = "poster-ocr-v2.1-fast-crop"
 # Parser-only upgrades can rebuild price candidates from cached OCR boxes without re-running ONNX.
-CANDIDATE_PIPELINE_VERSION = "poster-ocr-v2.5-offer-taxonomy-cross-source"
+CANDIDATE_PIPELINE_VERSION = "poster-ocr-v2.6-offer-context"
 # Bound per-image crop inference time. Full-page OCR remains the primary pass;
 # color crops are only a rescue path for labels whose price was not read.
 MAX_COLOR_PRICE_CROPS_PER_IMAGE = 6
@@ -127,6 +127,23 @@ MULTIBUY_OFFER_RE = re.compile(
     r"buy\s*\d+\s*get\s*\d+|ambil\s*\d+\s*gratis\s*\d+|"
     r"beli\s*\d+\s*gratis\s*\d+)\b"
 )
+# Retailer "tebus murah" terms must be retained as offer conditions, not merged
+# into product names. OCR often drops the space in DIGITALSTIKER or misreads
+# "dengan" as "dengon".
+TEBUS_MURAH_OFFER_RE = re.compile(
+    r"(?i)\btebus\s+murah(?:\s+(?:dengan|dengon|pakai|menggunakan)\s+"
+    r"\d{1,2}\s*(?:digital\s*)?stiker)?"
+)
+TEBUS_MURAH_GENERIC_RE = re.compile(
+    r"(?i)\b(?:produk\s+di\s*bawah\s+ini|peralatan\s+dapur\s+praktis|"
+    r"koleksi\s+kebutuhan\s+dapur\s+praktis|segarnya\s+juara|"
+    r"dipilih\s+pakai\s+hati|dapatkan\s+mulai\s+dari)\b"
+)
+MEMBER_PRICE_LABEL_RE = re.compile(
+    r"(?i)\b(?:khusus\s+member|harga\s+(?:khusus\s+)?member|member\s+price)\b"
+)
+REGION_LIST_MARKER_RE = re.compile(r"(?i)\b(?:p\.?\s*jowo|p\.?\s*jawa|kec\.?|kecamatan)\b")
+REGION_TRAILER_RE = re.compile(r"(?i)\s*[\(\[]?\s*kec(?:\.|amatan)?\s+[A-Za-z]{2,}[\)\]]?\s*$")
 # Purchase quantity may be stated in the offer title ("BELI 5 INDOMIE") or
 # attached to the price itself ("Rp15.300/5Pcs"). These are distinct from
 # packaging claims such as "BUY 1 EXTRA 1", which must never become retailer terms.
@@ -145,7 +162,7 @@ MEMBER_CUE_RE = re.compile(r"(?i)\b(?:member|kartu\s+member|member\s+alfamart|al
 MINIMUM_SPEND_RE = re.compile(r"(?i)\b(?:min(?:imal|imum)?(?:\s+belanja)?|belanja\s+min(?:imal|imum)?|min(?:imal|imum)?\s+transaksi)\b")
 MEMBER_DISCOUNT_RE = re.compile(r"(?i)\b(?:potongan(?:\s+harga)?|diskon|discount|cashback|cash\s*back)\b")
 REGIONAL_PLACE_RE = re.compile(
-    r"(?i)\b(?:sumatera|sumatra|kalimantan|sulawesi|jawa|bali|nusa\s+tenggara|ntt|ntb|maluku|papua|"
+    r"(?i)\b(?:sumatera|sumatra|kalimantan|sulawesi|jawa|jowo|bali|lombok|nusa\s+tenggara|ntt|ntb|maluku|papua|batam|"
     r"ambon|kupang|ternate|jayapura|abepura|medan|palembang|pekanbaru|padang|jambi|bengkulu|bandar\s+lampung|"
     r"makassar|manado|kendari|gorontalo|mamuju|pontianak|banjarmasin|samarinda|tarakan|denpasar|mataram|"
     r"surabaya|semarang|yogyakarta|jakarta|bandung|tangerang|bekasi|depok|bogor|cirebon|solo|malang)\b"
@@ -255,7 +272,9 @@ IMAGE_SUMMARY_FIELDS = [
     "source_name", "campaign_title", "article_url", "image_url", "ocr_status", "ocr_backend",
     "ocr_pipeline_version", "processed_at", "line_count", "candidate_count", "candidate_price_pair_count",
     "candidate_catalog_match_count", "candidate_local_name_suggestion_count", "candidate_local_name_visible_count",
-    "candidate_product_name_quarantined_count", "candidate_payment_context_count",
+    "candidate_product_name_quarantined_count", "candidate_raw_name_withheld_count",
+    "candidate_payment_context_count", "candidate_member_price_count", "candidate_member_discount_count",
+    "candidate_minimum_spend_count", "candidate_regional_price_context_count", "candidate_tebus_murah_count",
     "candidate_discount_ambiguous_count", "candidate_purchase_condition_ambiguous_count",
     "candidate_high_review_priority_count", "candidate_cross_source_variation_count", "image_result_status",
 ]
@@ -869,7 +888,21 @@ def _extract_purchase_condition(text: str) -> str:
     segments = [seg.strip() for seg in re.split(r"\s*(?:\||\r?\n)\s*", str(text or "")) if seg.strip()]
     offer_phrases: list[str] = []
     suffix_quantities: list[int] = []
-    for segment in segments:
+    for segment_index, segment in enumerate(segments):
+        # Capture tebus-murah offer text as a condition. Avoid turning the same
+        # words into part of the SKU title later in _clean_local_product_line.
+        tebus = TEBUS_MURAH_OFFER_RE.search(segment)
+        if tebus:
+            # OCR often emits "TEBUS MURAH", "dengon", and "5 DIGITALSTIKER"
+            # as three adjacent boxes. Join a short look-ahead only for the
+            # already-detected offer marker so we do not scan arbitrary copy.
+            local_offer_text = " ".join(segments[segment_index:segment_index + 4])
+            tebus_local = TEBUS_MURAH_OFFER_RE.search(local_offer_text) or tebus
+            phrase = re.sub(r"\s+", " ", tebus_local.group(0)).strip()
+            phrase = re.sub(r"(?i)\bdengon\b", "dengan", phrase)
+            phrase = re.sub(r"(?i)digitalstiker", "digital stiker", phrase)
+            if phrase:
+                offer_phrases.append(phrase[:100].capitalize())
         # Explicit multi-buy/gift terms are more specific than a bare quantity.
         multi = MULTIBUY_OFFER_RE.search(segment)
         if multi:
@@ -934,6 +967,8 @@ def _is_regional_pricing_segment(text: object) -> bool:
         return False
     regions = _unique_region_names(raw)
     has_price = bool(extract_prices(raw))
+    if REGION_LIST_MARKER_RE.search(raw) and regions:
+        return True
     if len(regions) >= 2 and (has_price or MEMBER_CUE_RE.search(raw) or REGIONAL_PRICING_CUE_RE.search(raw)):
         return True
     if REGIONAL_RESTRICTION_RE.search(raw) and regions:
@@ -951,6 +986,19 @@ def _is_campaign_legal_line(text: object) -> bool:
     raw = str(text or "").strip()
     if not raw:
         return False
+    tebus = TEBUS_MURAH_OFFER_RE.search(raw)
+    if tebus:
+        prefix = raw[:tebus.start()].strip(" ,;/|:-")
+        suffix = raw[tebus.end():].strip(" ,;/|:-")
+        prefix_key = identity_key(prefix)
+        # Generic headings such as "Bisa Tebus Murah Produk dibawah ini" are
+        # campaign copy. A real product prefix/suffix is left for the cleaner.
+        if prefix_key in {"", "bisa", "produk", "bisa produk", "produk dibawah ini"} and (
+            not suffix or TEBUS_MURAH_GENERIC_RE.search(suffix) or re.search(r"(?i)^produk\s+di\s*bawah", suffix)
+        ):
+            return True
+        if not prefix and TEBUS_MURAH_GENERIC_RE.search(suffix):
+            return True
     if CAMPAIGN_LEGAL_RE.search(raw):
         return True
     if MEMBER_CUE_RE.search(raw) and (MEMBER_DISCOUNT_RE.search(raw) or MINIMUM_SPEND_RE.search(raw)):
@@ -963,8 +1011,8 @@ def _is_campaign_legal_line(text: object) -> bool:
 
 
 _REGION_PREFIX_RE = re.compile(
-    r"(?i)^\s*(?:(?:sumatera|sumatra|kalimantan|sulawesi|jawa|bali|nusa\s+tenggara|ntt|ntb|maluku|papua|"
-    r"ambon|kupang|ternate|jayapura|abepura|medan|palembang|pekanbaru|padang|jambi|bengkulu|bandar\s+lampung|"
+    r"(?i)^\s*(?:(?:p\.?\s*jowo|p\.?\s*jawa|sumatera|sumatra|kalimantan|sulawesi|jawa|jowo|bali|lombok|nusa\s+tenggara|ntt|ntb|maluku|papua|"
+    r"batam|ambon|kupang|ternate|jayapura|abepura|medan|palembang|pekanbaru|padang|jambi|bengkulu|bandar\s+lampung|"
     r"makassar|manado|kendari|gorontalo|mamuju|pontianak|banjarmasin|samarinda|tarakan|denpasar|mataram|"
     r"surabaya|semarang|yogyakarta|jakarta|bandung|tangerang|bekasi|depok|bogor|cirebon|solo|malang)"
     r"[\s,;/|:-]*){2,}"
@@ -978,6 +1026,7 @@ def _strip_region_list_prefix(text: object) -> str:
     if len(matches) < 2:
         return raw
     cleaned = _REGION_PREFIX_RE.sub("", raw, count=1).strip(" ,;/|:-")
+    cleaned = REGION_TRAILER_RE.sub("", cleaned).strip(" ,;/|:-()[]")
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -1027,18 +1076,24 @@ def classify_promo_context(text: str) -> dict:
     member_discount = ""
     minimum_spend = ""
     regional_contexts = []
+    regional_price_segments = []
+    adjacent_member_prices = []
     member_classification = "TIDAK_TERDETEKSI"
-    member_segment_seen = False
 
-    for segment in segments:
+    for segment_index, segment in enumerate(segments):
         values = _amounts_for_segment(segment)
         has_member = bool(MEMBER_CUE_RE.search(segment))
         has_minimum = bool(MINIMUM_SPEND_RE.search(segment))
         has_member_discount = bool(MEMBER_DISCOUNT_RE.search(segment))
         regional = _is_regional_pricing_segment(segment)
 
-        if regional and values:
+        # Keep region-only conditions available to review even when no price
+        # appears in the same OCR line. A regional-price classification, however,
+        # requires a numeric amount in that regional segment.
+        if regional:
             regional_contexts.append(segment)
+            if values:
+                regional_price_segments.append(segment)
         if has_minimum and values and not minimum_spend:
             # Require a single amount in this minimum-spend segment; multiple values
             # can represent a range or neighboring OCR fragments and remain ambiguous.
@@ -1051,7 +1106,34 @@ def classify_promo_context(text: str) -> dict:
         if has_member and not has_minimum and not has_member_discount and not regional and len(values) == 1 and not member_price:
             member_price = values[0]
 
-    if regional_contexts:
+        # OCR often separates the label and amount into adjacent boxes, e.g.
+        # "172.900 | KHUSUS MEMBER | Rp" or "KHUSUS MEMBER | Rp | 37.500".
+        # Associate only an explicit member-price label with exactly one unique
+        # nearby amount, and skip any neighborhood containing conflicting price
+        # roles, minimum-spend, discount, or regional terms.
+        if MEMBER_PRICE_LABEL_RE.search(segment) and not (has_minimum or has_member_discount or regional):
+            nearby_indices = range(max(0, segment_index - 2), min(len(segments), segment_index + 3))
+            nearby_segments = [segments[i] for i in nearby_indices]
+            conflicting_label = any(
+                LABEL_NORMAL_RE.search(item) or LABEL_PROMO_RE.search(item)
+                or MINIMUM_SPEND_RE.search(item) or MEMBER_DISCOUNT_RE.search(item)
+                or _is_regional_pricing_segment(item)
+                for item in nearby_segments
+            )
+            nearby_prices = list(dict.fromkeys(
+                value
+                for item in nearby_segments
+                for value in _amounts_for_segment(item)
+            ))
+            if not conflicting_label and len(nearby_prices) == 1:
+                adjacent_member_prices.append(nearby_prices[0])
+
+    if not member_price and adjacent_member_prices:
+        unique_adjacent_member_prices = set(adjacent_member_prices)
+        if len(unique_adjacent_member_prices) == 1:
+            member_price = next(iter(unique_adjacent_member_prices))
+
+    if regional_price_segments:
         member_classification = "HARGA_REGIONAL"
         member_price = ""  # regional list prices must never be flattened into one member price
     elif minimum_spend:
@@ -1267,8 +1349,8 @@ def _cluster_price_anchor_lines(lines: list[dict], width: int, height: int) -> l
 def _clean_local_product_line(text: str) -> str:
     """Clean an OCR line before using it as a SKU title suggestion.
 
-    Besides price/discount labels, v2.5 removes known legal/footer copy and a
-    leading list of regional place names that OCR sometimes joins to a product.
+    Besides price/discount labels, this cleaner removes known legal/footer copy,
+    tebus-murah mechanics, and regional prefixes that OCR sometimes joins to a product.
     This is conservative: regional/legal text remains available in the raw OCR
     context for audit; it is only excluded from the product-name hypothesis.
     """
@@ -1277,6 +1359,31 @@ def _clean_local_product_line(text: str) -> str:
         return ""
     if _is_campaign_legal_line(cleaned):
         return ""
+
+    # Remove the tebus-murah mechanism from the product title while preserving
+    # a real product name on either side. Examples:
+    #   "SAUCEPAN TEBUS MURAH dengan 5 DIGITALSTIKER" -> "SAUCEPAN"
+    #   "Tebus Murah Telur Ayam Negeri isi 10's" -> "Telur Ayam Negeri isi 10's"
+    # Generic headers remain empty instead of becoming fake SKU names.
+    tebus = TEBUS_MURAH_OFFER_RE.search(cleaned)
+    if tebus:
+        prefix = cleaned[:tebus.start()].strip(" ,;/|:-")
+        suffix = cleaned[tebus.end():].strip(" ,;/|:-")
+        prefix_is_campaign_copy = bool(re.search(
+            r"(?i)\b(?:dapat|tambahan|potongan|belanja|minimal|minimum|syarat|ketentuan|"
+            r"berlaku|voucher|harga|promo|tebus|stiker|digital)\b",
+            prefix,
+        ))
+        prefix_is_generic = identity_key(prefix) in {"", "bisa", "produk", "bisa produk", "harga", "pwp"}
+        if prefix and not prefix_is_generic and not prefix_is_campaign_copy:
+            cleaned = prefix
+        elif suffix and not TEBUS_MURAH_GENERIC_RE.search(suffix) and not re.search(r"(?i)^produk\s+di\s*bawah", suffix):
+            cleaned = suffix
+        else:
+            return ""
+        if TEBUS_MURAH_GENERIC_RE.search(cleaned):
+            return ""
+
     # A regional price/list line is context, not a SKU title. If a list of place
     # names was concatenated before a real product title, strip only that prefix.
     if _is_regional_pricing_segment(cleaned):
@@ -2146,14 +2253,20 @@ def _candidate_metrics(candidates: list[dict]) -> dict:
         "candidate_catalog_match_count": sum(bool(r.get("matched_product_name")) for r in candidates),
         "candidate_local_name_suggestion_count": sum(bool(r.get("local_product_name_suggestion")) for r in candidates),
         "review_local_name_suggestion_count": sum(bool(_visible_local_suggestion(r)) for r in candidates),
+        # Hard quarantine and retained raw-name evidence are separate concepts:
+        # a raw title may be shown in the review sheet even when a cleaned title
+        # is still available, so the counts should not be conflated.
         "candidate_product_name_quarantined_count": sum(str(r.get("local_product_name_suggestion_status") or "").upper().startswith("DIKARANTINA") for r in candidates),
+        "candidate_raw_name_withheld_count": sum(bool(str(r.get("local_product_name_suggestion_raw") or "").strip()) for r in candidates),
         "candidate_payment_context_count": sum(int(r.get("payment_campaign_cue_count") or 0) > 0 for r in candidates),
         "candidate_discount_ambiguous_count": sum(str(r.get("discount_claim_source") or "").upper() == "KLAIM_DISKON_AMBIGU" for r in candidates),
         "candidate_purchase_condition_ambiguous_count": sum(str(r.get("purchase_condition") or "").upper().startswith("AMBIGU") for r in candidates),
         "candidate_high_review_priority_count": sum(str(r.get("review_priority") or "").upper() == "TINGGI" for r in candidates),
+        "candidate_member_price_count": sum(bool(r.get("member_price_candidate")) for r in candidates),
         "candidate_member_discount_count": sum(str(r.get("member_offer_classification") or "") == "POTONGAN_MEMBER" for r in candidates),
         "candidate_minimum_spend_count": sum(str(r.get("member_offer_classification") or "") == "MINIMUM_BELANJA" for r in candidates),
         "candidate_regional_price_context_count": sum(bool(r.get("regional_price_context")) for r in candidates),
+        "candidate_tebus_murah_count": sum(bool(TEBUS_MURAH_OFFER_RE.search(str(r.get("purchase_condition") or ""))) for r in candidates),
         "candidate_cross_source_variation_count": sum(str(r.get("cross_source_price_variation_status") or "").startswith("VARIASI_HARGA") for r in candidates),
     }
 
@@ -2265,7 +2378,13 @@ def _image_summary_rows(
             "candidate_local_name_suggestion_count": sum(bool(c.get("local_product_name_suggestion")) for c in image_candidates),
             "candidate_local_name_visible_count": sum(bool(_visible_local_suggestion(c)) for c in image_candidates),
             "candidate_product_name_quarantined_count": sum(str(c.get("local_product_name_suggestion_status") or "").upper().startswith("DIKARANTINA") for c in image_candidates),
+            "candidate_raw_name_withheld_count": sum(bool(str(c.get("local_product_name_suggestion_raw") or "").strip()) for c in image_candidates),
             "candidate_payment_context_count": sum(int(c.get("payment_campaign_cue_count") or 0) > 0 for c in image_candidates),
+            "candidate_member_price_count": sum(bool(c.get("member_price_candidate")) for c in image_candidates),
+            "candidate_member_discount_count": sum(str(c.get("member_offer_classification") or "") == "POTONGAN_MEMBER" for c in image_candidates),
+            "candidate_minimum_spend_count": sum(str(c.get("member_offer_classification") or "") == "MINIMUM_BELANJA" for c in image_candidates),
+            "candidate_regional_price_context_count": sum(bool(c.get("regional_price_context")) for c in image_candidates),
+            "candidate_tebus_murah_count": sum(bool(TEBUS_MURAH_OFFER_RE.search(str(c.get("purchase_condition") or ""))) for c in image_candidates),
             "candidate_discount_ambiguous_count": sum(str(c.get("discount_claim_source") or "").upper() == "KLAIM_DISKON_AMBIGU" for c in image_candidates),
             "candidate_purchase_condition_ambiguous_count": sum(str(c.get("purchase_condition") or "").upper().startswith("AMBIGU") for c in image_candidates),
             "candidate_high_review_priority_count": sum(str(c.get("review_priority") or "").upper() == "TINGGI" for c in image_candidates),
