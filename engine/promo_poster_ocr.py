@@ -1939,9 +1939,26 @@ def make_price_windows(lines: list[dict], width: int, height: int) -> list[dict]
         # inspect nearby campaign lines, but those lines are not eligible SKU text.
         promo_context = classify_promo_context(" | ".join(part for part in (context, name_context, campaign_context) if part))
         display_context = " | ".join(dict.fromkeys(part for part in (context, name_context, campaign_context) if part))
-        raw_local_name_visible = raw_local_name if (
-            campaign_context and raw_local_name and identity_key(raw_local_name) != identity_key(local_name)
-        ) else ""
+        # Preserve a useful audit trail whenever campaign copy was adjacent to
+        # the product-title region. The active SKU suggestion stays cleaned;
+        # this raw field records what was removed/nearby so reviewers can trace
+        # why a title was separated. Previously this became empty when the
+        # raw title helper had already cleaned the campaign wording and thus
+        # produced the same identity as the safe local name.
+        raw_local_name_visible = ""
+        if campaign_context:
+            if raw_local_name and identity_key(raw_local_name) != identity_key(local_name):
+                raw_local_name_visible = raw_local_name
+            elif campaign_lines:
+                raw_audit_parts = []
+                if raw_local_name:
+                    raw_audit_parts.append(raw_local_name)
+                raw_audit_parts.extend(
+                    str(line.get("text") or "").strip()
+                    for line in campaign_lines
+                    if str(line.get("text") or "").strip()
+                )
+                raw_local_name_visible = " | ".join(dict.fromkeys(raw_audit_parts))
         signature = json.dumps([context.casefold(), bucket_x, bucket_y, parsed["prices"]], ensure_ascii=False, sort_keys=True)
         windows.append({
             # Keep the public context field inclusive for callers/tests/review;
